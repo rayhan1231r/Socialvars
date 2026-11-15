@@ -1,45 +1,13 @@
-import React, { createContext, useContext, useEffect, useMemo, useState } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  createUserWithEmailAndPassword,
-  deleteUser,
-  onAuthStateChanged,
-  sendEmailVerification,
-  sendPasswordResetEmail,
-  signInWithEmailAndPassword,
-  signInWithPopup,
-  signOut,
-  type User as FirebaseUser,
-} from 'firebase/auth';
-import {
-  collection,
-  deleteDoc,
-  doc,
-  getDoc,
-  onSnapshot,
-  orderBy,
-  query,
-  runTransaction,
-  serverTimestamp,
-  setDoc,
-  updateDoc,
-  where,
-} from 'firebase/firestore';
-import { getDownloadURL, ref, uploadBytes } from 'firebase/storage';
-import {
-  auth,
-  db,
-  googleProvider,
-  handleFirestoreError,
-  OperationType,
-  storage,
-  validateFirestoreConnection,
-} from '../firebase';
-import {
+  DEFAULT_STICKERS,
+  INITIAL_BROADCASTS,
   INITIAL_CHATS,
   INITIAL_COMMENTS,
   INITIAL_CREATORS,
   INITIAL_FRIEND_REQUESTS,
   INITIAL_MESSAGES,
+  INITIAL_NOTES,
   INITIAL_NOTIFICATIONS,
   INITIAL_POSTS,
   INITIAL_STORIES,
@@ -50,39 +18,51 @@ import type {
   ActiveModalOrSubscreen,
   AppLanguage,
   AppNotification,
+  BroadcastChannel,
+  CallState,
   Chat,
   ChatMessage,
+  ChatThemeConfig,
   FriendRequest,
   MainTab,
   MediaType,
+  NicknameFontStyle,
+  NoteItem,
   Post,
   PostComment,
+  PostVisibility,
   ReportItem,
+  SavedLoginEntry,
+  StickerItem,
   Story,
   ThemeMode,
   UserPrivate,
   UserPublic,
 } from '../types/social';
 import { TRANSLATIONS, type TranslationBundle } from '../utils/i18n';
-import {
-  extractHashtags,
-  isStoryActive,
-  isValidBio,
-  isValidCommentText,
-  isValidDisplayName,
-  isValidPostCaption,
-  isValidUsername,
-  isValidWebsiteUrl,
-  mapFirebaseAuthError,
-  normalizeUsername,
-  normalizeWebsiteUrl,
-} from '../utils/validation';
+import { MAX_BIO_LENGTH } from '../utils/validation';
+import { validateFirestoreConnection } from '../firebase';
 
-export type AuthStage = 'splash' | 'auth' | 'verify_email' | 'onboarding' | 'app';
+export type AuthStage = 'splash' | 'app';
+
+export class ApiError extends Error {
+  status: number;
+  code?: string;
+  existingEmail?: string;
+
+  constructor(message: string, status: number, code?: string, existingEmail?: string) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+    this.code = code;
+    this.existingEmail = existingEmail;
+  }
+}
 
 export interface ProfileUpdatePayload {
   username?: string;
   displayName?: string;
+  nicknameFont?: NicknameFontStyle;
   bio?: string;
   pronouns?: string;
   website?: string;
@@ -92,12 +72,30 @@ export interface ProfileUpdatePayload {
   isPrivate?: boolean;
 }
 
+interface BackendStateResponse {
+  currentUser: UserPublic | null;
+  userPrivate: UserPrivate | null;
+  creators: UserPublic[];
+  posts: Post[];
+  commentsByPost: Record<string, PostComment[]>;
+  stories: Story[];
+  chats: Chat[];
+  messagesByChat: Record<string, ChatMessage[]>;
+  notes: NoteItem[];
+  stickers: StickerItem[];
+  favoriteStickerIds: string[];
+  broadcastChannels: BroadcastChannel[];
+  followingIds: string[];
+  followerIds: string[];
+  friendRequests: FriendRequest[];
+  notifications: AppNotification[];
+}
+
 interface SocialVerseContextValue {
   stage: AuthStage;
   setStage: (s: AuthStage) => void;
-  firebaseUser: FirebaseUser | null;
+  sessionToken: string | null;
   isAuthenticated: boolean;
-  isPreviewMode: boolean;
   authModalOpen: boolean;
   authModalReason: string | null;
   openAuthModal: (reason?: string) => void;
@@ -105,6 +103,11 @@ interface SocialVerseContextValue {
   requireAuth: (reason?: string) => boolean;
   isLocked: boolean;
   unlockBiometric: () => void;
+  pendingPhotoSetup: boolean;
+  setPendingPhotoSetup: (v: boolean) => void;
+  savedLogins: SavedLoginEntry[];
+  removeSavedLogin: (uid: string) => void;
+
   currentUser: UserPublic;
   userPrivate: UserPrivate;
   language: AppLanguage;
@@ -124,6 +127,7 @@ interface SocialVerseContextValue {
   setActiveChatId: (id: string | null) => void;
   reportTarget: { type: 'post' | 'user' | 'story' | 'comment'; id: string; label: string } | null;
   openReportModal: (type: 'post' | 'user' | 'story' | 'comment', id: string, label: string) => void;
+
   creators: UserPublic[];
   posts: Post[];
   visiblePostLimit: number;
@@ -132,6 +136,10 @@ interface SocialVerseContextValue {
   stories: Story[];
   chats: Chat[];
   messagesByChat: Record<string, ChatMessage[]>;
+  notes: NoteItem[];
+  stickers: StickerItem[];
+  favoriteStickerIds: string[];
+  broadcastChannels: BroadcastChannel[];
   friendRequests: FriendRequest[];
   followingIds: string[];
   followerIds: string[];
@@ -140,114 +148,249 @@ interface SocialVerseContextValue {
   toastMessage: string | null;
   showToast: (msg: string) => void;
 
-  // Auth actions
-  enterPreviewMode: () => void;
-  signInWithGoogle: () => Promise<void>;
-  signInWithEmail: (email: string, password: string) => Promise<void>;
-  registerWithEmail: (email: string, password: string) => Promise<void>;
-  resendVerificationEmail: () => Promise<void>;
-  sendPasswordReset: (email: string) => Promise<void>;
-  completeOnboarding: (payload: {
-    username: string;
+  // Calls (WebRTC + WebSocket signaling)
+  activeCall: CallState | null;
+  localStream: MediaStream | null;
+  remoteStream: MediaStream | null;
+  startCall: (chatId: string, peerUid: string, mode: 'voice' | 'video') => Promise<void>;
+  acceptIncomingCall: () => Promise<void>;
+  declineIncomingCall: () => void;
+  endCall: () => void;
+  toggleCallMute: () => void;
+  toggleCallCamera: () => void;
+
+  // Auth Actions (Email OTP + Username/Email Login + Saved Logins)
+  sendOtp: (email: string, purpose: 'signup' | 'reset' | '2fa') => Promise<{ sentViaSmtp: boolean; devOtpCode?: string }>;
+  verifyOtp: (email: string, code: string, purpose: 'signup' | 'reset' | '2fa') => Promise<string>;
+  checkUsernameAvailability: (username: string, excludeUid?: string) => Promise<{ available: boolean; normalized: string; reason?: string }>;
+  completeSignupRegistration: (payload: {
+    verificationToken: string;
+    email: string;
+    password: string;
     displayName: string;
-    bio: string;
-    photoUrl: string;
-    interests: string[];
-    isPrivate: boolean;
-  }) => Promise<string | null>;
+    nicknameFont: NicknameFontStyle;
+    username: string;
+    photoUrl?: string;
+    saveLogin?: boolean;
+  }) => Promise<void>;
+  loginWithIdentifier: (
+    identifier: string,
+    password: string,
+    saveLogin?: boolean
+  ) => Promise<{ requires2fa?: boolean; email?: string; sentViaSmtp?: boolean; devOtpCode?: string }>;
+  verifyTwoFactorLogin: (email: string, code: string, saveLogin?: boolean) => Promise<void>;
+  loginWithSavedAccount: (entry: SavedLoginEntry) => Promise<void>;
+  changePassword: (currentPassword: string, newPassword: string) => Promise<void>;
+  resetPasswordWithOtp: (verificationToken: string, email: string, newPassword: string) => Promise<void>;
+  deactivateAccount: (days: number) => Promise<void>;
   logout: () => Promise<void>;
   deleteAccount: () => Promise<void>;
 
-  // Feed & Story actions
+  // Feed, Reels & Stories
   createPost: (payload: {
     caption: string;
     mediaUrls: string[];
+    coverUrl?: string;
     mediaType: MediaType;
-    visibility: 'public' | 'followers';
+    visibility: PostVisibility;
   }) => Promise<void>;
   editPost: (postId: string, caption: string) => Promise<void>;
   deletePost: (postId: string) => Promise<void>;
-  toggleLikePost: (postId: string) => void;
-  toggleSavePost: (postId: string) => void;
-  sharePost: (postId: string) => void;
-  addComment: (postId: string, text: string, parentCommentId?: string) => void;
+  toggleLikePost: (postId: string) => Promise<void>;
+  likePostIfNeeded: (postId: string) => Promise<void>;
+  toggleSavePost: (postId: string) => Promise<void>;
+  sharePost: (postId: string) => Promise<void>;
+  shareReelToInbox: (post: Post, targetUserUid: string) => Promise<void>;
+  addComment: (
+    postId: string,
+    text: string,
+    parentCommentId?: string,
+    stickerUrl?: string,
+    gifUrl?: string
+  ) => Promise<void>;
   createStory: (payload: {
     mediaType: 'photo' | 'video' | 'text';
     mediaUrl?: string;
     textContent?: string;
     privacy: 'everyone' | 'followers' | 'close_friends';
   }) => Promise<void>;
-  reactToStory: (storyId: string, emoji: string) => void;
-  replyToStory: (storyId: string, text: string) => void;
-  deleteStory: (storyId: string) => void;
+  reactToStory: (storyId: string, emoji: string) => Promise<void>;
+  replyToStory: (storyId: string, text: string) => Promise<void>;
+  deleteStory: (storyId: string) => Promise<void>;
   muteStoryAuthor: (authorId: string) => void;
 
-  // Messaging actions
+  // Notes & Stickers
+  publishNote: (text: string) => Promise<void>;
+  deleteMyNote: () => Promise<void>;
+  toggleLikeNote: (noteId: string) => Promise<void>;
+  createSticker: (label: string, imageUrl: string, kind?: 'sticker' | 'gif') => Promise<StickerItem | null>;
+  toggleFavoriteSticker: (stickerId: string, imageUrl?: string, label?: string) => Promise<void>;
+
+  // Messaging, Themes & Groups
+  typingByChat: Record<string, string[]>;
+  sendTypingSignal: (chatId: string) => void;
   sendMessage: (
     chatId: string,
     payload: {
-      type: 'text' | 'voice' | 'image' | 'video' | 'file';
+      type: ChatMessage['type'];
       text?: string;
       mediaUrl?: string;
+      stickerUrl?: string;
+      sharedPostId?: string;
+      sharedPostCaption?: string;
+      sharedPostThumb?: string;
+      sharedPostAuthor?: string;
       fileName?: string;
       durationMs?: number;
       replyToId?: string;
       replyPreview?: string;
+      forwarded?: boolean;
     }
-  ) => void;
-  reactToMessage: (chatId: string, messageId: string, emoji: string) => void;
-  deleteMessage: (chatId: string, messageId: string) => void;
-  createDirectOrGroupChat: (title: string, participantUids: string[], type: 'direct' | 'group') => string | null;
+  ) => Promise<void>;
+  editMessage: (chatId: string, messageId: string, text: string) => Promise<void>;
+  reactToMessage: (chatId: string, messageId: string, emoji: string) => Promise<void>;
+  starMessage: (chatId: string, messageId: string) => Promise<void>;
+  pinMessage: (chatId: string, messageId: string | null) => Promise<void>;
+  forwardMessage: (chatId: string, messageId: string, targetChatId: string) => Promise<void>;
+  updateChatPreferences: (
+    chatId: string,
+    prefs: {
+      pinned?: boolean;
+      muted?: boolean;
+      archived?: boolean;
+      unread?: boolean;
+      disappearingMode?: 'off' | '24h' | '7d';
+    }
+  ) => Promise<void>;
+  deleteMessage: (chatId: string, messageId: string) => Promise<void>;
+  createDirectOrGroupChat: (
+    title: string,
+    participantUids: string[],
+    type: 'direct' | 'group'
+  ) => Promise<string | null>;
+  updateChatTheme: (chatId: string, theme: ChatThemeConfig) => Promise<void>;
+  updateChatNickname: (chatId: string, targetUid: string, nickname: string) => Promise<void>;
+  addGroupMember: (chatId: string, targetUid: string) => Promise<string>;
+  approveGroupMember: (chatId: string, targetUid: string, accept: boolean) => Promise<void>;
+  removeGroupMember: (chatId: string, targetUid: string) => Promise<void>;
+  updateGroupRole: (
+    chatId: string,
+    targetUid: string,
+    action: 'promote_admin' | 'demote_admin' | 'transfer_owner'
+  ) => Promise<void>;
+  updateGroupSettings: (chatId: string, updates: { title?: string; requireAddApproval?: boolean }) => Promise<void>;
 
-  // Social Graph & Profile actions
-  toggleFollow: (targetUid: string) => void;
-  respondToFriendRequest: (requestId: string, accept: boolean) => void;
-  removeFollower: (followerUid: string) => void;
-  blockUser: (targetUid: string) => void;
-  unblockUser: (targetUid: string) => void;
+  // Broadcast Channels
+  createBroadcastChannel: (title: string, description: string) => Promise<void>;
+  toggleFollowBroadcast: (channelId: string) => Promise<void>;
+  assignBroadcastRole: (
+    channelId: string,
+    targetUid: string,
+    role: 'admin' | 'moderator' | 'collaborator' | 'follower'
+  ) => Promise<void>;
+  sendBroadcastMessage: (channelId: string, text: string, mediaUrl?: string) => Promise<void>;
+  reactBroadcastMessage: (
+    channelId: string,
+    msgId: string,
+    opts: { like?: boolean; emoji?: string }
+  ) => Promise<void>;
+
+  // Social Graph, Profile & Moderation
+  toggleFollow: (targetUid: string) => Promise<void>;
+  respondToFriendRequest: (requestId: string, accept: boolean) => Promise<void>;
+  removeFollower: (followerUid: string) => Promise<void>;
+  blockUser: (targetUid: string) => Promise<void>;
+  unblockUser: (targetUid: string) => Promise<void>;
   updateProfile: (updates: ProfileUpdatePayload) => Promise<string | null>;
+  uploadImageDataUrl: (file: File, maxDim?: number) => Promise<string>;
   uploadProfileImage: (file: File, kind: 'avatar' | 'cover') => Promise<string>;
-  updatePrivateSettings: (updates: Partial<UserPrivate>) => void;
-  markAllNotificationsRead: () => void;
-  submitReport: (reason: string) => void;
+  updatePrivateSettings: (updates: Partial<UserPrivate>) => Promise<void>;
+  markAllNotificationsRead: () => Promise<void>;
+  submitReport: (reason: string) => Promise<void>;
   callAiAssistant: (task: string, contextText: string) => Promise<{ suggestions: string[]; tip: string }>;
 }
 
 const SocialVerseContext = createContext<SocialVerseContextValue | null>(null);
 
-async function compressImageToDataUrl(file: File, maxDim: number, quality = 0.82): Promise<string> {
+const TOKEN_STORAGE_KEY = 'sv_session_token';
+const SAVED_LOGINS_KEY = 'sv_saved_logins';
+
+export async function compressImageToDataUrl(
+  file: File,
+  maxDim = 960,
+  quality = 0.82
+): Promise<string> {
+  if (file.type === 'image/gif') {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result || ''));
+      reader.onerror = () => reject(new Error('Failed to read GIF'));
+      reader.readAsDataURL(file);
+    });
+  }
   return new Promise((resolve, reject) => {
     const objectUrl = URL.createObjectURL(file);
     const img = new Image();
     img.onload = () => {
       try {
-        const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
-        const w = Math.max(1, Math.round(img.width * scale));
-        const h = Math.max(1, Math.round(img.height * scale));
+        const naturalW = img.naturalWidth || img.width || maxDim;
+        const naturalH = img.naturalHeight || img.height || maxDim;
+        const scale = Math.min(1, maxDim / Math.max(naturalW, naturalH));
+        const w = Math.max(1, Math.round(naturalW * scale));
+        const h = Math.max(1, Math.round(naturalH * scale));
         const canvas = document.createElement('canvas');
         canvas.width = w;
         canvas.height = h;
         const ctx = canvas.getContext('2d');
         if (!ctx) {
           URL.revokeObjectURL(objectUrl);
-          reject(new Error('Canvas context unavailable'));
+          readFileAsDataUrl(file).then(resolve).catch(reject);
           return;
         }
         ctx.drawImage(img, 0, 0, w, h);
-        const dataUrl = canvas.toDataURL('image/jpeg', quality);
+        // Use webp/jpeg so large PNG screenshots stay compact & fast to upload
+        let dataUrl = canvas.toDataURL('image/webp', quality);
+        if (!dataUrl.startsWith('data:image/webp')) {
+          dataUrl = canvas.toDataURL('image/jpeg', quality);
+        }
         URL.revokeObjectURL(objectUrl);
         resolve(dataUrl);
-      } catch (err) {
+      } catch {
         URL.revokeObjectURL(objectUrl);
-        reject(err);
+        readFileAsDataUrl(file).then(resolve).catch(reject);
       }
     };
     img.onerror = () => {
       URL.revokeObjectURL(objectUrl);
-      reject(new Error('Could not decode selected image'));
+      // Fallback for SVG / exotic image files readable directly as data URL
+      if (file.size <= 5 * 1024 * 1024) {
+        readFileAsDataUrl(file).then(resolve).catch(() => reject(new Error('Could not decode selected image')));
+      } else {
+        reject(new Error('Could not decode selected image'));
+      }
     };
     img.src = objectUrl;
   });
+}
+
+function readFileAsDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ''));
+    reader.onerror = () => reject(new Error('Could not read file'));
+    reader.readAsDataURL(file);
+  });
+}
+
+function loadSavedLogins(): SavedLoginEntry[] {
+  try {
+    const raw = localStorage.getItem(SAVED_LOGINS_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
 }
 
 export function SocialVerseProvider({ children }: { children: React.ReactNode }) {
@@ -256,11 +399,18 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
     new URLSearchParams(window.location.search).get('autostart') === '1';
 
   const [stage, setStage] = useState<AuthStage>(autostart ? 'app' : 'splash');
-  const [firebaseUser, setFirebaseUser] = useState<FirebaseUser | null>(null);
-  const [isPreviewMode, setIsPreviewMode] = useState<boolean>(true);
+  const [sessionToken, setSessionToken] = useState<string | null>(() => {
+    try {
+      return localStorage.getItem(TOKEN_STORAGE_KEY);
+    } catch {
+      return null;
+    }
+  });
+  const [savedLogins, setSavedLogins] = useState<SavedLoginEntry[]>(() => loadSavedLogins());
   const [authModalOpen, setAuthModalOpen] = useState<boolean>(false);
   const [authModalReason, setAuthModalReason] = useState<string | null>(null);
   const [isLocked, setIsLocked] = useState<boolean>(false);
+  const [pendingPhotoSetup, setPendingPhotoSetup] = useState<boolean>(false);
 
   const [currentUser, setCurrentUser] = useState<UserPublic>(INITIAL_USER);
   const [userPrivate, setUserPrivate] = useState<UserPrivate>(INITIAL_USER_PRIVATE);
@@ -271,7 +421,7 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
   const [subscreen, setSubscreenState] = useState<ActiveModalOrSubscreen>(null);
   const [viewedProfileUid, setViewedProfileUid] = useState<string | null>(null);
   const [activeStoryIndex, setActiveStoryIndex] = useState<number | null>(null);
-  const [activeChatId, setActiveChatId] = useState<string | null>(INITIAL_CHATS[0].id);
+  const [activeChatId, setActiveChatId] = useState<string | null>(null);
   const [reportTarget, setReportTarget] = useState<{
     type: 'post' | 'user' | 'story' | 'comment';
     id: string;
@@ -280,24 +430,39 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
 
   const [creators, setCreators] = useState<UserPublic[]>(INITIAL_CREATORS);
   const [posts, setPosts] = useState<Post[]>(INITIAL_POSTS);
-  const [visiblePostLimit, setVisiblePostLimit] = useState<number>(6);
+  const [visiblePostLimit, setVisiblePostLimit] = useState<number>(10);
   const [commentsByPost, setCommentsByPost] = useState<Record<string, PostComment[]>>(INITIAL_COMMENTS);
   const [stories, setStories] = useState<Story[]>(INITIAL_STORIES);
   const [chats, setChats] = useState<Chat[]>(INITIAL_CHATS);
   const [messagesByChat, setMessagesByChat] = useState<Record<string, ChatMessage[]>>(INITIAL_MESSAGES);
+  const [notes, setNotes] = useState<NoteItem[]>(INITIAL_NOTES);
+  const [stickers, setStickers] = useState<StickerItem[]>(DEFAULT_STICKERS);
+  const [favoriteStickerIds, setFavoriteStickerIds] = useState<string[]>([]);
+  const [broadcastChannels, setBroadcastChannels] = useState<BroadcastChannel[]>(INITIAL_BROADCASTS);
   const [friendRequests, setFriendRequests] = useState<FriendRequest[]>(INITIAL_FRIEND_REQUESTS);
-  const [followingIds, setFollowingIds] = useState<string[]>(['user_rafi_02']);
-  const [followerIds, setFollowerIds] = useState<string[]>(['user_rafi_02', 'user_tania_03']);
+  const [followingIds, setFollowingIds] = useState<string[]>([]);
+  const [followerIds, setFollowerIds] = useState<string[]>([]);
   const [notifications, setNotifications] = useState<AppNotification[]>(INITIAL_NOTIFICATIONS);
   const [reports, setReports] = useState<ReportItem[]>([]);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const [typingByChat, setTypingByChat] = useState<Record<string, string[]>>({});
+  const typingTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+  const lastTypingSentRef = useRef<Record<string, number>>({});
 
-  const isAuthenticated = Boolean(firebaseUser);
+  // WebRTC Call State
+  const [activeCall, setActiveCall] = useState<CallState | null>(null);
+  const [localStream, setLocalStream] = useState<MediaStream | null>(null);
+  const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
+  const peerConnRef = useRef<RTCPeerConnection | null>(null);
+  const pendingOfferRef = useRef<{ fromUid: string; sdp: RTCSessionDescriptionInit } | null>(null);
+  const wsRef = useRef<WebSocket | null>(null);
+
+  const isAuthenticated = Boolean(sessionToken && currentUser.uid);
   const t = useMemo(() => TRANSLATIONS[language], [language]);
 
-  const showToast = (msg: string) => {
+  const showToast = useCallback((msg: string) => {
     setToastMessage(msg);
-  };
+  }, []);
 
   useEffect(() => {
     if (!toastMessage) return;
@@ -307,25 +472,219 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
 
   useEffect(() => {
     const root = document.documentElement;
-    if (theme === 'dark') {
-      root.classList.add('dark');
-    } else {
-      root.classList.remove('dark');
-    }
+    if (theme === 'dark') root.classList.add('dark');
+    else root.classList.remove('dark');
   }, [theme]);
 
-  useEffect(() => {
-    validateFirestoreConnection();
-  }, []);
-
-  // Instagram-style 2.3s splash loading -> directly opens Home Feed in browse preview mode
+  // Brief splash loading on initial launch -> Home
   useEffect(() => {
     if (stage !== 'splash') return;
     const timer = setTimeout(() => {
       setStage((prev) => (prev === 'splash' ? 'app' : prev));
-    }, 2300);
+    }, 1100);
     return () => clearTimeout(timer);
   }, [stage]);
+
+  const upsertSavedLogin = useCallback(
+    (user: UserPublic, email: string, token: string, shouldSave = true) => {
+      if (!shouldSave) return;
+      setSavedLogins((prev) => {
+        const entry: SavedLoginEntry = {
+          uid: user.uid,
+          username: user.username,
+          displayName: user.displayName,
+          email,
+          photoUrl: user.photoUrl,
+          sessionToken: token,
+          savedAt: new Date().toISOString(),
+        };
+        const next = [entry, ...prev.filter((item) => item.uid !== user.uid)].slice(0, 6);
+        try {
+          localStorage.setItem(SAVED_LOGINS_KEY, JSON.stringify(next));
+        } catch {
+          // ignore storage quota errors
+        }
+        return next;
+      });
+    },
+    []
+  );
+
+  const removeSavedLogin = useCallback((uid: string) => {
+    setSavedLogins((prev) => {
+      const next = prev.filter((item) => item.uid !== uid);
+      try {
+        localStorage.setItem(SAVED_LOGINS_KEY, JSON.stringify(next));
+      } catch {
+        // ignore
+      }
+      return next;
+    });
+  }, []);
+
+  const applyServerState = useCallback((data: BackendStateResponse) => {
+    if (data.currentUser) {
+      setCurrentUser(data.currentUser);
+    }
+    if (data.userPrivate) {
+      setUserPrivate(data.userPrivate);
+      if (data.userPrivate.language) setLanguageState(data.userPrivate.language);
+      if (data.userPrivate.themeMode) setThemeState(data.userPrivate.themeMode === 'dark' ? 'dark' : 'light');
+    }
+    setCreators(data.creators || []);
+    setPosts(data.posts || []);
+    setCommentsByPost(data.commentsByPost || {});
+    setStories(data.stories || []);
+    setChats(data.chats || []);
+    setMessagesByChat(data.messagesByChat || {});
+    setNotes(data.notes || []);
+    setStickers([...(data.stickers || []), ...DEFAULT_STICKERS]);
+    setFavoriteStickerIds(data.favoriteStickerIds || []);
+    setBroadcastChannels(data.broadcastChannels || []);
+    setFollowingIds(data.followingIds || []);
+    setFollowerIds(data.followerIds || []);
+    setFriendRequests(data.friendRequests || []);
+    setNotifications(data.notifications || []);
+  }, []);
+
+  const apiFetch = useCallback(
+    async <T,>(url: string, options: RequestInit = {}, overrideToken?: string): Promise<T> => {
+      const tokenToUse = overrideToken ?? sessionToken;
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+        ...((options.headers as Record<string, string>) || {}),
+      };
+      if (tokenToUse) {
+        headers.Authorization = `Bearer ${tokenToUse}`;
+      }
+      const res = await fetch(url, { ...options, headers });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        const errBody = data as { error?: string; code?: string; existingEmail?: string };
+        throw new ApiError(
+          errBody.error || `Request failed (${res.status})`,
+          res.status,
+          errBody.code,
+          errBody.existingEmail
+        );
+      }
+      return data as T;
+    },
+    [sessionToken]
+  );
+
+  const refreshState = useCallback(
+    async (overrideToken?: string) => {
+      try {
+        const data = await apiFetch<BackendStateResponse>('/api/state', {}, overrideToken);
+        if (overrideToken && !data.currentUser) {
+          localStorage.removeItem(TOKEN_STORAGE_KEY);
+          setSessionToken(null);
+          setCurrentUser(INITIAL_USER);
+          setUserPrivate(INITIAL_USER_PRIVATE);
+        }
+        applyServerState(data);
+      } catch (err) {
+        console.warn('State refresh error:', err);
+      }
+    },
+    [apiFetch, applyServerState]
+  );
+
+  useEffect(() => {
+    refreshState(sessionToken || undefined);
+  }, [sessionToken, refreshState]);
+
+  useEffect(() => {
+    void validateFirestoreConnection();
+  }, []);
+
+  const cleanupMediaAndPeer = useCallback(() => {
+    if (peerConnRef.current) {
+      peerConnRef.current.close();
+      peerConnRef.current = null;
+    }
+    setLocalStream((prev) => {
+      prev?.getTracks().forEach((tr) => tr.stop());
+      return null;
+    });
+    setRemoteStream(null);
+    pendingOfferRef.current = null;
+  }, []);
+
+  // WebSocket Real-Time Listener & Call Signaling
+  useEffect(() => {
+    if (!sessionToken) {
+      if (wsRef.current) {
+        wsRef.current.close();
+        wsRef.current = null;
+      }
+      return;
+    }
+
+    const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const ws = new WebSocket(`${proto}//${window.location.host}/ws`);
+    wsRef.current = ws;
+
+    ws.onopen = () => {
+      ws.send(JSON.stringify({ type: 'auth', token: sessionToken }));
+    };
+
+    ws.onmessage = async (event) => {
+      try {
+        const msg = JSON.parse(event.data);
+        if (msg.type === 'state:sync') {
+          if (msg.state) applyServerState(msg.state);
+          else refreshState(sessionToken);
+        } else if (msg.type === 'call:offer') {
+          pendingOfferRef.current = { fromUid: msg.fromUid, sdp: msg.sdp };
+          setActiveCall({
+            callId: msg.callId || `call_${Date.now()}`,
+            chatId: msg.chatId || '',
+            mode: msg.mode || 'voice',
+            direction: 'incoming',
+            status: 'ringing',
+            peerUid: msg.fromUid,
+            peerName: msg.fromName || 'Caller',
+            peerAvatar: msg.fromAvatar || '',
+            muted: false,
+            cameraOff: msg.mode !== 'video',
+          });
+        } else if (msg.type === 'call:answer' && peerConnRef.current) {
+          await peerConnRef.current.setRemoteDescription(new RTCSessionDescription(msg.sdp));
+          setActiveCall((prev) =>
+            prev ? { ...prev, status: 'connected', startedAt: Date.now() } : prev
+          );
+        } else if (msg.type === 'call:ice' && peerConnRef.current && msg.candidate) {
+          await peerConnRef.current.addIceCandidate(new RTCIceCandidate(msg.candidate)).catch(() => {});
+        } else if (msg.type === 'chat:typing' && msg.chatId && msg.fromUid) {
+          const key = `${msg.chatId}:${msg.fromUid}`;
+          setTypingByChat((prev) => ({
+            ...prev,
+            [msg.chatId]: Array.from(new Set([...(prev[msg.chatId] || []), msg.fromUid])),
+          }));
+          if (typingTimersRef.current[key]) clearTimeout(typingTimersRef.current[key]);
+          typingTimersRef.current[key] = setTimeout(() => {
+            setTypingByChat((prev) => ({
+              ...prev,
+              [msg.chatId]: (prev[msg.chatId] || []).filter((id) => id !== msg.fromUid),
+            }));
+          }, 2600);
+        } else if (msg.type === 'call:decline' || msg.type === 'call:end') {
+          cleanupMediaAndPeer();
+          setActiveCall(null);
+          showToast(msg.type === 'call:decline' ? 'Call declined' : 'Call ended');
+        }
+      } catch {
+        // ignore invalid packets
+      }
+    };
+
+    return () => {
+      ws.close();
+      wsRef.current = null;
+    };
+  }, [sessionToken, applyServerState, refreshState, cleanupMediaAndPeer, showToast]);
 
   const openAuthModal = (reason?: string) => {
     setAuthModalReason(reason || null);
@@ -338,7 +697,7 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
   };
 
   const requireAuth = (reason?: string): boolean => {
-    if (firebaseUser) return true;
+    if (isAuthenticated) return true;
     openAuthModal(reason);
     return false;
   };
@@ -347,186 +706,380 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
     if (
       (sub === 'edit_profile' ||
         sub === 'story_creator' ||
-        sub === 'ai_assistant') &&
-      !firebaseUser
+        sub === 'ai_assistant' ||
+        sub === 'create_sheet' ||
+        sub === 'broadcast_channel') &&
+      !isAuthenticated
     ) {
-      openAuthModal(
-        sub === 'edit_profile'
-          ? language === 'bn'
-            ? 'আপনার প্রোফাইল এডিট করতে সাইন ইন বা অ্যাকাউন্ট তৈরি করুন।'
-            : 'Sign in or create an account to edit your profile.'
-          : sub === 'story_creator'
-          ? language === 'bn'
-            ? 'নতুন স্টোরি প্রকাশ করতে সাইন ইন করুন।'
-            : 'Sign in or create an account to publish a story.'
-          : language === 'bn'
-          ? 'এআই প্রোফাইল অ্যাসিস্ট্যান্ট ব্যবহার করতে সাইন ইন করুন।'
-          : 'Sign in to use the Gemini AI Profile Assistant.'
-      );
+      openAuthModal();
       return;
     }
     setSubscreenState(sub);
   };
 
-  // Firebase Auth listener
-  useEffect(() => {
-    const unsub = onAuthStateChanged(auth, async (user) => {
-      setFirebaseUser(user);
-      if (!user) {
-        setIsPreviewMode(true);
-        return;
-      }
-
-      setIsPreviewMode(false);
-      setAuthModalOpen(false);
-      setAuthModalReason(null);
-
-      try {
-        const userRef = doc(db, 'users', user.uid);
-        const snap = await getDoc(userRef);
-        if (snap.exists()) {
-          const raw = snap.data() as Partial<UserPublic>;
-          const loadedUser: UserPublic = {
-            ...INITIAL_USER,
-            ...raw,
-            uid: user.uid,
-            username: raw.username || normalizeUsername(user.email?.split('@')[0] || `sv_${user.uid.slice(0, 6)}`),
-            displayName: raw.displayName || user.displayName || 'SocialVerse Member',
-            photoUrl: raw.photoUrl || user.photoURL || INITIAL_USER.photoUrl,
-            coverUrl: raw.coverUrl || INITIAL_USER.coverUrl,
-            bio: raw.bio ?? '',
-            pronouns: raw.pronouns ?? '',
-            website: raw.website ?? '',
-            interests: Array.isArray(raw.interests) ? raw.interests : [],
-            isPrivate: Boolean(raw.isPrivate),
-            followersCount: typeof raw.followersCount === 'number' ? raw.followersCount : 0,
-            followingCount: typeof raw.followingCount === 'number' ? raw.followingCount : 0,
-            postsCount: typeof raw.postsCount === 'number' ? raw.postsCount : 0,
-            onlineStatus: raw.onlineStatus || 'online',
-            lastSeenAt: typeof raw.lastSeenAt === 'string' ? raw.lastSeenAt : new Date().toISOString(),
-            onboardingCompleted: Boolean(raw.onboardingCompleted),
-            createdAt: typeof raw.createdAt === 'string' ? raw.createdAt : new Date().toISOString(),
-          };
-          setCurrentUser(loadedUser);
-          setCreators((prev) => {
-            const exists = prev.some((c) => c.uid === loadedUser.uid);
-            return exists
-              ? prev.map((c) => (c.uid === loadedUser.uid ? loadedUser : c))
-              : [loadedUser, ...prev];
-          });
-
-          try {
-            const privSnap = await getDoc(doc(db, 'users', user.uid, 'private', 'info'));
-            if (privSnap.exists()) {
-              const privData = privSnap.data() as UserPrivate;
-              setUserPrivate({ ...INITIAL_USER_PRIVATE, ...privData, uid: user.uid });
-              if (privData.language) setLanguageState(privData.language);
-              if (privData.themeMode) setThemeState(privData.themeMode === 'dark' ? 'dark' : 'light');
-              if (privData.biometricLockEnabled) {
-                setIsLocked(true);
-              }
-            }
-          } catch (privErr) {
-            console.warn('Could not load private user settings:', privErr);
-          }
-
-          setStage(loadedUser.onboardingCompleted ? 'app' : 'onboarding');
-        } else {
-          const base = normalizeUsername(user.email?.split('@')[0] || user.displayName || `user_${user.uid.slice(0, 6)}`);
-          const defaultUsername = base.length >= 3 ? base.slice(0, 24) : `sv_${user.uid.slice(0, 6)}`;
-          setCurrentUser({
-            ...INITIAL_USER,
-            uid: user.uid,
-            username: defaultUsername,
-            displayName: user.displayName || 'SocialVerse Member',
-            bio: '',
-            pronouns: '',
-            website: '',
-            photoUrl: user.photoURL || INITIAL_USER.photoUrl,
-            followersCount: 0,
-            followingCount: 0,
-            postsCount: 0,
-            onboardingCompleted: false,
-            createdAt: new Date().toISOString(),
-          });
-          setUserPrivate({
-            ...INITIAL_USER_PRIVATE,
-            uid: user.uid,
-            email: user.email || '',
-          });
-          setStage('onboarding');
-        }
-      } catch (err) {
-        console.error('Auth profile sync error:', err);
-        const defaultUsername = normalizeUsername(user.email?.split('@')[0] || `sv_${user.uid.slice(0, 6)}`);
-        setCurrentUser((prev) => ({
-          ...prev,
-          uid: user.uid,
-          username: defaultUsername.length >= 3 ? defaultUsername : `sv_${user.uid.slice(0, 6)}`,
-          displayName: user.displayName || prev.displayName,
-          photoUrl: user.photoURL || prev.photoUrl,
-        }));
-        setStage('app');
-      }
+  // WebRTC Call helpers
+  const setupPeerConnection = (targetUid: string, callId: string, chatId: string, stream: MediaStream | null) => {
+    const pc = new RTCPeerConnection({
+      iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
     });
-    return () => unsub();
-  }, []);
-
-  // Firestore real-time listeners when Firebase authenticated & in app
-  useEffect(() => {
-    if (!firebaseUser || stage !== 'app' || isPreviewMode) return;
-
-    const postsQuery = query(
-      collection(db, 'posts'),
-      where('visibility', '==', 'public'),
-      orderBy('createdAt', 'desc')
-    );
-    const unsubPosts = onSnapshot(
-      postsQuery,
-      (snap) => {
-        if (!snap.empty) {
-          const remote = snap.docs.map((d) => d.data() as Post);
-          setPosts((prev) => {
-            const remoteIds = new Set(remote.map((r) => r.id));
-            const localSeed = prev.filter((p) => !remoteIds.has(p.id));
-            return [...remote, ...localSeed];
-          });
-        }
-      },
-      (error) => {
-        console.warn('Posts listener error:', error);
-      }
-    );
-
-    const notifQuery = query(
-      collection(db, 'notifications'),
-      where('recipientUid', '==', firebaseUser.uid)
-    );
-    const unsubNotifs = onSnapshot(
-      notifQuery,
-      (snap) => {
-        if (!snap.empty) {
-          setNotifications(snap.docs.map((d) => d.data() as AppNotification));
-        }
-      },
-      (error) => {
-        console.warn('Notifications listener error:', error);
-      }
-    );
-
-    return () => {
-      unsubPosts();
-      unsubNotifs();
+    if (stream) {
+      stream.getTracks().forEach((track) => pc.addTrack(track, stream));
+    }
+    pc.ontrack = (ev) => {
+      if (ev.streams[0]) setRemoteStream(ev.streams[0]);
     };
-  }, [firebaseUser, stage, isPreviewMode]);
+    pc.onicecandidate = (ev) => {
+      if (ev.candidate && wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(
+          JSON.stringify({
+            type: 'call:ice',
+            targetUid,
+            callId,
+            chatId,
+            candidate: ev.candidate,
+          })
+        );
+      }
+    };
+    peerConnRef.current = pc;
+    return pc;
+  };
 
+  const startCall = async (chatId: string, peerUid: string, mode: 'voice' | 'video') => {
+    if (!requireAuth('Sign in to start voice or video calls.')) return;
+    const peer = creators.find((c) => c.uid === peerUid);
+    const callId = `call_${Date.now()}`;
+
+    let stream: MediaStream | null = null;
+    try {
+      if (navigator.mediaDevices?.getUserMedia) {
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: true,
+          video: mode === 'video',
+        });
+        setLocalStream(stream);
+      }
+    } catch {
+      stream = null;
+    }
+
+    setActiveCall({
+      callId,
+      chatId,
+      mode,
+      direction: 'outgoing',
+      status: 'ringing',
+      peerUid,
+      peerName: peer?.displayName || 'User',
+      peerAvatar: peer?.photoUrl || '',
+      muted: false,
+      cameraOff: mode !== 'video',
+    });
+
+    try {
+      const pc = setupPeerConnection(peerUid, callId, chatId, stream);
+      const offer = await pc.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: mode === 'video' });
+      await pc.setLocalDescription(offer);
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(
+          JSON.stringify({
+            type: 'call:offer',
+            targetUid: peerUid,
+            callId,
+            chatId,
+            mode,
+            sdp: offer,
+          })
+        );
+      }
+    } catch {
+      // Fallback ringing state stays visible cleanly in environments without audio/video devices
+    }
+  };
+
+  const acceptIncomingCall = async () => {
+    if (!activeCall || !pendingOfferRef.current) return;
+    let stream: MediaStream | null = null;
+    try {
+      if (navigator.mediaDevices?.getUserMedia) {
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: true,
+          video: activeCall.mode === 'video',
+        });
+        setLocalStream(stream);
+      }
+    } catch {
+      stream = null;
+    }
+
+    const pc = setupPeerConnection(activeCall.peerUid, activeCall.callId, activeCall.chatId, stream);
+    await pc.setRemoteDescription(new RTCSessionDescription(pendingOfferRef.current.sdp));
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(
+        JSON.stringify({
+          type: 'call:answer',
+          targetUid: activeCall.peerUid,
+          callId: activeCall.callId,
+          chatId: activeCall.chatId,
+          sdp: answer,
+        })
+      );
+    }
+    setActiveCall((prev) => (prev ? { ...prev, status: 'connected', startedAt: Date.now() } : prev));
+  };
+
+  const declineIncomingCall = () => {
+    if (activeCall && wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(
+        JSON.stringify({
+          type: 'call:decline',
+          targetUid: activeCall.peerUid,
+          callId: activeCall.callId,
+        })
+      );
+    }
+    cleanupMediaAndPeer();
+    setActiveCall(null);
+  };
+
+  const endCall = () => {
+    if (activeCall && wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(
+        JSON.stringify({
+          type: 'call:end',
+          targetUid: activeCall.peerUid,
+          callId: activeCall.callId,
+        })
+      );
+    }
+    cleanupMediaAndPeer();
+    setActiveCall(null);
+  };
+
+  const toggleCallMute = () => {
+    setActiveCall((prev) => {
+      if (!prev) return null;
+      const nextMuted = !prev.muted;
+      localStream?.getAudioTracks().forEach((tr) => {
+        tr.enabled = !nextMuted;
+      });
+      return { ...prev, muted: nextMuted };
+    });
+  };
+
+  const toggleCallCamera = () => {
+    setActiveCall((prev) => {
+      if (!prev) return null;
+      const nextOff = !prev.cameraOff;
+      localStream?.getVideoTracks().forEach((tr) => {
+        tr.enabled = !nextOff;
+      });
+      return { ...prev, cameraOff: nextOff };
+    });
+  };
+
+  // Auth Actions
+  const sendOtp = async (email: string, purpose: 'signup' | 'reset' | '2fa') => {
+    return apiFetch<{ sentViaSmtp: boolean; devOtpCode?: string }>('/api/auth/send-otp', {
+      method: 'POST',
+      body: JSON.stringify({ email, purpose, language }),
+    });
+  };
+
+  const verifyOtp = async (email: string, code: string, purpose: 'signup' | 'reset' | '2fa') => {
+    const res = await apiFetch<{ verificationToken: string }>('/api/auth/verify-otp', {
+      method: 'POST',
+      body: JSON.stringify({ email, code, purpose }),
+    });
+    return res.verificationToken;
+  };
+
+  const checkUsernameAvailability = async (username: string, excludeUid?: string) => {
+    const params = new URLSearchParams({ username });
+    if (excludeUid) params.set('excludeUid', excludeUid);
+    return apiFetch<{ available: boolean; normalized: string; reason?: string }>(
+      `/api/users/check-username?${params.toString()}`
+    );
+  };
+
+  const finishLoginSession = async (
+    token: string,
+    user: UserPublic,
+    priv: UserPrivate,
+    saveLogin = true
+  ) => {
+    localStorage.setItem(TOKEN_STORAGE_KEY, token);
+    setSessionToken(token);
+    setCurrentUser(user);
+    setUserPrivate(priv);
+    setLanguageState(priv.language || 'en');
+    setThemeState(priv.themeMode === 'dark' ? 'dark' : 'light');
+    if (priv.biometricLockEnabled) setIsLocked(true);
+    upsertSavedLogin(user, priv.email, token, saveLogin);
+    setAuthModalOpen(false);
+    setAuthModalReason(null);
+    await refreshState(token);
+  };
+
+  const completeSignupRegistration: SocialVerseContextValue['completeSignupRegistration'] = async (
+    payload
+  ) => {
+    const res = await apiFetch<{ token: string; user: UserPublic; userPrivate: UserPrivate }>(
+      '/api/auth/register',
+      {
+        method: 'POST',
+        body: JSON.stringify({ ...payload, language }),
+      }
+    );
+    await finishLoginSession(res.token, res.user, res.userPrivate, payload.saveLogin ?? true);
+    setPendingPhotoSetup(true);
+    setActiveTab('profile');
+    setViewedProfileUid(res.user.uid);
+    showToast(language === 'bn' ? 'অ্যাকাউন্ট সফলভাবে তৈরি হয়েছে!' : 'Account created! Welcome to SocialVerse.');
+  };
+
+  const loginWithIdentifier: SocialVerseContextValue['loginWithIdentifier'] = async (
+    identifier,
+    password,
+    saveLogin = true
+  ) => {
+    const res = await apiFetch<{
+      requires2fa?: boolean;
+      email?: string;
+      sentViaSmtp?: boolean;
+      devOtpCode?: string;
+      token?: string;
+      user?: UserPublic;
+      userPrivate?: UserPrivate;
+    }>('/api/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ identifier, password }),
+    });
+    if (res.requires2fa) {
+      return {
+        requires2fa: true,
+        email: res.email,
+        sentViaSmtp: res.sentViaSmtp,
+        devOtpCode: res.devOtpCode,
+      };
+    }
+    if (res.token && res.user && res.userPrivate) {
+      await finishLoginSession(res.token, res.user, res.userPrivate, saveLogin);
+      showToast(language === 'bn' ? 'স্বাগতম! সাইন ইন সফল হয়েছে' : 'Signed in successfully');
+    }
+    return {};
+  };
+
+  const verifyTwoFactorLogin = async (email: string, code: string, saveLogin = true) => {
+    const res = await apiFetch<{ token: string; user: UserPublic; userPrivate: UserPrivate }>(
+      '/api/auth/verify-2fa',
+      {
+        method: 'POST',
+        body: JSON.stringify({ email, code }),
+      }
+    );
+    await finishLoginSession(res.token, res.user, res.userPrivate, saveLogin);
+    showToast(language === 'bn' ? 'স্বাগতম!' : 'Verified & signed in');
+  };
+
+  const loginWithSavedAccount = async (entry: SavedLoginEntry) => {
+    if (!entry.sessionToken) {
+      throw new Error(
+        language === 'bn'
+          ? `@${entry.username}-এ সাইন ইন করতে আপনার পাসওয়ার্ড লিখুন।`
+          : `Enter your password to sign back in to @${entry.username}.`
+      );
+    }
+    const res = await apiFetch<{ token: string; user: UserPublic; userPrivate: UserPrivate }>(
+      '/api/auth/login-token',
+      {
+        method: 'POST',
+        body: JSON.stringify({ token: entry.sessionToken }),
+      }
+    );
+    await finishLoginSession(res.token, res.user, res.userPrivate, true);
+    showToast(
+      language === 'bn' ? `@${res.user.username}-এ সুইচ করা হয়েছে` : `Switched to @${res.user.username}`
+    );
+  };
+
+  const changePassword = async (currentPassword: string, newPassword: string) => {
+    await apiFetch('/api/auth/change-password', {
+      method: 'POST',
+      body: JSON.stringify({ currentPassword, newPassword }),
+    });
+    showToast(language === 'bn' ? 'পাসওয়ার্ড পরিবর্তন হয়েছে' : 'Password updated');
+  };
+
+  const resetPasswordWithOtp = async (
+    verificationToken: string,
+    email: string,
+    newPassword: string
+  ) => {
+    await apiFetch('/api/auth/reset-password', {
+      method: 'POST',
+      body: JSON.stringify({ verificationToken, email, newPassword }),
+    });
+    showToast(language === 'bn' ? 'পাসওয়ার্ড রিসেট সম্পন্ন হয়েছে' : 'Password reset complete');
+  };
+
+  const deactivateAccount = async (days: number) => {
+    await apiFetch('/api/auth/deactivate', {
+      method: 'POST',
+      body: JSON.stringify({ days }),
+    });
+    await logout();
+    showToast(
+      language === 'bn'
+        ? `অ্যাকাউন্ট ${days} দিনের জন্য ডিঅ্যাক্টিভেট হয়েছে`
+        : `Account deactivated for ${days} days. Log back in anytime to reactivate.`
+    );
+  };
+
+  const logout = async () => {
+    localStorage.removeItem(TOKEN_STORAGE_KEY);
+    setSessionToken(null);
+    setCurrentUser(INITIAL_USER);
+    setUserPrivate(INITIAL_USER_PRIVATE);
+    setChats([]);
+    setMessagesByChat({});
+    setFollowingIds([]);
+    setFollowerIds([]);
+    setFriendRequests([]);
+    setNotifications([]);
+    setSubscreenState(null);
+    setViewedProfileUid(null);
+    setActiveChatId(null);
+    setActiveTab('home');
+    await refreshState('');
+    showToast(language === 'bn' ? 'লগ আউট সম্পন্ন হয়েছে' : 'Logged out');
+  };
+
+  const deleteAccount = async () => {
+    const uid = currentUser.uid;
+    await apiFetch('/api/auth/account', { method: 'DELETE' });
+    removeSavedLogin(uid);
+    localStorage.removeItem(TOKEN_STORAGE_KEY);
+    setSessionToken(null);
+    setCurrentUser(INITIAL_USER);
+    setUserPrivate(INITIAL_USER_PRIVATE);
+    setSubscreenState(null);
+    setViewedProfileUid(null);
+    setActiveTab('home');
+    await refreshState('');
+    showToast(language === 'bn' ? 'অ্যাকাউন্ট স্থায়ীভাবে মুছে ফেলা হয়েছে' : 'Account deleted permanently.');
+  };
+
+  // Language & Theme
   const setLanguage = (lang: AppLanguage) => {
     setLanguageState(lang);
     setUserPrivate((prev) => ({ ...prev, language: lang }));
-    if (firebaseUser && !isPreviewMode) {
-      updateDoc(doc(db, 'users', firebaseUser.uid, 'private', 'info'), {
-        language: lang,
-        updatedAt: serverTimestamp(),
+    if (isAuthenticated) {
+      apiFetch('/api/settings/private', {
+        method: 'PATCH',
+        body: JSON.stringify({ language: lang }),
       }).catch(() => {});
     }
   };
@@ -534,853 +1087,567 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
   const setTheme = (nextTheme: ThemeMode) => {
     setThemeState(nextTheme);
     setUserPrivate((prev) => ({ ...prev, themeMode: nextTheme }));
-    if (firebaseUser && !isPreviewMode) {
-      updateDoc(doc(db, 'users', firebaseUser.uid, 'private', 'info'), {
-        themeMode: nextTheme,
-        updatedAt: serverTimestamp(),
+    if (isAuthenticated) {
+      apiFetch('/api/settings/private', {
+        method: 'PATCH',
+        body: JSON.stringify({ themeMode: nextTheme }),
       }).catch(() => {});
     }
   };
 
-  const enterPreviewMode = () => {
-    setIsPreviewMode(true);
-    setAuthModalOpen(false);
-    setCurrentUser(INITIAL_USER);
-    setUserPrivate(INITIAL_USER_PRIVATE);
-    setStage('app');
-  };
-
-  const signInWithGoogle = async () => {
-    try {
-      await signInWithPopup(auth, googleProvider);
-      setAuthModalOpen(false);
-      showToast(language === 'bn' ? 'সফলভাবে সাইন ইন হয়েছে' : 'Signed in with Google');
-    } catch (err) {
-      throw new Error(mapFirebaseAuthError(err, language));
-    }
-  };
-
-  const signInWithEmail = async (email: string, password: string) => {
-    try {
-      await signInWithEmailAndPassword(auth, email.trim(), password);
-      setAuthModalOpen(false);
-      showToast(language === 'bn' ? 'স্বাগতম! সাইন ইন সফল হয়েছে' : 'Signed in successfully');
-    } catch (err) {
-      throw new Error(mapFirebaseAuthError(err, language));
-    }
-  };
-
-  const registerWithEmail = async (email: string, password: string) => {
-    try {
-      const cred = await createUserWithEmailAndPassword(auth, email.trim(), password);
-      // Send verification non-blocking so new users can immediately complete onboarding
-      sendEmailVerification(cred.user).catch(() => {});
-      setAuthModalOpen(false);
-      showToast(language === 'bn' ? 'অ্যাকাউন্ট তৈরি হয়েছে!' : 'Account created! Complete your profile.');
-    } catch (err) {
-      throw new Error(mapFirebaseAuthError(err, language));
-    }
-  };
-
-  const resendVerificationEmail = async () => {
-    if (auth.currentUser) {
-      try {
-        await sendEmailVerification(auth.currentUser);
-        showToast(language === 'bn' ? 'ভেরিফিকেশন ইমেইল পাঠানো হয়েছে' : 'Verification email sent.');
-      } catch (err) {
-        showToast(mapFirebaseAuthError(err, language));
-      }
-    }
-  };
-
-  const sendPasswordReset = async (email: string) => {
-    try {
-      await sendPasswordResetEmail(auth, email.trim());
-      showToast(language === 'bn' ? 'পাসওয়ার্ড রিসেট লিংক পাঠানো হয়েছে' : 'Password reset link sent.');
-    } catch (err) {
-      throw new Error(mapFirebaseAuthError(err, language));
-    }
-  };
-
-  const completeOnboarding: SocialVerseContextValue['completeOnboarding'] = async (payload) => {
-    const cleanUsername = normalizeUsername(payload.username);
-    if (!isValidUsername(cleanUsername)) {
-      return t.auth.usernameInvalid;
-    }
-    if (!isValidDisplayName(payload.displayName)) {
-      return 'Display name must be 1–50 characters.';
-    }
-    if (!isValidBio(payload.bio)) {
-      return 'Bio must be 240 characters or fewer.';
-    }
-
-    const takenLocally = creators.some(
-      (c) => c.username === cleanUsername && c.uid !== (firebaseUser?.uid || currentUser.uid)
-    );
-    if (takenLocally) {
-      return t.auth.usernameTaken;
-    }
-
-    const targetUid = firebaseUser?.uid || currentUser.uid;
-    const updatedUser: UserPublic = {
-      ...currentUser,
-      uid: targetUid,
-      username: cleanUsername,
-      displayName: payload.displayName.trim(),
-      bio: payload.bio.trim(),
-      photoUrl: payload.photoUrl || currentUser.photoUrl || INITIAL_USER.photoUrl,
-      coverUrl: currentUser.coverUrl || INITIAL_USER.coverUrl,
-      interests: payload.interests,
-      isPrivate: payload.isPrivate,
-      onlineStatus: 'online',
-      lastSeenAt: new Date().toISOString(),
-      onboardingCompleted: true,
-    };
-
-    if (firebaseUser) {
-      try {
-        await runTransaction(db, async (tx) => {
-          const usernameRef = doc(db, 'usernames', cleanUsername);
-          const existingClaim = await tx.get(usernameRef);
-          if (existingClaim.exists() && existingClaim.data()?.uid !== firebaseUser.uid) {
-            throw new Error('USERNAME_TAKEN');
-          }
-          tx.set(usernameRef, {
-            uid: firebaseUser.uid,
-            username: cleanUsername,
-            createdAt: serverTimestamp(),
-          });
-          tx.set(doc(db, 'users', firebaseUser.uid), {
-            uid: firebaseUser.uid,
-            username: updatedUser.username,
-            displayName: updatedUser.displayName,
-            bio: updatedUser.bio,
-            pronouns: updatedUser.pronouns || '',
-            website: updatedUser.website || '',
-            photoUrl: updatedUser.photoUrl,
-            coverUrl: updatedUser.coverUrl,
-            interests: updatedUser.interests,
-            isPrivate: updatedUser.isPrivate,
-            followersCount: updatedUser.followersCount,
-            followingCount: updatedUser.followingCount,
-            postsCount: updatedUser.postsCount,
-            onlineStatus: 'online',
-            lastSeenAt: updatedUser.lastSeenAt,
-            onboardingCompleted: true,
-            createdAt: serverTimestamp(),
-            updatedAt: serverTimestamp(),
-          });
-          tx.set(doc(db, 'users', firebaseUser.uid, 'private', 'info'), {
-            uid: firebaseUser.uid,
-            email: firebaseUser.email || userPrivate.email || '',
-            language: userPrivate.language,
-            themeMode: userPrivate.themeMode,
-            biometricLockEnabled: userPrivate.biometricLockEnabled,
-            whoCanMessage: userPrivate.whoCanMessage,
-            whoCanViewStories: userPrivate.whoCanViewStories,
-            whoCanFollow: userPrivate.whoCanFollow,
-            notificationPrefs: userPrivate.notificationPrefs,
-            blockedUserIds: userPrivate.blockedUserIds,
-            mutedStoryUserIds: userPrivate.mutedStoryUserIds,
-            updatedAt: serverTimestamp(),
-          });
-        });
-      } catch (err) {
-        if (err instanceof Error && err.message === 'USERNAME_TAKEN') {
-          return t.auth.usernameTaken;
-        }
-        console.error('Onboarding Firestore error:', err);
-        return err instanceof Error ? err.message : 'Could not save profile to Firebase.';
-      }
-    }
-
-    setCurrentUser(updatedUser);
-    setCreators((prev) => {
-      const exists = prev.some((u) => u.uid === updatedUser.uid);
-      return exists ? prev.map((u) => (u.uid === updatedUser.uid ? updatedUser : u)) : [updatedUser, ...prev];
-    });
-    setStage('app');
-    showToast(language === 'bn' ? 'প্রোফাইল প্রস্তুত!' : 'Welcome to SocialVerse!');
-    return null;
-  };
-
-  const logout = async () => {
-    if (firebaseUser) {
-      await signOut(auth);
-    }
-    setFirebaseUser(null);
-    setIsPreviewMode(true);
-    setCurrentUser(INITIAL_USER);
-    setUserPrivate(INITIAL_USER_PRIVATE);
-    setSubscreenState(null);
-    setViewedProfileUid(null);
-    setStage('app');
-    setActiveTab('home');
-    showToast(language === 'bn' ? 'লগ আউট সম্পন্ন হয়েছে' : 'Logged out');
-  };
-
-  const deleteAccount = async () => {
-    if (firebaseUser) {
-      try {
-        await deleteDoc(doc(db, 'users', firebaseUser.uid, 'private', 'info'));
-        await deleteDoc(doc(db, 'users', firebaseUser.uid));
-        await deleteUser(firebaseUser);
-      } catch (err) {
-        handleFirestoreError(err, OperationType.DELETE, `users/${firebaseUser.uid}`);
-      }
-    }
-    setFirebaseUser(null);
-    setIsPreviewMode(true);
-    setCurrentUser(INITIAL_USER);
-    setSubscreenState(null);
-    setStage('app');
-    showToast(language === 'bn' ? 'অ্যাকাউন্ট মুছে ফেলা হয়েছে' : 'Account deleted.');
-  };
-
+  // Posts, Reels & Stories
   const createPost: SocialVerseContextValue['createPost'] = async (payload) => {
-    if (!requireAuth(language === 'bn' ? 'নতুন পোস্ট প্রকাশ করতে সাইন ইন করুন।' : 'Sign in or create an account to publish posts.')) {
-      return;
-    }
-    if (!isValidPostCaption(payload.caption)) {
-      showToast('Please enter a valid caption (1–2200 characters).');
-      return;
-    }
-    const id = `post_${Date.now()}`;
-    const newPost: Post = {
-      id,
-      authorId: currentUser.uid,
-      authorUsername: currentUser.username,
-      authorDisplayName: currentUser.displayName,
-      authorAvatar: currentUser.photoUrl,
-      caption: payload.caption.trim(),
-      mediaUrls: payload.mediaUrls,
-      mediaType: payload.mediaType,
-      hashtags: extractHashtags(payload.caption),
-      likesCount: 0,
-      commentsCount: 0,
-      sharesCount: 0,
-      visibility: payload.visibility,
-      createdAt: new Date().toISOString(),
-      likedByMe: false,
-      savedByMe: false,
-    };
-
-    setPosts((prev) => [newPost, ...prev]);
-    setCurrentUser((prev) => ({ ...prev, postsCount: prev.postsCount + 1 }));
-
-    if (firebaseUser) {
-      try {
-        await setDoc(doc(db, 'posts', id), {
-          id: newPost.id,
-          authorId: firebaseUser.uid,
-          authorUsername: newPost.authorUsername,
-          authorDisplayName: newPost.authorDisplayName,
-          authorAvatar: newPost.authorAvatar.startsWith('data:') ? '' : newPost.authorAvatar,
-          caption: newPost.caption,
-          mediaUrls: newPost.mediaUrls.filter((u) => !u.startsWith('blob:') && u.length <= 128),
-          mediaType: newPost.mediaType,
-          hashtags: newPost.hashtags,
-          likesCount: 0,
-          commentsCount: 0,
-          sharesCount: 0,
-          visibility: newPost.visibility,
-          createdAt: serverTimestamp(),
-        });
-      } catch (err) {
-        console.warn('Firestore createPost sync note:', err);
-      }
-    }
-    setActiveTab('home');
-    showToast(language === 'bn' ? 'পোস্ট প্রকাশিত হয়েছে' : 'Post published');
+    if (!requireAuth()) return;
+    await apiFetch('/api/posts', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+    await refreshState();
+    setSubscreenState(null);
+    setActiveTab(payload.mediaType === 'reel' ? 'reels' : 'home');
+    showToast(language === 'bn' ? 'প্রকাশিত হয়েছে!' : 'Published!');
   };
 
   const editPost = async (postId: string, caption: string) => {
-    if (!requireAuth('Sign in to edit your post.')) return;
-    if (!isValidPostCaption(caption)) return;
-    const hashtags = extractHashtags(caption);
-    setPosts((prev) =>
-      prev.map((p) => (p.id === postId && p.authorId === currentUser.uid ? { ...p, caption, hashtags } : p))
-    );
-    if (firebaseUser) {
-      updateDoc(doc(db, 'posts', postId), {
-        caption,
-        hashtags,
-        updatedAt: serverTimestamp(),
-      }).catch(() => {});
-    }
+    if (!requireAuth()) return;
+    await apiFetch(`/api/posts/${postId}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ caption }),
+    });
+    await refreshState();
     showToast(language === 'bn' ? 'পোস্ট আপডেট হয়েছে' : 'Post updated');
   };
 
   const deletePost = async (postId: string) => {
-    if (!requireAuth('Sign in to delete your post.')) return;
-    setPosts((prev) => prev.filter((p) => p.id !== postId));
-    setCurrentUser((prev) => ({ ...prev, postsCount: Math.max(0, prev.postsCount - 1) }));
-    if (firebaseUser) {
-      deleteDoc(doc(db, 'posts', postId)).catch(() => {});
-    }
+    if (!requireAuth()) return;
+    await apiFetch(`/api/posts/${postId}`, { method: 'DELETE' });
+    await refreshState();
     showToast(language === 'bn' ? 'পোস্ট মুছে ফেলা হয়েছে' : 'Post deleted');
   };
 
-  const toggleLikePost = (postId: string) => {
-    if (!requireAuth(language === 'bn' ? 'পোস্টে লাইক দিতে সাইন ইন বা সাইন আপ করুন।' : 'Sign in or create an account to like posts.')) {
-      return;
-    }
+  const toggleLikePost = async (postId: string) => {
+    if (!requireAuth()) return;
     setPosts((prev) =>
       prev.map((p) => {
         if (p.id !== postId) return p;
         const nextLiked = !p.likedByMe;
-        const nextCount = Math.max(0, p.likesCount + (nextLiked ? 1 : -1));
-        if (firebaseUser && !postId.startsWith('post_0')) {
-          updateDoc(doc(db, 'posts', postId), { likesCount: nextCount }).catch(() => {});
-        }
         return {
           ...p,
           likedByMe: nextLiked,
-          likesCount: nextCount,
+          likesCount: Math.max(0, p.likesCount + (nextLiked ? 1 : -1)),
         };
       })
     );
+    try {
+      await apiFetch(`/api/posts/${postId}/like`, { method: 'POST' });
+      await refreshState();
+    } catch {
+      await refreshState();
+    }
   };
 
-  const toggleSavePost = (postId: string) => {
-    if (!requireAuth(language === 'bn' ? 'পোস্ট সেভ করতে সাইন ইন করুন।' : 'Sign in or create an account to save posts.')) {
-      return;
-    }
-    setPosts((prev) =>
-      prev.map((p) => {
-        if (p.id !== postId) return p;
-        const nextSaved = !p.savedByMe;
-        if (firebaseUser) {
-          const saveRef = doc(db, 'saved_posts', `${firebaseUser.uid}_${postId}`);
-          if (nextSaved) {
-            setDoc(saveRef, {
-              uid: firebaseUser.uid,
-              postId,
-              createdAt: serverTimestamp(),
-            }).catch(() => {});
-          } else {
-            deleteDoc(saveRef).catch(() => {});
-          }
-        }
-        return { ...p, savedByMe: nextSaved };
-      })
-    );
+  const likePostIfNeeded = async (postId: string) => {
+    if (!requireAuth()) return;
+    const target = posts.find((p) => p.id === postId);
+    if (target?.likedByMe) return;
+    await toggleLikePost(postId);
   };
 
-  const sharePost = (postId: string) => {
-    if (!requireAuth(language === 'bn' ? 'পোস্ট শেয়ার করতে সাইন ইন করুন।' : 'Sign in or create an account to share posts.')) {
-      return;
-    }
+  const toggleSavePost = async (postId: string) => {
+    if (!requireAuth()) return;
     setPosts((prev) =>
-      prev.map((p) => {
-        if (p.id !== postId) return p;
-        const nextShares = p.sharesCount + 1;
-        if (firebaseUser && !postId.startsWith('post_0')) {
-          updateDoc(doc(db, 'posts', postId), { sharesCount: nextShares }).catch(() => {});
-        }
-        return { ...p, sharesCount: nextShares };
-      })
+      prev.map((p) => (p.id === postId ? { ...p, savedByMe: !p.savedByMe } : p))
     );
+    try {
+      await apiFetch(`/api/posts/${postId}/save`, { method: 'POST' });
+      await refreshState();
+    } catch {
+      await refreshState();
+    }
+  };
+
+  const sharePost = async (postId: string) => {
+    if (!requireAuth()) return;
+    await apiFetch(`/api/posts/${postId}/share`, { method: 'POST' }).catch(() => {});
     if (navigator.clipboard) {
       navigator.clipboard.writeText(`${window.location.origin}/?post=${postId}`).catch(() => {});
     }
-    showToast(language === 'bn' ? 'পোস্টের লিংক কপি হয়েছে' : 'Post link copied');
+    showToast(language === 'bn' ? 'লিংক কপি হয়েছে' : 'Link copied');
   };
 
-  const addComment = (postId: string, text: string, parentCommentId?: string) => {
-    if (!requireAuth(language === 'bn' ? 'মন্তব্য করতে সাইন ইন করুন।' : 'Sign in or create an account to comment.')) {
+  const shareReelToInbox = async (post: Post, targetUserUid: string) => {
+    if (!requireAuth()) return;
+    if (!targetUserUid || targetUserUid === currentUser.uid) {
+      showToast(
+        language === 'bn'
+          ? 'শেয়ার করতে অন্য একজন ব্যবহারকারী নির্বাচন করুন'
+          : 'Select another account to share this reel.'
+      );
       return;
     }
-    if (!isValidCommentText(text)) return;
-    const newComment: PostComment = {
-      id: `c_${Date.now()}`,
-      postId,
-      authorId: currentUser.uid,
-      authorUsername: currentUser.username,
-      authorAvatar: currentUser.photoUrl,
-      text: text.trim(),
-      parentCommentId,
-      createdAt: new Date().toISOString(),
-    };
-    setCommentsByPost((prev) => ({
-      ...prev,
-      [postId]: [...(prev[postId] || []), newComment],
-    }));
-    setPosts((prev) =>
-      prev.map((p) => (p.id === postId ? { ...p, commentsCount: p.commentsCount + 1 } : p))
+    const peer = creators.find((c) => c.uid === targetUserUid);
+    const chatId = await createDirectOrGroupChat(
+      peer?.displayName || 'Chat',
+      [currentUser.uid, targetUserUid],
+      'direct'
     );
-    if (firebaseUser && !postId.startsWith('post_0')) {
-      setDoc(doc(db, 'posts', postId, 'comments', newComment.id), {
-        id: newComment.id,
-        postId,
-        authorId: firebaseUser.uid,
-        authorUsername: currentUser.username,
-        text: newComment.text,
-        ...(parentCommentId ? { parentCommentId } : {}),
-        createdAt: serverTimestamp(),
-      }).catch(() => {});
-    }
+    if (!chatId) return;
+    await sendMessage(chatId, {
+      type: 'reel_share',
+      text: post.caption,
+      sharedPostId: post.id,
+      sharedPostCaption: post.caption,
+      sharedPostThumb: post.coverUrl || post.mediaUrls[0],
+      sharedPostAuthor: post.authorUsername,
+    });
+    showToast(
+      language === 'bn'
+        ? `@${peer?.username || 'user'}-কে রিল পাঠানো হয়েছে`
+        : `Sent reel to @${peer?.username || 'user'}`
+    );
   };
 
-  const activeStories = useMemo(
-    () =>
-      stories.filter(
-        (s) =>
-          isStoryActive(s) &&
-          !userPrivate.mutedStoryUserIds.includes(s.authorId) &&
-          !userPrivate.blockedUserIds.includes(s.authorId)
-      ),
-    [stories, userPrivate.mutedStoryUserIds, userPrivate.blockedUserIds]
-  );
+  const addComment = async (
+    postId: string,
+    text: string,
+    parentCommentId?: string,
+    stickerUrl?: string,
+    gifUrl?: string
+  ) => {
+    if (!requireAuth()) return;
+    await apiFetch(`/api/posts/${postId}/comments`, {
+      method: 'POST',
+      body: JSON.stringify({ text, parentCommentId, stickerUrl, gifUrl }),
+    });
+    await refreshState();
+  };
 
   const createStory: SocialVerseContextValue['createStory'] = async (payload) => {
-    if (!requireAuth(language === 'bn' ? 'স্টোরি প্রকাশ করতে সাইন ইন করুন।' : 'Sign in or create an account to post a story.')) {
-      return;
-    }
-    const id = `story_${Date.now()}`;
-    const newStory: Story = {
-      id,
-      authorId: currentUser.uid,
-      authorUsername: currentUser.username,
-      authorDisplayName: currentUser.displayName,
-      authorAvatar: currentUser.photoUrl,
-      mediaType: payload.mediaType,
-      mediaUrl: payload.mediaUrl,
-      textContent: payload.textContent,
-      backgroundGradient: 'from-sky-600 via-indigo-700 to-slate-900',
-      privacy: payload.privacy,
-      viewersCount: 0,
-      viewerUsernames: [],
-      reactions: [],
-      expiresAt: new Date(Date.now() + 24 * 3_600_000).toISOString(),
-      createdAt: new Date().toISOString(),
-    };
-    setStories((prev) => [newStory, ...prev]);
+    if (!requireAuth()) return;
+    await apiFetch('/api/stories', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+    await refreshState();
     setSubscreenState(null);
     setActiveTab('home');
     showToast(language === 'bn' ? '২৪ ঘণ্টার স্টোরি প্রকাশিত হয়েছে' : '24-hour story published');
   };
 
-  const reactToStory = (storyId: string, emoji: string) => {
-    if (!requireAuth(language === 'bn' ? 'স্টোরিতে প্রতিক্রিয়া জানাতে সাইন ইন করুন।' : 'Sign in to react to stories.')) {
-      return;
-    }
-    setStories((prev) =>
-      prev.map((s) =>
-        s.id === storyId
-          ? { ...s, reactions: [...s.reactions, { username: currentUser.username, emoji }] }
-          : s
-      )
-    );
+  const reactToStory = async (storyId: string, emoji: string) => {
+    if (!requireAuth()) return;
+    await apiFetch(`/api/stories/${storyId}/react`, {
+      method: 'POST',
+      body: JSON.stringify({ emoji }),
+    });
+    await refreshState();
     showToast(`${emoji} ${language === 'bn' ? 'প্রতিক্রিয়া পাঠানো হয়েছে' : 'Reaction sent'}`);
   };
 
-  const replyToStory = (storyId: string, text: string) => {
-    if (!requireAuth(language === 'bn' ? 'স্টোরিতে উত্তর দিতে সাইন ইন করুন।' : 'Sign in to reply to stories.')) {
-      return;
-    }
+  const replyToStory = async (storyId: string, text: string) => {
+    if (!requireAuth()) return;
     const story = stories.find((s) => s.id === storyId);
     if (!story || !text.trim()) return;
-    const chatId = createDirectOrGroupChat(story.authorDisplayName, [currentUser.uid, story.authorId], 'direct');
+    if (story.authorId === currentUser.uid) {
+      showToast(
+        language === 'bn'
+          ? 'নিজের স্টোরিতে ইনবক্স উত্তর পাঠানো যায় না'
+          : "You can't send an inbox reply to your own story."
+      );
+      return;
+    }
+    const chatId = await createDirectOrGroupChat(
+      story.authorDisplayName,
+      [currentUser.uid, story.authorId],
+      'direct'
+    );
     if (chatId) {
-      sendMessage(chatId, {
+      await sendMessage(chatId, {
         type: 'text',
         text: `Replied to story: "${text.trim()}"`,
       });
+      showToast(language === 'bn' ? 'স্টোরিতে উত্তর পাঠানো হয়েছে' : 'Reply sent to inbox');
     }
-    showToast(language === 'bn' ? 'স্টোরিতে উত্তর পাঠানো হয়েছে' : 'Reply sent to chat');
   };
 
-  const deleteStory = (storyId: string) => {
-    if (!requireAuth('Sign in to delete stories.')) return;
-    setStories((prev) => prev.filter((s) => s.id !== storyId));
+  const deleteStory = async (storyId: string) => {
+    if (!requireAuth()) return;
+    await apiFetch(`/api/stories/${storyId}`, { method: 'DELETE' });
     setActiveStoryIndex(null);
-    setSubscreenState(null);
-    showToast(language === 'bn' ? 'স্টোরি মুছে ফেলা হয়েছে' : 'Story deleted');
+    await refreshState();
   };
 
   const muteStoryAuthor = (authorId: string) => {
-    if (!requireAuth('Sign in to manage muted stories.')) return;
-    setUserPrivate((prev) => ({
-      ...prev,
-      mutedStoryUserIds: Array.from(new Set([...prev.mutedStoryUserIds, authorId])),
-    }));
+    if (!requireAuth()) return;
+    const next = Array.from(new Set([...userPrivate.mutedStoryUserIds, authorId]));
+    updatePrivateSettings({ mutedStoryUserIds: next });
     setActiveStoryIndex(null);
-    setSubscreenState(null);
     showToast(language === 'bn' ? 'স্টোরি মিউট করা হয়েছে' : 'Stories muted');
   };
 
-  const sendMessage: SocialVerseContextValue['sendMessage'] = (chatId, payload) => {
-    if (!requireAuth(language === 'bn' ? 'মেসেজ পাঠাতে সাইন ইন বা সাইন আপ করুন।' : 'Sign in or create an account to send messages.')) {
-      return;
-    }
-    const msg: ChatMessage = {
-      id: `m_${Date.now()}`,
-      chatId,
-      senderId: currentUser.uid,
-      senderName: currentUser.displayName,
-      type: payload.type,
-      text: payload.text,
-      mediaUrl: payload.mediaUrl,
-      fileName: payload.fileName,
-      durationMs: payload.durationMs,
-      replyToId: payload.replyToId,
-      replyPreview: payload.replyPreview,
-      status: 'delivered',
-      reactions: {},
-      createdAt: new Date().toISOString(),
-    };
-    setMessagesByChat((prev) => ({
-      ...prev,
-      [chatId]: [...(prev[chatId] || []), msg],
-    }));
-    setChats((prev) =>
-      prev.map((c) =>
-        c.id === chatId
-          ? {
-              ...c,
-              unreadCount: 0,
-              lastMessageText:
-                payload.type === 'voice'
-                  ? 'Voice message'
-                  : payload.text || payload.fileName || 'Media attachment',
-              lastMessageAt: msg.createdAt,
-            }
-          : c
-      )
+  // Notes & Stickers
+  const publishNote = async (text: string) => {
+    if (!requireAuth()) return;
+    await apiFetch('/api/notes', {
+      method: 'POST',
+      body: JSON.stringify({ text }),
+    });
+    await refreshState();
+    showToast(language === 'bn' ? 'নোট শেয়ার হয়েছে' : 'Note shared');
+  };
+
+  const deleteMyNote = async () => {
+    if (!requireAuth()) return;
+    await apiFetch('/api/notes/mine', { method: 'DELETE' });
+    await refreshState();
+    showToast(language === 'bn' ? 'নোট মুছে ফেলা হয়েছে' : 'Note removed');
+  };
+
+  const toggleLikeNote = async (noteId: string) => {
+    if (!requireAuth()) return;
+    await apiFetch(`/api/notes/${noteId}/like`, { method: 'POST' });
+    await refreshState();
+  };
+
+  const createSticker = async (label: string, imageUrl: string, kind: 'sticker' | 'gif' = 'sticker') => {
+    if (!requireAuth()) return null;
+    const res = await apiFetch<{ sticker: StickerItem }>('/api/stickers', {
+      method: 'POST',
+      body: JSON.stringify({ label, imageUrl, kind }),
+    });
+    await refreshState();
+    showToast(language === 'bn' ? 'স্টিকার তৈরি ও সেভ হয়েছে' : 'Sticker saved to your pack');
+    return res.sticker;
+  };
+
+  const toggleFavoriteSticker = async (stickerId: string, imageUrl?: string, label?: string) => {
+    if (!requireAuth()) return;
+    await apiFetch(`/api/stickers/${encodeURIComponent(stickerId)}/favorite`, {
+      method: 'POST',
+      body: JSON.stringify({ imageUrl, label }),
+    });
+    await refreshState();
+    showToast(language === 'bn' ? 'ফেভারিট স্টিকার আপডেট হয়েছে' : 'Updated saved stickers');
+  };
+
+  // Messaging, Themes & Groups
+  const sendTypingSignal = (chatId: string) => {
+    if (!isAuthenticated || wsRef.current?.readyState !== WebSocket.OPEN) return;
+    const now = Date.now();
+    if (now - (lastTypingSentRef.current[chatId] || 0) < 1500) return;
+    lastTypingSentRef.current[chatId] = now;
+    wsRef.current.send(JSON.stringify({ type: 'chat:typing', chatId }));
+  };
+
+  const sendMessage: SocialVerseContextValue['sendMessage'] = async (chatId, payload) => {
+    if (!requireAuth()) return;
+    await apiFetch(`/api/chats/${chatId}/messages`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+    await refreshState();
+  };
+
+  const editMessage = async (chatId: string, messageId: string, text: string) => {
+    if (!requireAuth()) return;
+    await apiFetch(`/api/chats/${chatId}/messages/${messageId}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ text }),
+    });
+    await refreshState();
+    showToast(language === 'bn' ? 'মেসেজ সম্পাদনা হয়েছে' : 'Message edited');
+  };
+
+  const reactToMessage = async (chatId: string, messageId: string, emoji: string) => {
+    if (!requireAuth()) return;
+    await apiFetch(`/api/chats/${chatId}/messages/${messageId}/react`, {
+      method: 'POST',
+      body: JSON.stringify({ emoji }),
+    });
+    await refreshState();
+  };
+
+  const starMessage = async (chatId: string, messageId: string) => {
+    if (!requireAuth()) return;
+    await apiFetch(`/api/chats/${chatId}/messages/${messageId}/star`, {
+      method: 'POST',
+    });
+    await refreshState();
+  };
+
+  const pinMessage = async (chatId: string, messageId: string | null) => {
+    if (!requireAuth()) return;
+    await apiFetch(`/api/chats/${chatId}/pin`, {
+      method: 'POST',
+      body: JSON.stringify({ messageId }),
+    });
+    await refreshState();
+    showToast(
+      messageId
+        ? language === 'bn'
+          ? 'মেসেজ পিন করা হয়েছে'
+          : 'Message pinned'
+        : language === 'bn'
+        ? 'পিন সরানো হয়েছে'
+        : 'Message unpinned'
     );
   };
 
-  const reactToMessage = (chatId: string, messageId: string, emoji: string) => {
-    if (!requireAuth('Sign in to react to messages.')) return;
-    setMessagesByChat((prev) => ({
-      ...prev,
-      [chatId]: (prev[chatId] || []).map((m) => {
-        if (m.id !== messageId) return m;
-        const currentReactors = m.reactions[emoji] || [];
-        const hasReacted = currentReactors.includes(currentUser.uid);
-        const nextReactors = hasReacted
-          ? currentReactors.filter((u) => u !== currentUser.uid)
-          : [...currentReactors, currentUser.uid];
-        return {
-          ...m,
-          reactions: {
-            ...m.reactions,
-            [emoji]: nextReactors,
-          },
-        };
-      }),
-    }));
+  const forwardMessage = async (chatId: string, messageId: string, targetChatId: string) => {
+    if (!requireAuth()) return;
+    await apiFetch(`/api/chats/${chatId}/messages/${messageId}/forward`, {
+      method: 'POST',
+      body: JSON.stringify({ targetChatId }),
+    });
+    await refreshState();
+    showToast(language === 'bn' ? 'মেসেজ ফরওয়ার্ড হয়েছে' : 'Message forwarded');
   };
 
-  const deleteMessage = (chatId: string, messageId: string) => {
-    if (!requireAuth('Sign in to delete messages.')) return;
-    setMessagesByChat((prev) => ({
-      ...prev,
-      [chatId]: (prev[chatId] || []).filter((m) => m.id !== messageId),
-    }));
+  const updateChatPreferences: SocialVerseContextValue['updateChatPreferences'] = async (
+    chatId,
+    prefs
+  ) => {
+    if (!requireAuth()) return;
+    await apiFetch(`/api/chats/${chatId}/preferences`, {
+      method: 'PATCH',
+      body: JSON.stringify(prefs),
+    });
+    await refreshState();
   };
 
-  const createDirectOrGroupChat = (
+  const deleteMessage = async (chatId: string, messageId: string) => {
+    if (!requireAuth()) return;
+    await apiFetch(`/api/chats/${chatId}/messages/${messageId}`, { method: 'DELETE' });
+    await refreshState();
+  };
+
+  const createDirectOrGroupChat = async (
     title: string,
     participantUids: string[],
     type: 'direct' | 'group'
-  ): string | null => {
-    if (!requireAuth(language === 'bn' ? 'চ্যাট শুরু করতে সাইন ইন করুন।' : 'Sign in or create an account to start a chat.')) {
+  ): Promise<string | null> => {
+    if (!requireAuth()) return null;
+    const uniqueParticipants = Array.from(
+      new Set([currentUser.uid, ...participantUids].filter(Boolean))
+    );
+    if (uniqueParticipants.length < 2) {
+      showToast(
+        language === 'bn'
+          ? 'চ্যাট শুরু করতে অন্তত অন্য একজন ব্যবহারকারী প্রয়োজন।'
+          : 'Select at least one other user to start a chat.'
+      );
       return null;
     }
-    if (type === 'direct') {
-      const existing = chats.find(
-        (c) =>
-          c.type === 'direct' &&
-          participantUids.every((id) => c.participantIds.includes(id))
-      );
-      if (existing) {
-        setActiveChatId(existing.id);
-        return existing.id;
-      }
-    }
-    const id = `chat_${Date.now()}`;
-    const participantNames: Record<string, string> = {};
-    const participantAvatars: Record<string, string> = {};
-    participantUids.forEach((uid) => {
-      const found = creators.find((u) => u.uid === uid) || currentUser;
-      participantNames[uid] = found.displayName;
-      participantAvatars[uid] = found.photoUrl;
+    const res = await apiFetch<{ chat: Chat }>('/api/chats', {
+      method: 'POST',
+      body: JSON.stringify({ title, participantUids: uniqueParticipants, type }),
     });
-    const newChat: Chat = {
-      id,
-      type,
-      title: title.trim() || 'New Chat',
-      participantIds: Array.from(new Set(participantUids)),
-      participantNames,
-      participantAvatars,
-      lastMessageText: type === 'group' ? 'Group created' : 'Conversation started',
-      lastMessageAt: new Date().toISOString(),
-      unreadCount: 0,
-      createdBy: currentUser.uid,
-      createdAt: new Date().toISOString(),
-    };
-    setChats((prev) => [newChat, ...prev]);
-    setActiveChatId(id);
-    return id;
+    await refreshState();
+    setActiveChatId(res.chat.id);
+    return res.chat.id;
   };
 
-  const toggleFollow = (targetUid: string) => {
-    if (!requireAuth(language === 'bn' ? 'কাউকে ফলো করতে সাইন ইন করুন।' : 'Sign in or create an account to follow creators.')) {
-      return;
+  const updateChatTheme = async (chatId: string, nextTheme: ChatThemeConfig) => {
+    if (!requireAuth()) return;
+    await apiFetch(`/api/chats/${chatId}/theme`, {
+      method: 'PATCH',
+      body: JSON.stringify(nextTheme),
+    });
+    await refreshState();
+    showToast(language === 'bn' ? 'চ্যাট থিম আপডেট হয়েছে' : 'Chat theme updated');
+  };
+
+  const updateChatNickname = async (chatId: string, targetUid: string, nickname: string) => {
+    if (!requireAuth()) return;
+    await apiFetch(`/api/chats/${chatId}/nicknames`, {
+      method: 'PATCH',
+      body: JSON.stringify({ targetUid, nickname }),
+    });
+    await refreshState();
+    showToast(language === 'bn' ? 'নিকনেম সেভ হয়েছে' : 'Chat nickname updated');
+  };
+
+  const addGroupMember = async (chatId: string, targetUid: string) => {
+    const res = await apiFetch<{ status: string }>(`/api/chats/${chatId}/members`, {
+      method: 'POST',
+      body: JSON.stringify({ targetUid }),
+    });
+    await refreshState();
+    return res.status;
+  };
+
+  const approveGroupMember = async (chatId: string, targetUid: string, accept: boolean) => {
+    await apiFetch(`/api/chats/${chatId}/members/approve`, {
+      method: 'POST',
+      body: JSON.stringify({ targetUid, accept }),
+    });
+    await refreshState();
+  };
+
+  const removeGroupMember = async (chatId: string, targetUid: string) => {
+    await apiFetch(`/api/chats/${chatId}/members/${targetUid}`, { method: 'DELETE' });
+    await refreshState();
+  };
+
+  const updateGroupRole = async (
+    chatId: string,
+    targetUid: string,
+    action: 'promote_admin' | 'demote_admin' | 'transfer_owner'
+  ) => {
+    await apiFetch(`/api/chats/${chatId}/roles`, {
+      method: 'PATCH',
+      body: JSON.stringify({ targetUid, action }),
+    });
+    await refreshState();
+  };
+
+  const updateGroupSettings = async (
+    chatId: string,
+    updates: { title?: string; requireAddApproval?: boolean }
+  ) => {
+    await apiFetch(`/api/chats/${chatId}/settings`, {
+      method: 'PATCH',
+      body: JSON.stringify(updates),
+    });
+    await refreshState();
+  };
+
+  // Broadcast Channels
+  const createBroadcastChannel = async (title: string, description: string) => {
+    await apiFetch('/api/broadcasts', {
+      method: 'POST',
+      body: JSON.stringify({ title, description }),
+    });
+    await refreshState();
+    showToast(language === 'bn' ? 'ব্রডকাস্ট চ্যানেল তৈরি হয়েছে!' : 'Broadcast channel created!');
+  };
+
+  const toggleFollowBroadcast = async (channelId: string) => {
+    if (!requireAuth()) return;
+    await apiFetch(`/api/broadcasts/${channelId}/follow`, { method: 'POST' });
+    await refreshState();
+  };
+
+  const assignBroadcastRole = async (
+    channelId: string,
+    targetUid: string,
+    role: 'admin' | 'moderator' | 'collaborator' | 'follower'
+  ) => {
+    await apiFetch(`/api/broadcasts/${channelId}/roles`, {
+      method: 'POST',
+      body: JSON.stringify({ targetUid, role }),
+    });
+    await refreshState();
+  };
+
+  const sendBroadcastMessage = async (channelId: string, text: string, mediaUrl?: string) => {
+    await apiFetch(`/api/broadcasts/${channelId}/messages`, {
+      method: 'POST',
+      body: JSON.stringify({ text, mediaUrl }),
+    });
+    await refreshState();
+  };
+
+  const reactBroadcastMessage = async (
+    channelId: string,
+    msgId: string,
+    opts: { like?: boolean; emoji?: string }
+  ) => {
+    if (!requireAuth()) return;
+    await apiFetch(`/api/broadcasts/${channelId}/messages/${msgId}/react`, {
+      method: 'POST',
+      body: JSON.stringify(opts),
+    });
+    await refreshState();
+  };
+
+  // Social Graph & Profile
+  const toggleFollow = async (targetUid: string) => {
+    if (!requireAuth()) return;
+    const res = await apiFetch<{ status: string }>(`/api/users/${targetUid}/follow`, {
+      method: 'POST',
+    });
+    await refreshState();
+    if (res.status === 'requested') {
+      showToast(language === 'bn' ? 'ফলো রিকোয়েস্ট পাঠানো হয়েছে' : 'Follow request sent');
     }
-    if (targetUid === currentUser.uid) return;
-    const isCurrentlyFollowing = followingIds.includes(targetUid);
-    setFollowingIds((prev) =>
-      isCurrentlyFollowing ? prev.filter((id) => id !== targetUid) : [...prev, targetUid]
-    );
-    setCurrentUser((prev) => ({
-      ...prev,
-      followingCount: Math.max(0, prev.followingCount + (isCurrentlyFollowing ? -1 : 1)),
-    }));
-    setCreators((prev) =>
-      prev.map((c) =>
-        c.uid === targetUid
-          ? { ...c, followersCount: Math.max(0, c.followersCount + (isCurrentlyFollowing ? -1 : 1)) }
-          : c
-      )
-    );
-    if (firebaseUser) {
-      const edgeRef = doc(db, 'followers', `${firebaseUser.uid}_${targetUid}`);
-      if (isCurrentlyFollowing) {
-        deleteDoc(edgeRef).catch(() => {});
-      } else {
-        setDoc(edgeRef, {
-          followerUid: firebaseUser.uid,
-          targetUid,
-          createdAt: serverTimestamp(),
-        }).catch(() => {});
-      }
-    }
   };
 
-  const respondToFriendRequest = (requestId: string, accept: boolean) => {
-    if (!requireAuth('Sign in to respond to friend requests.')) return;
-    const req = friendRequests.find((r) => r.id === requestId);
-    setFriendRequests((prev) =>
-      prev.map((r) => (r.id === requestId ? { ...r, status: accept ? 'accepted' : 'rejected' } : r))
-    );
-    if (accept && req) {
-      setFollowerIds((prev) => Array.from(new Set([...prev, req.fromUid])));
-      setCurrentUser((prev) => ({ ...prev, followersCount: prev.followersCount + 1 }));
-    }
-    showToast(accept ? (language === 'bn' ? 'অনুরোধ গৃহীত হয়েছে' : 'Friend request accepted') : 'Declined');
+  const respondToFriendRequest = async (requestId: string, accept: boolean) => {
+    if (!requireAuth()) return;
+    await apiFetch(`/api/friend-requests/${requestId}/respond`, {
+      method: 'POST',
+      body: JSON.stringify({ accept }),
+    });
+    await refreshState();
   };
 
-  const removeFollower = (followerUid: string) => {
-    if (!requireAuth('Sign in to manage followers.')) return;
-    setFollowerIds((prev) => prev.filter((id) => id !== followerUid));
-    setCurrentUser((prev) => ({ ...prev, followersCount: Math.max(0, prev.followersCount - 1) }));
+  const removeFollower = async (followerUid: string) => {
+    if (!requireAuth()) return;
+    await apiFetch(`/api/followers/${followerUid}`, { method: 'DELETE' });
+    await refreshState();
   };
 
-  const blockUser = (targetUid: string) => {
-    if (!requireAuth('Sign in to block or unblock users.')) return;
-    setUserPrivate((prev) => ({
-      ...prev,
-      blockedUserIds: Array.from(new Set([...prev.blockedUserIds, targetUid])),
-    }));
-    setFollowingIds((prev) => prev.filter((id) => id !== targetUid));
-    showToast(language === 'bn' ? 'ব্যবহারকারীকে ব্লক করা হয়েছে' : 'User blocked');
+  const blockUser = async (targetUid: string) => {
+    if (!requireAuth()) return;
+    await apiFetch(`/api/users/${targetUid}/block`, { method: 'POST' });
+    await refreshState();
+    showToast(language === 'bn' ? 'ইউজার ব্লক করা হয়েছে' : 'User blocked');
   };
 
-  const unblockUser = (targetUid: string) => {
-    if (!requireAuth('Sign in to manage blocked users.')) return;
-    setUserPrivate((prev) => ({
-      ...prev,
-      blockedUserIds: prev.blockedUserIds.filter((id) => id !== targetUid),
-    }));
-    showToast(language === 'bn' ? 'ব্লক সরানো হয়েছে' : 'User unblocked');
-  };
-
-  const uploadProfileImage = async (file: File, kind: 'avatar' | 'cover'): Promise<string> => {
-    const compressed = await compressImageToDataUrl(file, kind === 'avatar' ? 320 : 960, 0.82);
-    if (firebaseUser) {
-      try {
-        const res = await fetch(compressed);
-        const blob = await res.blob();
-        const folder = kind === 'avatar' ? 'avatars' : 'covers';
-        const storageRef = ref(storage, `${folder}/${firebaseUser.uid}/${Date.now()}.jpg`);
-        await uploadBytes(storageRef, blob, { contentType: 'image/jpeg' });
-        const downloadUrl = await getDownloadURL(storageRef);
-        return downloadUrl;
-      } catch {
-        // Fallback to compact JPEG data URL (bounded <= 200KB in firestore.rules)
-        return compressed;
-      }
-    }
-    return compressed;
+  const unblockUser = async (targetUid: string) => {
+    if (!requireAuth()) return;
+    await apiFetch(`/api/users/${targetUid}/block`, { method: 'DELETE' });
+    await refreshState();
+    showToast(language === 'bn' ? 'আনব্লক করা হয়েছে' : 'User unblocked');
   };
 
   const updateProfile: SocialVerseContextValue['updateProfile'] = async (updates) => {
-    if (!requireAuth(language === 'bn' ? 'প্রোফাইল এডিট করতে সাইন ইন করুন।' : 'Sign in or create an account to edit your profile.')) {
-      return 'Authentication required';
+    if (!requireAuth()) return 'Authentication required.';
+    if (updates.bio !== undefined && updates.bio.length > MAX_BIO_LENGTH) {
+      return `Bio must be ${MAX_BIO_LENGTH} characters or fewer.`;
     }
-
-    const nextUsername =
-      updates.username !== undefined ? normalizeUsername(updates.username) : currentUser.username;
-    const nextDisplayName =
-      updates.displayName !== undefined ? updates.displayName.trim() : currentUser.displayName;
-    const nextBio = updates.bio !== undefined ? updates.bio.trim() : currentUser.bio;
-    const nextPronouns =
-      updates.pronouns !== undefined ? updates.pronouns.trim().slice(0, 32) : currentUser.pronouns || '';
-    const nextWebsite =
-      updates.website !== undefined ? normalizeWebsiteUrl(updates.website) : currentUser.website || '';
-    const nextPhotoUrl = updates.photoUrl ?? currentUser.photoUrl;
-    const nextCoverUrl = updates.coverUrl ?? currentUser.coverUrl;
-    const nextInterests = updates.interests ?? currentUser.interests;
-    const nextIsPrivate = updates.isPrivate ?? currentUser.isPrivate;
-
-    if (!isValidUsername(nextUsername)) {
-      return t.auth.usernameInvalid;
+    try {
+      const res = await apiFetch<{ user: UserPublic }>('/api/profile', {
+        method: 'PATCH',
+        body: JSON.stringify(updates),
+      });
+      setCurrentUser(res.user);
+      upsertSavedLogin(res.user, userPrivate.email, sessionToken || '', Boolean(userPrivate.saveLoginInfo));
+      await refreshState();
+      showToast(language === 'bn' ? 'প্রোফাইল আপডেট হয়েছে' : 'Profile updated');
+      return null;
+    } catch (err) {
+      return err instanceof Error ? err.message : 'Failed to update profile.';
     }
-    if (!isValidDisplayName(nextDisplayName)) {
-      return 'Display name must be 1–50 characters.';
-    }
-    if (!isValidBio(nextBio)) {
-      return 'Bio must be 240 characters or fewer.';
-    }
-    if (updates.website !== undefined && !isValidWebsiteUrl(updates.website)) {
-      return 'Please enter a valid website URL (e.g. https://yourdomain.com).';
-    }
-
-    const usernameChanged = nextUsername !== currentUser.username;
-    if (
-      usernameChanged &&
-      creators.some((c) => c.username === nextUsername && c.uid !== currentUser.uid)
-    ) {
-      return t.auth.usernameTaken;
-    }
-
-    if (firebaseUser) {
-      try {
-        await runTransaction(db, async (tx) => {
-          const userRef = doc(db, 'users', firebaseUser.uid);
-          const userSnap = await tx.get(userRef);
-
-          if (usernameChanged) {
-            const newClaimRef = doc(db, 'usernames', nextUsername);
-            const newClaimSnap = await tx.get(newClaimRef);
-            if (newClaimSnap.exists() && newClaimSnap.data()?.uid !== firebaseUser.uid) {
-              throw new Error('USERNAME_TAKEN');
-            }
-            if (currentUser.username) {
-              const oldClaimRef = doc(db, 'usernames', currentUser.username);
-              const oldClaimSnap = await tx.get(oldClaimRef);
-              if (oldClaimSnap.exists() && oldClaimSnap.data()?.uid === firebaseUser.uid) {
-                tx.delete(oldClaimRef);
-              }
-            }
-            tx.set(newClaimRef, {
-              uid: firebaseUser.uid,
-              username: nextUsername,
-              createdAt: serverTimestamp(),
-            });
-          }
-
-          if (userSnap.exists()) {
-            tx.update(userRef, {
-              username: nextUsername,
-              displayName: nextDisplayName,
-              bio: nextBio,
-              pronouns: nextPronouns,
-              website: nextWebsite,
-              photoUrl: nextPhotoUrl,
-              coverUrl: nextCoverUrl,
-              interests: nextInterests,
-              isPrivate: nextIsPrivate,
-              onlineStatus: 'online',
-              lastSeenAt: new Date().toISOString(),
-              onboardingCompleted: true,
-              updatedAt: serverTimestamp(),
-            });
-          } else {
-            tx.set(userRef, {
-              uid: firebaseUser.uid,
-              username: nextUsername,
-              displayName: nextDisplayName,
-              bio: nextBio,
-              pronouns: nextPronouns,
-              website: nextWebsite,
-              photoUrl: nextPhotoUrl,
-              coverUrl: nextCoverUrl,
-              interests: nextInterests,
-              isPrivate: nextIsPrivate,
-              followersCount: currentUser.followersCount,
-              followingCount: currentUser.followingCount,
-              postsCount: currentUser.postsCount,
-              onlineStatus: 'online',
-              lastSeenAt: new Date().toISOString(),
-              onboardingCompleted: true,
-              createdAt: serverTimestamp(),
-              updatedAt: serverTimestamp(),
-            });
-          }
-        });
-      } catch (err) {
-        if (err instanceof Error && err.message === 'USERNAME_TAKEN') {
-          return t.auth.usernameTaken;
-        }
-        console.error('Firestore updateProfile error:', err);
-        return err instanceof Error ? err.message : 'Failed to save profile changes.';
-      }
-    }
-
-    const updatedUser: UserPublic = {
-      ...currentUser,
-      username: nextUsername,
-      displayName: nextDisplayName,
-      bio: nextBio,
-      pronouns: nextPronouns,
-      website: nextWebsite,
-      photoUrl: nextPhotoUrl,
-      coverUrl: nextCoverUrl,
-      interests: nextInterests,
-      isPrivate: nextIsPrivate,
-      updatedAt: new Date().toISOString(),
-    };
-
-    setCurrentUser(updatedUser);
-    setCreators((all) => {
-      const exists = all.some((c) => c.uid === updatedUser.uid);
-      return exists ? all.map((c) => (c.uid === updatedUser.uid ? updatedUser : c)) : [updatedUser, ...all];
-    });
-    setPosts((prev) =>
-      prev.map((p) =>
-        p.authorId === updatedUser.uid
-          ? {
-              ...p,
-              authorUsername: updatedUser.username,
-              authorDisplayName: updatedUser.displayName,
-              authorAvatar: updatedUser.photoUrl,
-            }
-          : p
-      )
-    );
-
-    showToast(language === 'bn' ? 'প্রোফাইল আপডেট হয়েছে' : 'Profile saved');
-    return null;
   };
 
-  const updatePrivateSettings = (updates: Partial<UserPrivate>) => {
-    if (!requireAuth('Sign in to change privacy & security settings.')) return;
-    setUserPrivate((prev) => ({ ...prev, ...updates, updatedAt: new Date().toISOString() }));
-    if (firebaseUser) {
-      updateDoc(doc(db, 'users', firebaseUser.uid, 'private', 'info'), {
-        ...updates,
-        updatedAt: serverTimestamp(),
+  const uploadImageDataUrl = async (file: File, maxDim = 960): Promise<string> => {
+    if (file.type.startsWith('video/')) {
+      return readFileAsDataUrl(file);
+    }
+    return compressImageToDataUrl(file, maxDim, 0.82);
+  };
+
+  const uploadProfileImage = async (file: File, kind: 'avatar' | 'cover'): Promise<string> => {
+    const maxDim = kind === 'avatar' ? 480 : 1200;
+    return compressImageToDataUrl(file, maxDim, 0.82);
+  };
+
+  const updatePrivateSettings = async (updates: Partial<UserPrivate>) => {
+    setUserPrivate((prev) => ({ ...prev, ...updates }));
+    if (isAuthenticated) {
+      await apiFetch('/api/settings/private', {
+        method: 'PATCH',
+        body: JSON.stringify(updates),
       }).catch(() => {});
     }
-    showToast(language === 'bn' ? 'সেটিংস সংরক্ষিত হয়েছে' : 'Preferences updated');
   };
 
-  const markAllNotificationsRead = () => {
-    setNotifications((prev) => prev.map((n) => ({ ...n, read: true })));
+  const markAllNotificationsRead = async () => {
+    if (!isAuthenticated) return;
+    await apiFetch('/api/notifications/read-all', { method: 'POST' });
+    await refreshState();
   };
 
   const openReportModal = (
@@ -1388,159 +1655,202 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
     id: string,
     label: string
   ) => {
-    if (!requireAuth(language === 'bn' ? 'রিপোর্ট করতে সাইন ইন করুন।' : 'Sign in to report content.')) {
-      return;
-    }
+    if (!requireAuth()) return;
     setReportTarget({ type, id, label });
     setSubscreenState('report');
   };
 
-  const submitReport = (reason: string) => {
-    if (!requireAuth('Sign in to submit reports.')) return;
-    if (!reportTarget || reason.trim().length < 3) return;
-    const item: ReportItem = {
-      id: `rep_${Date.now()}`,
-      reporterUid: currentUser.uid,
-      targetType: reportTarget.type,
-      targetId: reportTarget.id,
-      reason: reason.trim(),
-      status: 'pending',
-      createdAt: new Date().toISOString(),
-    };
-    setReports((prev) => [item, ...prev]);
-    if (firebaseUser) {
-      setDoc(doc(db, 'reports', item.id), {
-        id: item.id,
-        reporterUid: firebaseUser.uid,
-        targetType: item.targetType,
-        targetId: item.targetId,
-        reason: item.reason,
-        status: 'pending',
-        createdAt: serverTimestamp(),
-      }).catch(() => {});
-    }
+  const submitReport = async (reason: string) => {
+    if (!reportTarget || !reason.trim()) return;
+    const res = await apiFetch<{ report: ReportItem }>('/api/reports', {
+      method: 'POST',
+      body: JSON.stringify({
+        targetType: reportTarget.type,
+        targetId: reportTarget.id,
+        reason,
+      }),
+    });
+    setReports((prev) => [res.report, ...prev]);
     setSubscreenState(null);
     setReportTarget(null);
-    showToast(language === 'bn' ? 'রিপোর্ট জমা দেওয়া হয়েছে' : 'Report submitted for review');
+    showToast(language === 'bn' ? 'রিপোর্ট জমা হয়েছে' : 'Report submitted for review');
   };
 
   const openUserProfile = (uid: string) => {
-    setViewedProfileUid(uid === currentUser.uid ? null : uid);
+    setViewedProfileUid(uid);
     setActiveTab('profile');
     setSubscreenState(null);
   };
 
-  const callAiAssistant = async (task: string, contextText: string) => {
-    if (firebaseUser) {
-      const token = await firebaseUser.getIdToken();
-      const res = await fetch('/api/ai/profile-assist', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({
-          task,
-          contextText,
-          currentBio: currentUser.bio,
-          language,
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.error || 'AI Assistant request failed');
-      }
-      return data as { suggestions: string[]; tip: string };
+  const callAiAssistant = async (
+    task: string,
+    contextText: string
+  ): Promise<{ suggestions: string[]; tip: string }> => {
+    if (!sessionToken) {
+      throw new Error('AUTH_REQUIRED');
     }
-    throw new Error('AUTH_REQUIRED');
+    return apiFetch<{ suggestions: string[]; tip: string }>('/api/ai/profile-assist', {
+      method: 'POST',
+      body: JSON.stringify({
+        task,
+        contextText,
+        currentBio: currentUser.bio,
+        language,
+      }),
+    });
   };
 
-  const value: SocialVerseContextValue = {
-    stage,
-    setStage,
-    firebaseUser,
-    isAuthenticated,
-    isPreviewMode,
-    authModalOpen,
-    authModalReason,
-    openAuthModal,
-    closeAuthModal,
-    requireAuth,
-    isLocked,
-    unlockBiometric: () => setIsLocked(false),
-    currentUser,
-    userPrivate,
-    language,
-    setLanguage,
-    t,
-    theme,
-    setTheme,
-    activeTab,
-    setActiveTab,
-    subscreen,
-    setSubscreen,
-    viewedProfileUid,
-    openUserProfile,
-    activeStoryIndex,
-    setActiveStoryIndex,
-    activeChatId,
-    setActiveChatId,
-    reportTarget,
-    openReportModal,
-    creators,
-    posts: posts.filter((p) => !userPrivate.blockedUserIds.includes(p.authorId)),
-    visiblePostLimit,
-    loadMorePosts: () => setVisiblePostLimit((n) => n + 6),
-    commentsByPost,
-    stories: activeStories,
-    chats,
-    messagesByChat,
-    friendRequests,
-    followingIds,
-    followerIds,
-    notifications,
-    reports,
-    toastMessage,
-    showToast,
-    enterPreviewMode,
-    signInWithGoogle,
-    signInWithEmail,
-    registerWithEmail,
-    resendVerificationEmail,
-    sendPasswordReset,
-    completeOnboarding,
-    logout,
-    deleteAccount,
-    createPost,
-    editPost,
-    deletePost,
-    toggleLikePost,
-    toggleSavePost,
-    sharePost,
-    addComment,
-    createStory,
-    reactToStory,
-    replyToStory,
-    deleteStory,
-    muteStoryAuthor,
-    sendMessage,
-    reactToMessage,
-    deleteMessage,
-    createDirectOrGroupChat,
-    toggleFollow,
-    respondToFriendRequest,
-    removeFollower,
-    blockUser,
-    unblockUser,
-    updateProfile,
-    uploadProfileImage,
-    updatePrivateSettings,
-    markAllNotificationsRead,
-    submitReport,
-    callAiAssistant,
-  };
+  const activeStories = useMemo(
+    () =>
+      stories.filter(
+        (s) =>
+          !userPrivate.mutedStoryUserIds.includes(s.authorId) &&
+          !userPrivate.blockedUserIds.includes(s.authorId)
+      ),
+    [stories, userPrivate.mutedStoryUserIds, userPrivate.blockedUserIds]
+  );
 
-  return <SocialVerseContext.Provider value={value}>{children}</SocialVerseContext.Provider>;
+  const visiblePosts = useMemo(
+    () => posts.filter((p) => !userPrivate.blockedUserIds.includes(p.authorId)),
+    [posts, userPrivate.blockedUserIds]
+  );
+
+  return (
+    <SocialVerseContext.Provider
+      value={{
+        stage,
+        setStage,
+        sessionToken,
+        isAuthenticated,
+        authModalOpen,
+        authModalReason,
+        openAuthModal,
+        closeAuthModal,
+        requireAuth,
+        isLocked,
+        unlockBiometric: () => setIsLocked(false),
+        pendingPhotoSetup,
+        setPendingPhotoSetup,
+        savedLogins,
+        removeSavedLogin,
+        currentUser,
+        userPrivate,
+        language,
+        setLanguage,
+        t,
+        theme,
+        setTheme,
+        activeTab,
+        setActiveTab,
+        subscreen,
+        setSubscreen,
+        viewedProfileUid,
+        openUserProfile,
+        activeStoryIndex,
+        setActiveStoryIndex,
+        activeChatId,
+        setActiveChatId,
+        reportTarget,
+        openReportModal,
+        creators,
+        posts: visiblePosts,
+        visiblePostLimit,
+        loadMorePosts: () => setVisiblePostLimit((v) => v + 6),
+        commentsByPost,
+        stories: activeStories,
+        chats,
+        messagesByChat,
+        notes,
+        stickers,
+        favoriteStickerIds,
+        broadcastChannels,
+        friendRequests,
+        followingIds,
+        followerIds,
+        notifications,
+        reports,
+        toastMessage,
+        showToast,
+        activeCall,
+        localStream,
+        remoteStream,
+        startCall,
+        acceptIncomingCall,
+        declineIncomingCall,
+        endCall,
+        toggleCallMute,
+        toggleCallCamera,
+        sendOtp,
+        verifyOtp,
+        checkUsernameAvailability,
+        completeSignupRegistration,
+        loginWithIdentifier,
+        verifyTwoFactorLogin,
+        loginWithSavedAccount,
+        changePassword,
+        resetPasswordWithOtp,
+        deactivateAccount,
+        logout,
+        deleteAccount,
+        createPost,
+        editPost,
+        deletePost,
+        toggleLikePost,
+        likePostIfNeeded,
+        toggleSavePost,
+        sharePost,
+        shareReelToInbox,
+        addComment,
+        createStory,
+        reactToStory,
+        replyToStory,
+        deleteStory,
+        muteStoryAuthor,
+        publishNote,
+        deleteMyNote,
+        toggleLikeNote,
+        createSticker,
+        toggleFavoriteSticker,
+        typingByChat,
+        sendTypingSignal,
+        sendMessage,
+        editMessage,
+        reactToMessage,
+        starMessage,
+        pinMessage,
+        forwardMessage,
+        updateChatPreferences,
+        deleteMessage,
+        createDirectOrGroupChat,
+        updateChatTheme,
+        updateChatNickname,
+        addGroupMember,
+        approveGroupMember,
+        removeGroupMember,
+        updateGroupRole,
+        updateGroupSettings,
+        createBroadcastChannel,
+        toggleFollowBroadcast,
+        assignBroadcastRole,
+        sendBroadcastMessage,
+        reactBroadcastMessage,
+        toggleFollow,
+        respondToFriendRequest,
+        removeFollower,
+        blockUser,
+        unblockUser,
+        updateProfile,
+        uploadImageDataUrl,
+        uploadProfileImage,
+        updatePrivateSettings,
+        markAllNotificationsRead,
+        submitReport,
+        callAiAssistant,
+      }}
+    >
+      {children}
+    </SocialVerseContext.Provider>
+  );
 }
 
 export function useSocialVerse() {

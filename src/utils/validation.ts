@@ -1,7 +1,89 @@
-import type { Story, UserPrivate } from '../types/social';
+import type {
+  BroadcastChannel,
+  Chat,
+  NicknameFontStyle,
+  Story,
+  UserPrivate,
+  UserPublic,
+} from '../types/social';
 
 export const USERNAME_REGEX = /^[a-z0-9_]{3,24}$/;
 export const DOC_ID_REGEX = /^[a-zA-Z0-9_-]{1,128}$/;
+
+export const MAX_BIO_LENGTH = 150;
+export const NICKNAME_COOLDOWN_DAYS = 7;
+export const USERNAME_COOLDOWN_DAYS = 14;
+export const NICKNAME_COOLDOWN_MS = NICKNAME_COOLDOWN_DAYS * 24 * 3_600_000;
+export const USERNAME_COOLDOWN_MS = USERNAME_COOLDOWN_DAYS * 24 * 3_600_000;
+export const BROADCAST_MIN_FOLLOWERS = 500;
+export const MAX_GROUP_MEMBERS = 250;
+
+export const NICKNAME_FONT_CLASSES: Record<NicknameFontStyle, string> = {
+  classic: 'font-display font-bold tracking-tight',
+  serif: 'font-serif font-bold tracking-normal',
+  mono: 'font-mono font-semibold tracking-tight',
+  display: 'font-display font-extrabold tracking-wide uppercase',
+  italic: 'font-serif italic font-semibold tracking-normal',
+};
+
+export const CHAT_THEME_PRESETS = [
+  {
+    id: 'default' as const,
+    name: 'Liquid Glass',
+    nameBn: 'লিকুইড গ্লাস',
+    bgClass: 'bg-gradient-to-b from-slate-50/60 to-sky-50/40 dark:from-slate-950/60 dark:to-slate-900/60',
+    bubbleMine: 'bg-gradient-to-br from-sky-500 to-blue-600 text-white',
+    previewSwatch: 'from-sky-400 to-blue-600',
+  },
+  {
+    id: 'love' as const,
+    name: 'Love & Rose',
+    nameBn: 'লাভ ও রোজ',
+    bgClass: 'bg-gradient-to-b from-rose-100/80 via-pink-50/70 to-fuchsia-100/70 dark:from-rose-950/80 dark:via-pink-950/60 dark:to-slate-950/90',
+    bubbleMine: 'bg-gradient-to-br from-rose-500 to-pink-600 text-white',
+    previewSwatch: 'from-rose-400 to-pink-600',
+  },
+  {
+    id: 'ocean' as const,
+    name: 'Deep Ocean',
+    nameBn: 'ডিপ ওশান',
+    bgClass: 'bg-gradient-to-b from-cyan-100/80 via-sky-100/70 to-blue-100/80 dark:from-cyan-950/85 dark:via-sky-950/80 dark:to-slate-950/90',
+    bubbleMine: 'bg-gradient-to-br from-cyan-500 to-teal-600 text-white',
+    previewSwatch: 'from-cyan-400 to-teal-600',
+  },
+  {
+    id: 'aurora' as const,
+    name: 'Midnight Aurora',
+    nameBn: 'মিডনাইট অরোরা',
+    bgClass: 'bg-gradient-to-b from-indigo-100/80 via-violet-100/70 to-sky-100/70 dark:from-indigo-950/90 dark:via-violet-950/75 dark:to-slate-950/95',
+    bubbleMine: 'bg-gradient-to-br from-indigo-500 to-violet-600 text-white',
+    previewSwatch: 'from-indigo-500 to-violet-600',
+  },
+  {
+    id: 'sunset' as const,
+    name: 'Golden Sunset',
+    nameBn: 'সোনালী সন্ধ্যা',
+    bgClass: 'bg-gradient-to-b from-amber-100/80 via-orange-50/70 to-rose-100/70 dark:from-amber-950/80 dark:via-orange-950/70 dark:to-slate-950/90',
+    bubbleMine: 'bg-gradient-to-br from-amber-500 to-orange-600 text-white',
+    previewSwatch: 'from-amber-400 to-orange-600',
+  },
+  {
+    id: 'emerald' as const,
+    name: 'Emerald Mist',
+    nameBn: 'এমারেল্ড মিস্ট',
+    bgClass: 'bg-gradient-to-b from-emerald-100/80 via-teal-50/70 to-cyan-100/70 dark:from-emerald-950/85 dark:via-teal-950/70 dark:to-slate-950/90',
+    bubbleMine: 'bg-gradient-to-br from-emerald-500 to-teal-600 text-white',
+    previewSwatch: 'from-emerald-400 to-teal-600',
+  },
+];
+
+export const REPORT_SUGGESTED_REASONS = [
+  { id: 'spam', en: 'Spam or misleading links', bn: 'স্প্যাম বা বিভ্রান্তিকর লিংক' },
+  { id: 'harassment', en: 'Harassment or bullying', bn: 'হয়রানি বা অপমানজনক আচরণ' },
+  { id: 'impersonation', en: 'Pretending to be someone else', bn: 'ভুয়া পরিচয় বা ছদ্মবেশ' },
+  { id: 'inappropriate', en: 'Inappropriate or unsafe content', bn: 'অনুপযুক্ত বা অনিরাপদ কনটেন্ট' },
+  { id: 'scam', en: 'Scam, fraud, or suspicious activity', bn: 'প্রতারণা বা সন্দেহজনক কার্যকলাপ' },
+];
 
 export function normalizeUsername(raw: string): string {
   return raw.trim().toLowerCase().replace(/[^a-z0-9_]/g, '');
@@ -11,13 +93,656 @@ export function isValidUsername(username: string): boolean {
   return USERNAME_REGEX.test(username);
 }
 
+const EMAIL_FORMAT_REGEX = /^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)+$/i;
+
+export const DISPOSABLE_EMAIL_DOMAINS = new Set<string>([
+  '10mail.org',
+  '10minutemail.co.uk',
+  '10minutemail.com',
+  '10minutemail.de',
+  '10minutemail.net',
+  '10minutemail.org',
+  '10minutesmail.com',
+  '10minemail.com',
+  '20email.it',
+  '20mail.it',
+  '33mail.com',
+  'anonaddy.me',
+  'anonbox.net',
+  'anonymbox.com',
+  'antichef.com',
+  'antichef.net',
+  'binkmail.com',
+  'bobmail.info',
+  'bofthew.com',
+  'boun.cr',
+  'bouncr.com',
+  'burnermail.io',
+  'burstmail.info',
+  'chacuo.net',
+  'clrmail.com',
+  'crazymailing.com',
+  'curryworld.de',
+  'deadaddress.com',
+  'despam.it',
+  'despammed.com',
+  'devnullmail.com',
+  'discard.email',
+  'discardmail.com',
+  'discardmail.de',
+  'disposable.com',
+  'disposableaddress.com',
+  'disposableemailaddresses.com',
+  'disposableinbox.com',
+  'disposeamail.com',
+  'disposemail.com',
+  'dispostable.com',
+  'dodgeit.com',
+  'dodgit.com',
+  'donemail.ru',
+  'dontreg.com',
+  'dontsendmespam.de',
+  'dropmail.me',
+  'dump-email.info',
+  'dumpandjunk.com',
+  'dumpyemail.com',
+  'e4ward.com',
+  'easytrashmail.com',
+  'email60.com',
+  'emailage.cf',
+  'emailage.ga',
+  'emailage.gq',
+  'emailage.ml',
+  'emailage.tk',
+  'emailfake.com',
+  'emailgo.de',
+  'emailias.com',
+  'emailigo.de',
+  'emailinfive.com',
+  'emaillime.com',
+  'emailmiser.com',
+  'emailondeck.com',
+  'emailproxsy.com',
+  'emailsensei.com',
+  'emailtemporanea.com',
+  'emailtemporanea.net',
+  'emailtemporar.ro',
+  'emailtemporario.com.br',
+  'emailthe.net',
+  'emailtmp.com',
+  'emailwarden.com',
+  'emailx.at.hm',
+  'emltmp.com',
+  'ephemail.net',
+  'etranquil.com',
+  'etranquil.net',
+  'etranquil.org',
+  'evopo.com',
+  'explodemail.com',
+  'express.net.ua',
+  'eyepaste.com',
+  'fakeinbox.com',
+  'fakeinformation.com',
+  'fakemail.fr',
+  'fakemailgenerator.com',
+  'fastacura.com',
+  'fastchevy.com',
+  'fastchrysler.com',
+  'fastkawasaki.com',
+  'fastmazda.com',
+  'fastmitsubishi.com',
+  'fastnissan.com',
+  'fastsubaru.com',
+  'fastsuzuki.com',
+  'fasttoyota.com',
+  'fastyamaha.com',
+  'filzmail.com',
+  'fixmail.tk',
+  'fleckens.hu',
+  'fr33mail.info',
+  'frapmail.com',
+  'front14.org',
+  'fudgerub.com',
+  'garliclife.com',
+  'generator.email',
+  'get1mail.com',
+  'get2mail.fr',
+  'getairmail.com',
+  'getmails.eu',
+  'getnada.com',
+  'getonemail.com',
+  'gishpuppy.com',
+  'gmial.com',
+  'goemailgo.com',
+  'gotmail.net',
+  'gotmail.org',
+  'gotti.otherinbox.com',
+  'great-host.in',
+  'greensloth.com',
+  'grr.la',
+  'guerrillamail.biz',
+  'guerrillamail.com',
+  'guerrillamail.de',
+  'guerrillamail.info',
+  'guerrillamail.net',
+  'guerrillamail.org',
+  'guerrillamailblock.com',
+  'h.mintemail.com',
+  'harakirimail.com',
+  'hartbot.de',
+  'hat-geld.de',
+  'hidemail.de',
+  'hidzz.com',
+  'hmamail.com',
+  'hochsitze.com',
+  'hotpop.com',
+  'hulapla.de',
+  'ieatspam.eu',
+  'ieatspam.info',
+  'ieh-mail.de',
+  'ihateyoualot.info',
+  'iheartspam.org',
+  'imails.info',
+  'inbox.si',
+  'inboxalias.com',
+  'inboxbear.com',
+  'inboxclean.com',
+  'inboxclean.org',
+  'incognitomail.com',
+  'incognitomail.net',
+  'incognitomail.org',
+  'insorg-mail.info',
+  'instant-mail.de',
+  'instantemailaddress.com',
+  'ip6.li',
+  'irish2me.com',
+  'iwi.net',
+  'jetable.com',
+  'jetable.fr.nf',
+  'jetable.net',
+  'jetable.org',
+  'jnxjn.com',
+  'jourrapide.com',
+  'junk1e.com',
+  'kasmail.com',
+  'kaspop.com',
+  'keepmymail.com',
+  'killmail.com',
+  'killmail.net',
+  'kismail.ru',
+  'klassmaster.com',
+  'klzlk.com',
+  'koszmail.pl',
+  'kurzepost.de',
+  'lawlita.com',
+  'letthemeatspam.com',
+  'lhsdv.com',
+  'lifebyfood.com',
+  'link2mail.net',
+  'litedrop.com',
+  'lol.ovpn.to',
+  'lolfreak.net',
+  'lookugly.com',
+  'lopl.co.cc',
+  'lortemail.dk',
+  'lr78.com',
+  'lroid.com',
+  'm4ilweb.info',
+  'maboard.com',
+  'mail-filter.com',
+  'mail-temporaire.fr',
+  'mail.by',
+  'mail.mezimages.net',
+  'mail2rss.org',
+  'mail333.com',
+  'mail4trash.com',
+  'mailbidon.com',
+  'mailblocks.com',
+  'mailbucket.org',
+  'mailcat.biz',
+  'mailcatch.com',
+  'mailde.de',
+  'mailde.info',
+  'maildrop.cc',
+  'maildx.com',
+  'maileater.com',
+  'mailexpire.com',
+  'mailfa.tk',
+  'mailforspam.com',
+  'mailfreeonline.com',
+  'mailguard.me',
+  'mailimate.com',
+  'mailin8r.com',
+  'mailinater.com',
+  'mailinator.com',
+  'mailinator.net',
+  'mailinator.org',
+  'mailinator2.com',
+  'mailincubator.com',
+  'mailismagic.com',
+  'mailme.ir',
+  'mailme.lv',
+  'mailme24.com',
+  'mailmetrash.com',
+  'mailmoat.com',
+  'mailnator.com',
+  'mailnesia.com',
+  'mailnull.com',
+  'mailorg.org',
+  'mailpick.biz',
+  'mailpoof.com',
+  'mailproxsy.com',
+  'mailquack.com',
+  'mailrock.biz',
+  'mailscrap.com',
+  'mailshell.com',
+  'mailsiphon.com',
+  'mailslite.com',
+  'mailtemp.info',
+  'mailtome.de',
+  'mailtothis.com',
+  'mailtrash.net',
+  'mailtv.net',
+  'mailtv.tv',
+  'mailzi.ru',
+  'mailzilla.com',
+  'mailzilla.org',
+  'makemetheking.com',
+  'manybrain.com',
+  'mbx.cc',
+  'mega.zik.dj',
+  'meinspamschutz.de',
+  'melt.li',
+  'meltmail.com',
+  'messagebeamer.de',
+  'mierdamail.com',
+  'mintemail.com',
+  'minuteinbox.com',
+  'moakt.cc',
+  'moakt.co',
+  'moakt.com',
+  'moburl.com',
+  'mohmal.com',
+  'mohmal.im',
+  'mohmal.in',
+  'mohmal.tech',
+  'moncourrier.fr.nf',
+  'monemail.fr.nf',
+  'monmail.fr.nf',
+  'monumentmail.com',
+  'mt2009.com',
+  'mt2014.com',
+  'mvrht.net',
+  'my10minutemail.com',
+  'mycleaninbox.net',
+  'mymail-in.net',
+  'mypacks.net',
+  'mypartyclip.de',
+  'myphantomemail.com',
+  'myspaceinc.com',
+  'myspaceinc.net',
+  'myspaceinc.org',
+  'myspacepimpedup.com',
+  'myspamless.com',
+  'mytemp.email',
+  'mytrashmail.com',
+  'nada.email',
+  'neomailbox.com',
+  'nervmich.net',
+  'nervtmich.net',
+  'netmails.com',
+  'netmails.net',
+  'netzidiot.de',
+  'neverbox.com',
+  'nice-4u.com',
+  'no-spam.ws',
+  'noblepioneer.com',
+  'nobulk.com',
+  'noclickemail.com',
+  'nogmailspam.info',
+  'nomail.pw',
+  'nomail.xl.cx',
+  'nomail2me.com',
+  'nomorespamemails.com',
+  'nospam.ze.tc',
+  'nospam4.us',
+  'nospamfor.us',
+  'nospamthanks.info',
+  'notmailinator.com',
+  'nowmymail.com',
+  'nurfuerspam.de',
+  'nus.edu.sg',
+  'nwldx.com',
+  'objectmail.com',
+  'obobbo.com',
+  'odaymail.com',
+  'one-time.email',
+  'oneoffemail.com',
+  'onewaymail.com',
+  'online.ms',
+  'oopi.org',
+  'opayq.com',
+  'ordinaryamerican.net',
+  'otherinbox.com',
+  'ourklips.com',
+  'outlawspam.com',
+  'ovpn.to',
+  'owlpic.com',
+  'pancakemail.com',
+  'pimpedupmyspace.com',
+  'pjjkp.com',
+  'plexolan.de',
+  'poczta.onet.pl',
+  'politikerclub.de',
+  'poofy.org',
+  'pookmail.com',
+  'privacy.net',
+  'privy-mail.com',
+  'proxymail.eu',
+  'prtnx.com',
+  'putthisinyourspamdatabase.com',
+  'quickinbox.com',
+  'rcpt.at',
+  'reallymymail.com',
+  'realtyalerts.ca',
+  'recode.me',
+  'recursor.net',
+  'regbypass.com',
+  'regbypass.comsafe-mail.net',
+  'rejectmail.com',
+  'rhyta.com',
+  'rklips.com',
+  'rmqkr.net',
+  'rppkn.com',
+  'rtrtr.com',
+  's0ny.net',
+  'safe-mail.net',
+  'safersignup.de',
+  'safetymail.info',
+  'safetypost.de',
+  'sandelf.de',
+  'saynotospams.com',
+  'selfdestructingmail.com',
+  'sendspamhere.com',
+  'sharklasers.com',
+  'shiftmail.com',
+  'shitmail.me',
+  'shitmail.org',
+  'shortmail.net',
+  'sibmail.com',
+  'skeefmail.com',
+  'slaskpost.se',
+  'slopsbox.com',
+  'smellfear.com',
+  'snakemail.com',
+  'sneakemail.com',
+  'snkmail.com',
+  'sofimail.com',
+  'sofort-mail.de',
+  'sogetthis.com',
+  'soodonims.com',
+  'spam.la',
+  'spam.su',
+  'spam4.me',
+  'spamavert.com',
+  'spambob.com',
+  'spambob.net',
+  'spambob.org',
+  'spambog.com',
+  'spambog.de',
+  'spambog.ru',
+  'spambox.info',
+  'spambox.irishspringrealty.com',
+  'spambox.us',
+  'spamcannon.com',
+  'spamcannon.net',
+  'spamcero.com',
+  'spamcon.org',
+  'spamcorptastic.com',
+  'spamcowboy.com',
+  'spamcowboy.net',
+  'spamcowboy.org',
+  'spamday.com',
+  'spamex.com',
+  'spamfree.eu',
+  'spamfree24.com',
+  'spamfree24.de',
+  'spamfree24.eu',
+  'spamfree24.info',
+  'spamfree24.net',
+  'spamfree24.org',
+  'spamgourmet.com',
+  'spamgourmet.net',
+  'spamgourmet.org',
+  'spamherelots.com',
+  'spamhereplease.com',
+  'spamhole.com',
+  'spamify.com',
+  'spaminator.de',
+  'spamkill.info',
+  'spaml.com',
+  'spaml.de',
+  'spammotel.com',
+  'spamobox.com',
+  'spamoff.de',
+  'spamslicer.com',
+  'spamspot.com',
+  'spamthis.co.uk',
+  'spamthisplease.com',
+  'spamtrail.com',
+  'speed.1s.fr',
+  'supergreatmail.com',
+  'supermailer.jp',
+  'suremail.info',
+  'teewars.org',
+  'teleworm.com',
+  'teleworm.us',
+  'temp-mail.de',
+  'temp-mail.io',
+  'temp-mail.org',
+  'temp-mail.ru',
+  'tempail.com',
+  'tempalias.com',
+  'tempe-mail.com',
+  'tempemail.biz',
+  'tempemail.co.za',
+  'tempemail.com',
+  'tempemail.net',
+  'tempinbox.co.uk',
+  'tempinbox.com',
+  'tempmail.co',
+  'tempmail.com',
+  'tempmail.de',
+  'tempmail.eu',
+  'tempmail.it',
+  'tempmail.net',
+  'tempmail.org',
+  'tempmail.plus',
+  'tempmail.us',
+  'tempmail2.com',
+  'tempmaildemo.com',
+  'tempmailer.com',
+  'tempmailer.de',
+  'tempmailo.com',
+  'tempomail.fr',
+  'temporaryemail.net',
+  'temporaryemail.us',
+  'temporaryforwarding.com',
+  'temporaryinbox.com',
+  'temporarymailaddress.com',
+  'tempr.email',
+  'thanksnospam.info',
+  'thankyou2010.com',
+  'thisisnotmyrealemail.com',
+  'throwawayemailaddress.com',
+  'throwawaymail.com',
+  'tilien.com',
+  'tmail.ws',
+  'tmailinator.com',
+  'tmpmail.net',
+  'tmpmail.org',
+  'tradermail.info',
+  'trash-amil.com',
+  'trash-mail.at',
+  'trash-mail.com',
+  'trash-mail.de',
+  'trash2009.com',
+  'trashemail.de',
+  'trashmail.at',
+  'trashmail.com',
+  'trashmail.de',
+  'trashmail.me',
+  'trashmail.net',
+  'trashmail.org',
+  'trashmail.ws',
+  'trashmailer.com',
+  'trashymail.com',
+  'trashymail.net',
+  'trbvm.com',
+  'trialmail.de',
+  'tyldd.com',
+  'uggsrock.com',
+  'upliftnow.com',
+  'uplipht.com',
+  'venompen.com',
+  'veryrealemail.com',
+  'viditag.com',
+  'viewcastmedia.com',
+  'viewcastmedia.net',
+  'viewcastmedia.org',
+  'webm4il.info',
+  'wegwerfadresse.de',
+  'wegwerfemail.com',
+  'wegwerfemail.de',
+  'wegwerfmail.de',
+  'wegwerfmail.info',
+  'wegwerfmail.net',
+  'wegwerfmail.org',
+  'wetrainbayarea.com',
+  'wetrainbayarea.org',
+  'wh4f.org',
+  'whyspam.me',
+  'willselfdestruct.com',
+  'winemaven.info',
+  'wronghead.com',
+  'wuzup.net',
+  'wuzupmail.net',
+  'wwwnew.eu',
+  'xagloo.com',
+  'xemaps.com',
+  'xents.com',
+  'xmaily.com',
+  'xoxy.net',
+  'yep.it',
+  'yogamaven.com',
+  'yopmail.com',
+  'yopmail.fr',
+  'yopmail.net',
+  'yuurok.com',
+  'zehnminutenmail.de',
+  'zippymail.info',
+  'zoaxe.com',
+  'zoemail.net',
+  'zoemail.org',
+]);
+
+const DISPOSABLE_HOST_PATTERN =
+  /(^|\.)(tempmail|temp-mail|tmpmail|10minutemail|10minemail|guerrillamail|mailinator|yopmail|trashmail|throwawaymail|disposable|burnermail|fakeinbox|fakemail|getnada|maildrop|mohmal|emltmp|mytemp|tempr|sharklasers|mailnesia|emailondeck|dropmail|minuteinbox|dispostable|wegwerfmail|spam4)\b/i;
+
+export function isValidEmailFormat(email: string): boolean {
+  const clean = email.trim().toLowerCase();
+  return clean.length <= 254 && EMAIL_FORMAT_REGEX.test(clean);
+}
+
+export function isDisposableEmail(email: string): boolean {
+  const clean = email.trim().toLowerCase();
+  const atIdx = clean.lastIndexOf('@');
+  if (atIdx < 1) return false;
+  const domain = clean.slice(atIdx + 1).replace(/\.+$/, '');
+  if (!domain) return true;
+  if (DISPOSABLE_EMAIL_DOMAINS.has(domain)) return true;
+
+  // Check parent domains for subdomain temp mail (e.g. a.b.yopmail.com)
+  const labels = domain.split('.');
+  for (let i = 1; i < labels.length - 1; i++) {
+    const parent = labels.slice(i).join('.');
+    if (DISPOSABLE_EMAIL_DOMAINS.has(parent)) return true;
+  }
+
+  return DISPOSABLE_HOST_PATTERN.test(domain);
+}
+
+export function canonicalizeEmail(email: string): string {
+  const clean = email.trim().toLowerCase();
+  const atIdx = clean.lastIndexOf('@');
+  if (atIdx < 1) return clean;
+  let local = clean.slice(0, atIdx);
+  let domain = clean.slice(atIdx + 1);
+
+  if (domain === 'googlemail.com') {
+    domain = 'gmail.com';
+  }
+  if (domain === 'gmail.com') {
+    const plusIdx = local.indexOf('+');
+    if (plusIdx !== -1) local = local.slice(0, plusIdx);
+    local = local.replace(/\./g, '');
+  } else if (
+    domain === 'outlook.com' ||
+    domain === 'hotmail.com' ||
+    domain === 'live.com' ||
+    domain === 'icloud.com' ||
+    domain === 'me.com' ||
+    domain === 'proton.me' ||
+    domain === 'protonmail.com' ||
+    domain === 'yahoo.com'
+  ) {
+    const plusIdx = local.indexOf('+');
+    if (plusIdx !== -1) local = local.slice(0, plusIdx);
+  }
+  return `${local}@${domain}`;
+}
+
+export function validateSignupEmail(
+  email: string,
+  lang: 'en' | 'bn' = 'en'
+): { valid: boolean; reason?: string; cleanEmail: string; canonicalEmail: string } {
+  const cleanEmail = email.trim().toLowerCase();
+  if (!isValidEmailFormat(cleanEmail)) {
+    return {
+      valid: false,
+      cleanEmail,
+      canonicalEmail: cleanEmail,
+      reason:
+        lang === 'bn'
+          ? 'সঠিক একটি ইমেইল ঠিকানা লিখুন (যেমন: name@gmail.com)।'
+          : 'Please enter a valid email address (e.g. name@gmail.com).',
+    };
+  }
+  if (isDisposableEmail(cleanEmail)) {
+    return {
+      valid: false,
+      cleanEmail,
+      canonicalEmail: canonicalizeEmail(cleanEmail),
+      reason:
+        lang === 'bn'
+          ? 'টেম্পোরারি বা ডিসপোজেবল ইমেইল অনুমোদিত নয়। আপনার আসল Gmail বা স্থায়ী ইমেইল ব্যবহার করুন।'
+          : 'Temporary or disposable email addresses are not allowed. Please use a real Gmail or permanent email.',
+    };
+  }
+  return {
+    valid: true,
+    cleanEmail,
+    canonicalEmail: canonicalizeEmail(cleanEmail),
+  };
+}
+
 export function isValidDisplayName(name: string): boolean {
   const trimmed = name.trim();
   return trimmed.length >= 1 && trimmed.length <= 50;
 }
 
 export function isValidBio(bio: string): boolean {
-  return bio.length <= 240;
+  return bio.length <= MAX_BIO_LENGTH;
 }
 
 export function isValidPostCaption(caption: string): boolean {
@@ -27,6 +752,129 @@ export function isValidPostCaption(caption: string): boolean {
 export function isValidCommentText(text: string): boolean {
   const trimmed = text.trim();
   return trimmed.length >= 1 && trimmed.length <= 1000;
+}
+
+export function getCooldownStatus(
+  lastChangedAt: string | null | undefined,
+  cooldownMs: number,
+  nowMs: number = Date.now()
+): { allowed: boolean; remainingDays: number; nextAllowedAt: string | null } {
+  if (!lastChangedAt) {
+    return { allowed: true, remainingDays: 0, nextAllowedAt: null };
+  }
+  const parsed = Date.parse(lastChangedAt);
+  if (Number.isNaN(parsed)) {
+    return { allowed: true, remainingDays: 0, nextAllowedAt: null };
+  }
+  const elapsed = nowMs - parsed;
+  if (elapsed >= cooldownMs) {
+    return { allowed: true, remainingDays: 0, nextAllowedAt: null };
+  }
+  const remainingMs = cooldownMs - elapsed;
+  const remainingDays = Math.max(1, Math.ceil(remainingMs / (24 * 3_600_000)));
+  return {
+    allowed: false,
+    remainingDays,
+    nextAllowedAt: new Date(parsed + cooldownMs).toISOString(),
+  };
+}
+
+export function canChangeNickname(
+  lastNicknameChangedAt: string | null | undefined,
+  nowMs: number = Date.now()
+) {
+  return getCooldownStatus(lastNicknameChangedAt, NICKNAME_COOLDOWN_MS, nowMs);
+}
+
+export function canChangeUsername(
+  lastUsernameChangedAt: string | null | undefined,
+  nowMs: number = Date.now()
+) {
+  return getCooldownStatus(lastUsernameChangedAt, USERNAME_COOLDOWN_MS, nowMs);
+}
+
+export function canOpenBroadcastChannel(followersCount: number): boolean {
+  return followersCount >= BROADCAST_MIN_FOLLOWERS;
+}
+
+export function getMaskedUserDisplay(
+  user: Pick<UserPublic, 'displayName' | 'username' | 'isDeactivated'>,
+  viewerUid: string | null,
+  targetUid: string
+): { displayName: string; username: string; isDeactivatedView: boolean } {
+  if (user.isDeactivated && viewerUid !== targetUid) {
+    return {
+      displayName: 'SocialVerse User',
+      username: 'socialverse_user',
+      isDeactivatedView: true,
+    };
+  }
+  return {
+    displayName: user.displayName,
+    username: user.username,
+    isDeactivatedView: false,
+  };
+}
+
+export function canViewPrivateProfileContent(
+  profileUser: Pick<UserPublic, 'uid' | 'isPrivate' | 'isDeactivated'>,
+  viewerUid: string | null,
+  followingIds: string[]
+): boolean {
+  if (profileUser.isDeactivated && viewerUid !== profileUser.uid) return false;
+  if (!profileUser.isPrivate) return true;
+  if (viewerUid && viewerUid === profileUser.uid) return true;
+  return followingIds.includes(profileUser.uid);
+}
+
+export function isGroupOwner(chat: Pick<Chat, 'ownerUid' | 'createdBy'>, uid: string): boolean {
+  return (chat.ownerUid || chat.createdBy) === uid;
+}
+
+export function isGroupAdmin(chat: Pick<Chat, 'ownerUid' | 'createdBy' | 'adminUids'>, uid: string): boolean {
+  return isGroupOwner(chat, uid) || Boolean(chat.adminUids?.includes(uid));
+}
+
+export function canRemoveGroupMember(
+  chat: Pick<Chat, 'ownerUid' | 'createdBy' | 'adminUids'>,
+  actorUid: string,
+  targetUid: string
+): boolean {
+  if (isGroupOwner(chat, targetUid)) return false; // Nobody can remove the owner
+  if (actorUid === targetUid) return true; // Leave group
+  if (isGroupOwner(chat, actorUid)) return true; // Owner can remove anyone else
+  if (isGroupAdmin(chat, actorUid)) {
+    return !isGroupAdmin(chat, targetUid); // Admins can remove regular members
+  }
+  return false;
+}
+
+export function canAddGroupMembers(
+  chat: Pick<Chat, 'participantIds' | 'maxMembers' | 'requireAddApproval' | 'ownerUid' | 'createdBy' | 'adminUids'>,
+  actorUid: string
+): { allowed: boolean; needsApproval: boolean; reason?: string } {
+  const cap = chat.maxMembers || MAX_GROUP_MEMBERS;
+  if (chat.participantIds.length >= cap) {
+    return { allowed: false, needsApproval: false, reason: `Group limit (${cap} members) reached.` };
+  }
+  if (isGroupAdmin(chat, actorUid)) {
+    return { allowed: true, needsApproval: false };
+  }
+  if (chat.requireAddApproval) {
+    return { allowed: true, needsApproval: true };
+  }
+  return { allowed: true, needsApproval: false };
+}
+
+export function canPostInBroadcast(
+  channel: Pick<BroadcastChannel, 'ownerUid' | 'adminUids' | 'collaboratorUids'>,
+  uid: string
+): boolean {
+  return (
+    channel.ownerUid === uid ||
+    channel.adminUids.includes(uid) ||
+    channel.collaboratorUids.includes(uid)
+  );
 }
 
 export function extractHashtags(text: string): string[] {
@@ -100,12 +948,12 @@ export function mapFirebaseAuthError(error: unknown, lang: 'en' | 'bn' = 'en'): 
 
   if (full.includes('auth/operation-not-allowed')) {
     return lang === 'bn'
-      ? 'Firebase Console-এ Email/Password চালু করা নেই (Authentication → Sign-in method)। অনুগ্রহ করে "Google দিয়ে চালিয়ে যান" ব্যবহার করুন অথবা Console থেকে Email/Password চালু করুন।'
-      : 'Email/Password sign-in is not yet enabled in Firebase Console (Authentication → Sign-in method). Use "Continue with Google" below, or enable Email/Password for project ai-studio-applet-webapp-7613c.';
+      ? 'সাইন-ইন পদ্ধতি চালু নেই। ইমেইল ওটিপি বা ইউজারনেম লগইন ব্যবহার করুন।'
+      : 'Email/Password provider is disabled in Firebase Console for project ai-studio-applet-webapp-7613c.';
   }
   if (full.includes('auth/email-already-in-use')) {
     return lang === 'bn'
-      ? 'এই ইমেইল দিয়ে ইতিমধ্যেই অ্যাকাউন্ট তৈরি করা আছে। অনুগ্রহ করে সাইন ইন করুন।'
+      ? 'এই ইমেইল দিয়ে ইতিমধ্যেই অ্যাকাউন্ট তৈরি করা আছে। অনুগ্রহ করে সাইন ইন করুন।'
       : 'An account with this email already exists. Try signing in instead.';
   }
   if (
@@ -114,8 +962,8 @@ export function mapFirebaseAuthError(error: unknown, lang: 'en' | 'bn' = 'en'): 
     full.includes('auth/user-not-found')
   ) {
     return lang === 'bn'
-      ? 'ইমেইল বা পাসওয়ার্ড সঠিক নয়। আবার চেষ্টা করুন।'
-      : 'Incorrect email or password. Please check and try again.';
+      ? 'ইমেইল/ইউজারনেম বা পাসওয়ার্ড সঠিক নয়। আবার চেষ্টা করুন।'
+      : 'Incorrect email/username or password. Please check and try again.';
   }
   if (full.includes('auth/weak-password')) {
     return lang === 'bn'
@@ -127,21 +975,6 @@ export function mapFirebaseAuthError(error: unknown, lang: 'en' | 'bn' = 'en'): 
       ? 'সঠিক ইমেইল ঠিকানা লিখুন।'
       : 'Please enter a valid email address.';
   }
-  if (full.includes('auth/popup-blocked')) {
-    return lang === 'bn'
-      ? 'ব্রাউজার পপআপ ব্লক করেছে। পপআপ অনুমতি দিন অথবা ইমেইল দিয়ে সাইন ইন করুন।'
-      : 'Sign-in popup was blocked by your browser. Allow popups for this site and try again.';
-  }
-  if (full.includes('auth/popup-closed-by-user')) {
-    return lang === 'bn'
-      ? 'সাইন-ইন উইন্ডো বন্ধ করা হয়েছে।'
-      : 'Google sign-in window was closed before completing.';
-  }
-  if (full.includes('auth/unauthorized-domain')) {
-    return lang === 'bn'
-      ? 'এই ডোমেইনটি Firebase Auth-এ অনুমোদিত নয়। Firebase Console → Authentication → Settings → Authorized domains-এ ডোমেইন যোগ করুন।'
-      : 'This domain is not authorized in Firebase Auth. Add it in Firebase Console → Authentication → Settings → Authorized domains.';
-  }
   if (full.includes('auth/too-many-requests')) {
     return lang === 'bn'
       ? 'অনেকবার চেষ্টা করা হয়েছে। কিছুক্ষণ পর আবার চেষ্টা করুন।'
@@ -150,8 +983,7 @@ export function mapFirebaseAuthError(error: unknown, lang: 'en' | 'bn' = 'en'): 
   if (full.includes('auth/network-request-failed')) {
     return lang === 'bn'
       ? 'নেটওয়ার্ক সংযোগে সমস্যা হয়েছে। ইন্টারনেট যাচাই করুন।'
-      : 'Network error connecting to Firebase. Check your connection and retry.';
+      : 'Network error connecting to server. Check your connection and retry.';
   }
   return msg || (lang === 'bn' ? 'সাইন ইন সম্পন্ন করা যায়নি।' : 'Authentication failed. Please try again.');
 }
-

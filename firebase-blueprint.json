@@ -8,18 +8,23 @@
         "uid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
         "username": { "type": "string", "minLength": 3, "maxLength": 24, "pattern": "^[a-z0-9_]{3,24}$" },
         "displayName": { "type": "string", "minLength": 1, "maxLength": 50 },
-        "bio": { "type": "string", "maxLength": 240 },
+        "nicknameFont": { "type": "string", "enum": ["classic", "serif", "mono", "display", "italic"] },
+        "bio": { "type": "string", "maxLength": 150 },
         "pronouns": { "type": "string", "maxLength": 32 },
         "website": { "type": "string", "maxLength": 200 },
         "photoUrl": { "type": "string", "maxLength": 200000 },
         "coverUrl": { "type": "string", "maxLength": 200000 },
         "interests": { "type": "array" },
         "isPrivate": { "type": "boolean" },
+        "isDeactivated": { "type": "boolean" },
+        "deactivatedUntil": { "type": "string", "format": "date-time" },
         "followersCount": { "type": "integer" },
         "followingCount": { "type": "integer" },
         "postsCount": { "type": "integer" },
         "onlineStatus": { "type": "string", "enum": ["online", "offline", "away"] },
         "lastSeenAt": { "type": "string", "format": "date-time" },
+        "lastNicknameChangedAt": { "type": "string", "format": "date-time" },
+        "lastUsernameChangedAt": { "type": "string", "format": "date-time" },
         "onboardingCompleted": { "type": "boolean" },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
@@ -36,6 +41,8 @@
         "language": { "type": "string", "enum": ["en", "bn"] },
         "themeMode": { "type": "string", "enum": ["light", "dark", "system"] },
         "biometricLockEnabled": { "type": "boolean" },
+        "twoFactorEnabled": { "type": "boolean" },
+        "saveLoginInfo": { "type": "boolean" },
         "whoCanMessage": { "type": "string", "enum": ["everyone", "followers", "nobody"] },
         "whoCanViewStories": { "type": "string", "enum": ["everyone", "followers", "close_friends"] },
         "whoCanFollow": { "type": "string", "enum": ["everyone", "approval"] },
@@ -48,14 +55,27 @@
     },
     "UsernameClaim": {
       "title": "UsernameClaim",
-      "description": "Unique username reservation mapping lowercase username to uid.",
+      "description": "Unique username reservation mapping lowercase username to uid and encrypted email lookup token.",
       "type": "object",
       "properties": {
         "uid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
         "username": { "type": "string", "minLength": 3, "maxLength": 24, "pattern": "^[a-z0-9_]{3,24}$" },
+        "encEmail": { "type": "string", "maxLength": 512 },
         "createdAt": { "type": "string", "format": "date-time" }
       },
       "required": ["uid", "username", "createdAt"]
+    },
+    "EmailClaim": {
+      "title": "EmailClaim",
+      "description": "Canonical email SHA-256 reservation enforcing one account per Gmail/email without storing plaintext PII.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "emailHash": { "type": "string", "minLength": 64, "maxLength": 64, "pattern": "^[a-f0-9]{64}$" },
+        "encEmail": { "type": "string", "maxLength": 512 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "emailHash", "createdAt"]
     },
     "Post": {
       "title": "Post",
@@ -69,12 +89,13 @@
         "authorAvatar": { "type": "string", "maxLength": 1000 },
         "caption": { "type": "string", "maxLength": 2200 },
         "mediaUrls": { "type": "array" },
+        "coverUrl": { "type": "string", "maxLength": 200000 },
         "mediaType": { "type": "string", "enum": ["text", "image", "carousel", "video", "reel"] },
         "hashtags": { "type": "array" },
         "likesCount": { "type": "integer" },
         "commentsCount": { "type": "integer" },
         "sharesCount": { "type": "integer" },
-        "visibility": { "type": "string", "enum": ["public", "followers"] },
+        "visibility": { "type": "string", "enum": ["public", "followers", "only_me"] },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
@@ -90,6 +111,8 @@
         "authorId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
         "authorUsername": { "type": "string", "minLength": 3, "maxLength": 24 },
         "text": { "type": "string", "minLength": 1, "maxLength": 1000 },
+        "stickerUrl": { "type": "string", "maxLength": 200000 },
+        "gifUrl": { "type": "string", "maxLength": 200000 },
         "parentCommentId": { "type": "string", "maxLength": 128 },
         "createdAt": { "type": "string", "format": "date-time" }
       },
@@ -115,13 +138,18 @@
     },
     "Chat": {
       "title": "Chat",
-      "description": "1:1 or group chat thread metadata.",
+      "description": "1:1 or group chat thread metadata supporting up to 250 members and themes.",
       "type": "object",
       "properties": {
         "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
         "type": { "type": "string", "enum": ["direct", "group"] },
         "title": { "type": "string", "maxLength": 80 },
         "participantIds": { "type": "array" },
+        "ownerUid": { "type": "string", "maxLength": 128 },
+        "adminUids": { "type": "array" },
+        "requireAddApproval": { "type": "boolean" },
+        "theme": { "type": "object" },
+        "chatNicknames": { "type": "object" },
         "lastMessageText": { "type": "string", "maxLength": 300 },
         "lastMessageAt": { "type": "string", "format": "date-time" },
         "createdBy": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
@@ -131,15 +159,17 @@
     },
     "Message": {
       "title": "Message",
-      "description": "Real-time message in a chat (text, voice, image, video, file).",
+      "description": "Real-time message in a chat (text, voice, image, video, file, sticker, reel_share).",
       "type": "object",
       "properties": {
         "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
         "chatId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
         "senderId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
-        "type": { "type": "string", "enum": ["text", "voice", "image", "video", "file"] },
+        "type": { "type": "string", "enum": ["text", "voice", "image", "video", "file", "sticker", "reel_share"] },
         "text": { "type": "string", "maxLength": 2000 },
-        "mediaUrl": { "type": "string", "maxLength": 1000 },
+        "mediaUrl": { "type": "string", "maxLength": 200000 },
+        "stickerUrl": { "type": "string", "maxLength": 200000 },
+        "sharedPostId": { "type": "string", "maxLength": 128 },
         "durationMs": { "type": "integer" },
         "replyToId": { "type": "string", "maxLength": 128 },
         "status": { "type": "string", "enum": ["sent", "delivered", "seen"] },
@@ -224,6 +254,53 @@
         "createdAt": { "type": "string", "format": "date-time" }
       },
       "required": ["id", "title", "body", "createdAt"]
+    },
+    "Note": {
+      "title": "Note",
+      "description": "24-hour Inbox status note with likes.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "authorUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "authorUsername": { "type": "string", "minLength": 3, "maxLength": 24 },
+        "authorDisplayName": { "type": "string", "minLength": 1, "maxLength": 50 },
+        "text": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "likedByUids": { "type": "array" },
+        "expiresAt": { "type": "string", "format": "date-time" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "authorUid", "authorUsername", "text", "expiresAt", "createdAt"]
+    },
+    "Sticker": {
+      "title": "Sticker",
+      "description": "Custom or saved sticker/GIF asset.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "creatorUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "label": { "type": "string", "minLength": 1, "maxLength": 50 },
+        "imageUrl": { "type": "string", "maxLength": 200000 },
+        "kind": { "type": "string", "enum": ["sticker", "gif"] },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "creatorUid", "label", "imageUrl", "kind", "createdAt"]
+    },
+    "BroadcastChannel": {
+      "title": "BroadcastChannel",
+      "description": "Creator broadcast channel unlocked at 500 followers.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "description": { "type": "string", "maxLength": 300 },
+        "ownerUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "adminUids": { "type": "array" },
+        "moderatorUids": { "type": "array" },
+        "collaboratorUids": { "type": "array" },
+        "followerUids": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "title", "ownerUid", "createdAt"]
     }
   },
   "firestore": {
@@ -238,6 +315,10 @@
     "/usernames/{username}": {
       "schema": { "$ref": "#/entities/UsernameClaim" },
       "description": "Unique lowercase username reservation documents."
+    },
+    "/email_claims/{emailHash}": {
+      "schema": { "$ref": "#/entities/EmailClaim" },
+      "description": "One-way SHA-256 canonical email reservations (1 account per Gmail)."
     },
     "/posts/{postId}": {
       "schema": { "$ref": "#/entities/Post" },
@@ -282,6 +363,18 @@
     "/announcements/{announcementId}": {
       "schema": { "$ref": "#/entities/Announcement" },
       "description": "Read-only announcements published by the separate Admin App."
+    },
+    "/notes/{noteId}": {
+      "schema": { "$ref": "#/entities/Note" },
+      "description": "24-hour Inbox notes shared by users."
+    },
+    "/stickers/{stickerId}": {
+      "schema": { "$ref": "#/entities/Sticker" },
+      "description": "User-created custom stickers and GIFs."
+    },
+    "/broadcast_channels/{channelId}": {
+      "schema": { "$ref": "#/entities/BroadcastChannel" },
+      "description": "Creator broadcast channels unlocked at 500+ followers."
     }
   }
 }

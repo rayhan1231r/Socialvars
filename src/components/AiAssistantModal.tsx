@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { Check, Sparkles, X } from 'lucide-react';
 import { useSocialVerse } from '../context/SocialVerseContext';
+import { MAX_BIO_LENGTH } from '../utils/validation';
 
 export function AiAssistantModal() {
   const {
@@ -8,7 +9,7 @@ export function AiAssistantModal() {
     setSubscreen,
     callAiAssistant,
     updateProfile,
-    firebaseUser,
+    isAuthenticated,
     t,
   } = useSocialVerse();
 
@@ -100,7 +101,7 @@ export function AiAssistantModal() {
             aria-label={t.ai.promptPlaceholder}
             className="w-full p-3.5 rounded-2xl bg-white/80 dark:bg-slate-900/70 border border-slate-200 dark:border-slate-700 text-sm text-slate-900 dark:text-white"
           />
-          {!firebaseUser && (
+          {!isAuthenticated && (
             <p className="text-xs text-amber-700 dark:text-amber-400">
               {t.ai.signInRequired}
             </p>
@@ -124,7 +125,7 @@ export function AiAssistantModal() {
                   <button
                     type="button"
                     onClick={() => {
-                      updateProfile({ bio: text.slice(0, 240) });
+                      updateProfile({ bio: text.slice(0, MAX_BIO_LENGTH) });
                       setSubscreen(null);
                     }}
                     className="min-h-[34px] px-3 rounded-lg bg-sky-600 text-white text-xs font-semibold shrink-0 inline-flex items-center gap-1"

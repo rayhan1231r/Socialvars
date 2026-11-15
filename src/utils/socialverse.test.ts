@@ -1,18 +1,32 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  BROADCAST_MIN_FOLLOWERS,
+  canAddGroupMembers,
+  canChangeNickname,
+  canChangeUsername,
   canMessageUser,
+  canOpenBroadcastChannel,
+  canPostInBroadcast,
+  canRemoveGroupMember,
+  canViewPrivateProfileContent,
+  canonicalizeEmail,
   extractHashtags,
   formatCompactCount,
+  getMaskedUserDisplay,
+  isDisposableEmail,
   isStoryActive,
   isValidBio,
   isValidDisplayName,
   isValidPostCaption,
   isValidUsername,
   isValidWebsiteUrl,
+  MAX_BIO_LENGTH,
+  MAX_GROUP_MEMBERS,
   mapFirebaseAuthError,
   normalizeUsername,
   normalizeWebsiteUrl,
+  validateSignupEmail,
 } from './validation';
 import { TRANSLATIONS } from './i18n';
 
@@ -24,11 +38,51 @@ test('username normalization and strict validation rules', () => {
   assert.equal(isValidUsername('bad-hyphen'), false);
 });
 
-test('display name, bio, website, and post caption validation boundaries', () => {
+test('email canonicalization enforces one account per Gmail and blocks disposable mail', () => {
+  assert.equal(canonicalizeEmail('  John.Doe+work@Gmail.com '), 'johndoe@gmail.com');
+  assert.equal(canonicalizeEmail('j.o.h.n.d.o.e@googlemail.com'), 'johndoe@gmail.com');
+  assert.equal(canonicalizeEmail('Aria+news@outlook.com'), 'aria@outlook.com');
+
+  // Temporary/disposable providers blocked strictly
+  for (const temp of [
+    'abc@tempmail.com',
+    'user@temp-mail.org',
+    'x@10minutemail.com',
+    'y@guerrillamail.com',
+    'z@mailinator.com',
+    'q@yopmail.com',
+    'sub@inbox.yopmail.com',
+    'n@getnada.com',
+    'm@maildrop.cc',
+    't@trashmail.com',
+    'b@burnermail.io',
+    'd@mytemp.email',
+    'e@tmpmail.org',
+  ]) {
+    assert.equal(isDisposableEmail(temp), true, `Expected ${temp} to be blocked`);
+    assert.equal(validateSignupEmail(temp, 'en').valid, false);
+    assert.equal(validateSignupEmail(temp, 'bn').valid, false);
+  }
+
+  // Real providers allowed
+  for (const real of [
+    'rafi.ahmed@gmail.com',
+    'aria@yahoo.com',
+    'studio@outlook.com',
+    'creator@icloud.com',
+    'dev@proton.me',
+  ]) {
+    assert.equal(isDisposableEmail(real), false, `Expected ${real} to be allowed`);
+    assert.equal(validateSignupEmail(real, 'en').valid, true);
+  }
+});
+
+test('display name, 150-char bio, website, and post caption validation boundaries', () => {
+  assert.equal(MAX_BIO_LENGTH, 150);
   assert.equal(isValidDisplayName('Aria Chowdhury'), true);
   assert.equal(isValidDisplayName('   '), false);
-  assert.equal(isValidBio('A'.repeat(240)), true);
-  assert.equal(isValidBio('A'.repeat(241)), false);
+  assert.equal(isValidBio('A'.repeat(150)), true);
+  assert.equal(isValidBio('A'.repeat(151)), false);
   assert.equal(isValidPostCaption('Hello SocialVerse!'), true);
   assert.equal(isValidPostCaption(''), false);
   assert.equal(isValidWebsiteUrl(''), true);
@@ -36,6 +90,79 @@ test('display name, bio, website, and post caption validation boundaries', () =>
   assert.equal(isValidWebsiteUrl('https://socialverse.app'), true);
   assert.equal(isValidWebsiteUrl('not a domain'), false);
   assert.equal(normalizeWebsiteUrl('aria.studio'), 'https://aria.studio');
+});
+
+test('7-day nickname cooldown and 14-day username cooldown enforcement', () => {
+  const now = Date.UTC(2026, 10, 14, 12, 0, 0);
+  assert.equal(canChangeNickname(null, now).allowed, true);
+  assert.equal(canChangeUsername(null, now).allowed, true);
+
+  const threeDaysAgo = new Date(now - 3 * 24 * 3_600_000).toISOString();
+  const nickCheck = canChangeNickname(threeDaysAgo, now);
+  assert.equal(nickCheck.allowed, false);
+  assert.equal(nickCheck.remainingDays, 4);
+
+  const eightDaysAgo = new Date(now - 8 * 24 * 3_600_000).toISOString();
+  assert.equal(canChangeNickname(eightDaysAgo, now).allowed, true);
+
+  const tenDaysAgo = new Date(now - 10 * 24 * 3_600_000).toISOString();
+  const userCheck = canChangeUsername(tenDaysAgo, now);
+  assert.equal(userCheck.allowed, false);
+  assert.equal(userCheck.remainingDays, 4);
+
+  const fifteenDaysAgo = new Date(now - 15 * 24 * 3_600_000).toISOString();
+  assert.equal(canChangeUsername(fifteenDaysAgo, now).allowed, true);
+});
+
+test('broadcast channel 500-follower threshold and role permissions', () => {
+  assert.equal(BROADCAST_MIN_FOLLOWERS, 500);
+  assert.equal(canOpenBroadcastChannel(499), false);
+  assert.equal(canOpenBroadcastChannel(500), true);
+
+  const channel = {
+    ownerUid: 'u_owner',
+    adminUids: ['u_admin'],
+    collaboratorUids: ['u_collab'],
+  };
+  assert.equal(canPostInBroadcast(channel, 'u_owner'), true);
+  assert.equal(canPostInBroadcast(channel, 'u_admin'), true);
+  assert.equal(canPostInBroadcast(channel, 'u_collab'), true);
+  assert.equal(canPostInBroadcast(channel, 'u_follower'), false);
+});
+
+test('group chat 250-member limit and owner/admin hierarchy', () => {
+  assert.equal(MAX_GROUP_MEMBERS, 250);
+  const group = {
+    ownerUid: 'owner_1',
+    createdBy: 'owner_1',
+    adminUids: ['admin_1'],
+    participantIds: ['owner_1', 'admin_1', 'member_1'],
+    maxMembers: 250,
+    requireAddApproval: false,
+  };
+  assert.equal(canRemoveGroupMember(group, 'admin_1', 'owner_1'), false);
+  assert.equal(canRemoveGroupMember(group, 'admin_1', 'member_1'), true);
+  assert.equal(canRemoveGroupMember(group, 'owner_1', 'admin_1'), true);
+  assert.equal(canRemoveGroupMember(group, 'member_1', 'admin_1'), false);
+
+  const fullGroup = {
+    ...group,
+    participantIds: Array.from({ length: 250 }, (_, i) => `u_${i}`),
+  };
+  assert.equal(canAddGroupMembers(fullGroup, 'owner_1').allowed, false);
+});
+
+test('private profile content visibility and deactivated account masking', () => {
+  const privateUser = { uid: 'u1', isPrivate: true, isDeactivated: false, displayName: 'Aria', username: 'aria' };
+  assert.equal(canViewPrivateProfileContent(privateUser, 'u2', []), false);
+  assert.equal(canViewPrivateProfileContent(privateUser, 'u2', ['u1']), true);
+  assert.equal(canViewPrivateProfileContent(privateUser, 'u1', []), true);
+
+  const deactivatedUser = { displayName: 'Aria', username: 'aria', isDeactivated: true };
+  const masked = getMaskedUserDisplay(deactivatedUser, 'u2', 'u1');
+  assert.equal(masked.displayName, 'SocialVerse User');
+  assert.equal(masked.isDeactivatedView, true);
+  assert.equal(getMaskedUserDisplay(deactivatedUser, 'u1', 'u1').displayName, 'Aria');
 });
 
 test('hashtag extraction supports English and Bengali scripts', () => {
@@ -61,7 +188,6 @@ test('messaging privacy gate enforces blocklist and follower rules', () => {
 
 test('firebase auth error mapping returns actionable bilingual guidance', () => {
   const opMsg = mapFirebaseAuthError({ code: 'auth/operation-not-allowed' }, 'en');
-  assert.match(opMsg, /Continue with Google/i);
   assert.match(opMsg, /ai-studio-applet-webapp-7613c/);
   const credBn = mapFirebaseAuthError({ code: 'auth/invalid-credential' }, 'bn');
   assert.match(credBn, /সঠিক নয়/);

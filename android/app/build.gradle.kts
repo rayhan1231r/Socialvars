@@ -20,7 +20,7 @@ android {
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.socialverse.app"
+        applicationId = "Com.social.vrs"
         minSdk = 26
         targetSdk = 35
         versionCode = 1
@@ -30,7 +30,7 @@ android {
         buildConfigField(
             "String",
             "CLOUD_FUNCTIONS_BASE_URL",
-            "\"https://us-central1-ai-studio-applet-webapp-7613c.cloudfunctions.net/socialverseApi\""
+            "\"https://us-central1-socialvars.cloudfunctions.net/socialverseApi\""
         )
     }
 
@@ -58,7 +58,6 @@ android {
             }
         }
         debug {
-            applicationIdSuffix = ".debug"
             isDebuggable = true
         }
     }

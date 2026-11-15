@@ -1,33 +1,50 @@
 import { useState } from 'react';
 import {
   Bell,
+  CheckCircle2,
   Code2,
   Fingerprint,
   Globe,
   Info,
+  KeyRound,
   Lock,
   LogOut,
+  Megaphone,
   Moon,
+  PauseCircle,
+  Plus,
   Shield,
   Sun,
   Trash2,
+  UserCheck,
+  Users,
   UserX,
   X,
 } from 'lucide-react';
 import { useSocialVerse } from '../context/SocialVerseContext';
-import { formatRelativeTime } from '../utils/validation';
+import {
+  BROADCAST_MIN_FOLLOWERS,
+  REPORT_SUGGESTED_REASONS,
+  canOpenBroadcastChannel,
+  formatRelativeTime,
+  getMaskedUserDisplay,
+} from '../utils/validation';
 import { Avatar } from './Avatar';
 
 export function SettingsAndModals() {
   const {
     subscreen,
     setSubscreen,
+    setActiveTab,
     isAuthenticated,
-    firebaseUser,
+    currentUser,
     openAuthModal,
-    resendVerificationEmail,
+    savedLogins,
+    removeSavedLogin,
+    loginWithSavedAccount,
     userPrivate,
     updatePrivateSettings,
+    updateProfile,
     language,
     setLanguage,
     theme,
@@ -36,17 +53,36 @@ export function SettingsAndModals() {
     markAllNotificationsRead,
     creators,
     unblockUser,
+    changePassword,
+    deactivateAccount,
     logout,
     deleteAccount,
     reportTarget,
     submitReport,
+    createBroadcastChannel,
     isLocked,
     unlockBiometric,
+    showToast,
     t,
   } = useSocialVerse();
 
   const [reportReason, setReportReason] = useState('');
   const [confirmDelete, setConfirmDelete] = useState(false);
+
+  // Change Password local state
+  const [curPass, setCurPass] = useState('');
+  const [newPass, setNewPass] = useState('');
+  const [passMsg, setPassMsg] = useState<string | null>(null);
+  const [passErr, setPassErr] = useState<string | null>(null);
+
+  // Deactivate Account local state
+  const [deactivateMode, setDeactivateMode] = useState<'7' | 'custom'>('7');
+  const [customDeactivateDays, setCustomDeactivateDays] = useState('14');
+  const [confirmDeactivate, setConfirmDeactivate] = useState(false);
+
+  // Broadcast Channel creator modal local state
+  const [bcTitle, setBcTitle] = useState('');
+  const [bcDesc, setBcDesc] = useState('');
 
   if (isLocked) {
     return (
@@ -107,19 +143,25 @@ export function SettingsAndModals() {
           </div>
 
           <div className="overflow-y-auto divide-y divide-slate-200/70 dark:divide-slate-800/70">
-            {notifications.map((n) => (
-              <div key={n.id} className="py-3 flex items-start gap-3">
-                <Avatar src={n.actorAvatar} name={n.actorUsername} size="sm" />
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm text-slate-800 dark:text-slate-200">
-                    <span className="font-semibold">@{n.actorUsername}</span> {n.summary}
-                  </p>
-                  <p className="text-xs text-slate-500 mt-0.5">
-                    {formatRelativeTime(n.createdAt, language)} {!n.read ? '· Unread' : ''}
-                  </p>
+            {notifications.length === 0 ? (
+              <p className="text-sm text-slate-500 dark:text-slate-400 py-8 text-center">
+                {language === 'bn' ? 'এখনো কোনো নোটিফিকেশন নেই।' : 'No notifications yet.'}
+              </p>
+            ) : (
+              notifications.map((n) => (
+                <div key={n.id} className="py-3 flex items-start gap-3">
+                  <Avatar src={n.actorAvatar} name={n.actorUsername} size="sm" />
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm text-slate-800 dark:text-slate-200">
+                      <span className="font-semibold">@{n.actorUsername}</span> {n.summary}
+                    </p>
+                    <p className="text-xs text-slate-500 mt-0.5">
+                      {formatRelativeTime(n.createdAt, language)} {!n.read ? '· Unread' : ''}
+                    </p>
+                  </div>
                 </div>
-              </div>
-            ))}
+              ))
+            )}
           </div>
         </div>
       </div>
@@ -148,16 +190,43 @@ export function SettingsAndModals() {
               <X className="w-5 h-5" />
             </button>
           </div>
+
+          <div className="space-y-2">
+            <p className="text-xs font-semibold text-slate-600 dark:text-slate-300">
+              {language === 'bn' ? 'সাজেস্টেড কারণ বাছাই করুন:' : 'Suggested reasons:'}
+            </p>
+            <div className="flex flex-wrap gap-1.5">
+              {REPORT_SUGGESTED_REASONS.map((item) => {
+                const label = language === 'bn' ? item.bn : item.en;
+                const active = reportReason === label;
+                return (
+                  <button
+                    key={item.id}
+                    type="button"
+                    onClick={() => setReportReason(label)}
+                    className={`min-h-[34px] px-3 rounded-xl text-xs font-medium border transition-colors ${
+                      active
+                        ? 'bg-rose-600 text-white border-rose-600'
+                        : 'liquid-glass-subtle border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200'
+                    }`}
+                  >
+                    {label}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
           <form
-            onSubmit={(e) => {
+            onSubmit={async (e) => {
               e.preventDefault();
-              submitReport(reportReason);
+              await submitReport(reportReason);
               setReportReason('');
             }}
             className="space-y-4"
           >
             <textarea
-              rows={4}
+              rows={3}
               required
               minLength={3}
               value={reportReason}
@@ -177,7 +246,101 @@ export function SettingsAndModals() {
     );
   }
 
+  if (subscreen === 'broadcast_channel') {
+    const unlocked = canOpenBroadcastChannel(currentUser.followersCount);
+    const remaining = Math.max(0, BROADCAST_MIN_FOLLOWERS - currentUser.followersCount);
+    return (
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label={t.profile.broadcastChannel}
+        className="fixed inset-0 z-50 bg-slate-950/60 backdrop-blur-sm flex items-center justify-center p-4"
+      >
+        <div className="liquid-glass rounded-3xl p-6 max-w-md w-full space-y-4">
+          <div className="flex items-center justify-between">
+            <h2 className="text-lg font-bold text-slate-900 dark:text-white flex items-center gap-2">
+              <Megaphone className="w-5 h-5 text-sky-600" />
+              <span>{t.profile.broadcastChannel}</span>
+            </h2>
+            <button
+              type="button"
+              aria-label="Close broadcast dialog"
+              onClick={() => setSubscreen(null)}
+              className="min-h-[40px] min-w-[40px] flex items-center justify-center text-slate-500"
+            >
+              <X className="w-5 h-5" />
+            </button>
+          </div>
+
+          {!unlocked ? (
+            <div className="p-4 rounded-2xl liquid-glass-subtle space-y-2.5 text-center">
+              <p className="text-sm font-bold text-slate-900 dark:text-white">
+                {language === 'bn'
+                  ? `ব্রডকাস্ট চ্যানেল খুলতে কমপক্ষে ${BROADCAST_MIN_FOLLOWERS} ফলোয়ার প্রয়োজন`
+                  : `Reach ${BROADCAST_MIN_FOLLOWERS} followers to unlock Broadcast Channels`}
+              </p>
+              <p className="text-xs text-slate-600 dark:text-slate-300">
+                {language === 'bn'
+                  ? `আপনার বর্তমান ফলোয়ার: ${currentUser.followersCount} (আরও ${remaining} জন প্রয়োজন)`
+                  : `Current followers: ${currentUser.followersCount} (${remaining} more needed)`}
+              </p>
+              <div className="w-full h-2.5 rounded-full bg-slate-200 dark:bg-slate-800 overflow-hidden">
+                <div
+                  className="h-full bg-sky-600 rounded-full transition-all"
+                  style={{
+                    width: `${Math.min(
+                      100,
+                      Math.round((currentUser.followersCount / BROADCAST_MIN_FOLLOWERS) * 100)
+                    )}%`,
+                  }}
+                />
+              </div>
+            </div>
+          ) : (
+            <form
+              onSubmit={async (e) => {
+                e.preventDefault();
+                if (!bcTitle.trim()) return;
+                await createBroadcastChannel(bcTitle.trim(), bcDesc.trim());
+                setBcTitle('');
+                setBcDesc('');
+                setSubscreen(null);
+                setActiveTab('messages');
+              }}
+              className="space-y-3"
+            >
+              <input
+                type="text"
+                required
+                maxLength={60}
+                value={bcTitle}
+                onChange={(e) => setBcTitle(e.target.value)}
+                placeholder={language === 'bn' ? 'চ্যানেলের নাম' : 'Channel title'}
+                className="w-full min-h-[44px] px-3.5 rounded-xl bg-white/80 dark:bg-slate-900/70 border border-slate-200 dark:border-slate-700 text-sm text-slate-900 dark:text-white"
+              />
+              <textarea
+                rows={3}
+                maxLength={200}
+                value={bcDesc}
+                onChange={(e) => setBcDesc(e.target.value)}
+                placeholder={language === 'bn' ? 'চ্যানেলের বিবরণ...' : 'Channel description...'}
+                className="w-full p-3.5 rounded-xl bg-white/80 dark:bg-slate-900/70 border border-slate-200 dark:border-slate-700 text-sm text-slate-900 dark:text-white"
+              />
+              <button
+                type="submit"
+                className="w-full min-h-[44px] rounded-xl bg-sky-600 text-white text-sm font-semibold"
+              >
+                {language === 'bn' ? 'ব্রডকাস্ট চ্যানেল চালু করুন' : 'Create Broadcast Channel'}
+              </button>
+            </form>
+          )}
+        </div>
+      </div>
+    );
+  }
+
   const isSettingsModal =
+    subscreen === 'settings_home' ||
     subscreen === 'settings_privacy' ||
     subscreen === 'settings_security' ||
     subscreen === 'settings_account' ||
@@ -189,14 +352,29 @@ export function SettingsAndModals() {
   if (!isSettingsModal) return null;
 
   const settingsTabs = [
+    { id: 'settings_home', label: t.settings.title, icon: Users },
     { id: 'settings_privacy', label: t.settings.privacy, icon: Shield },
     { id: 'settings_security', label: t.settings.security, icon: Lock },
+    { id: 'settings_account', label: t.settings.account, icon: PauseCircle },
     { id: 'settings_blocked', label: t.settings.blockedUsers, icon: UserX },
     { id: 'settings_language', label: `${t.settings.language} & ${t.settings.theme}`, icon: Globe },
-    { id: 'settings_account', label: t.settings.account, icon: Trash2 },
     { id: 'settings_about', label: t.settings.aboutLegal, icon: Info },
     { id: 'android_project', label: t.settings.androidProject, icon: Code2 },
   ] as const;
+
+  const handlePasswordSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setPassMsg(null);
+    setPassErr(null);
+    try {
+      await changePassword(curPass, newPass);
+      setCurPass('');
+      setNewPass('');
+      setPassMsg(language === 'bn' ? 'পাসওয়ার্ড আপডেট হয়েছে।' : 'Password changed successfully.');
+    } catch (err) {
+      setPassErr(err instanceof Error ? err.message : 'Could not update password.');
+    }
+  };
 
   return (
     <div
@@ -205,8 +383,8 @@ export function SettingsAndModals() {
       aria-label={t.settings.title}
       className="fixed inset-0 z-50 bg-slate-950/60 backdrop-blur-sm flex items-center justify-center p-4"
     >
-      <div className="liquid-glass rounded-3xl max-w-3xl w-full max-h-[86vh] overflow-hidden grid grid-cols-1 md:grid-cols-12">
-        <nav className="md:col-span-4 border-b md:border-b-0 md:border-r border-slate-200/70 dark:border-slate-800/70 p-4 space-y-1">
+      <div className="liquid-glass rounded-3xl max-w-3xl w-full max-h-[88vh] overflow-hidden grid grid-cols-1 md:grid-cols-12">
+        <nav className="md:col-span-4 border-b md:border-b-0 md:border-r border-slate-200/70 dark:border-slate-800/70 p-4 space-y-1 overflow-y-auto">
           <div className="flex items-center justify-between mb-3">
             <h2 className="text-base font-bold text-slate-900 dark:text-white">{t.settings.title}</h2>
             <button
@@ -223,7 +401,7 @@ export function SettingsAndModals() {
               key={id}
               type="button"
               onClick={() => setSubscreen(id)}
-              className={`w-full min-h-[42px] px-3 rounded-xl text-left text-xs font-semibold flex items-center gap-2.5 transition-colors ${
+              className={`w-full min-h-[40px] px-3 rounded-xl text-left text-xs font-semibold flex items-center gap-2.5 transition-colors ${
                 subscreen === id
                   ? 'bg-sky-600 text-white'
                   : 'text-slate-700 dark:text-slate-300 hover:bg-white/60 dark:hover:bg-slate-800/60'
@@ -247,9 +425,76 @@ export function SettingsAndModals() {
             </button>
           </div>
 
+          {subscreen === 'settings_home' && (
+            <div className="space-y-4">
+              <h3 className="text-base font-bold text-slate-900 dark:text-white">{t.settings.title}</h3>
+              {isAuthenticated && (
+                <div className="p-4 rounded-2xl liquid-glass-subtle flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-3 min-w-0">
+                    <Avatar src={currentUser.photoUrl} name={currentUser.displayName} size="md" />
+                    <div className="min-w-0">
+                      <p className="text-sm font-bold text-slate-900 dark:text-white truncate">
+                        {currentUser.displayName}
+                      </p>
+                      <p className="text-xs text-slate-500 truncate">
+                        @{currentUser.username} · {userPrivate.email}
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setSubscreen('settings_account')}
+                    className="min-h-[36px] px-3 rounded-xl bg-sky-600 text-white text-xs font-semibold shrink-0"
+                  >
+                    {t.profile.switchAccount}
+                  </button>
+                </div>
+              )}
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                {settingsTabs
+                  .filter((tab) => tab.id !== 'settings_home')
+                  .map(({ id, label, icon: Icon }) => (
+                    <button
+                      key={id}
+                      type="button"
+                      onClick={() => setSubscreen(id)}
+                      className="p-3.5 rounded-2xl liquid-glass-subtle text-left hover:bg-white/80 dark:hover:bg-slate-800/80 transition-colors flex items-center gap-3"
+                    >
+                      <Icon className="w-4 h-4 text-sky-600 shrink-0" />
+                      <span className="text-xs font-semibold text-slate-900 dark:text-white">
+                        {label}
+                      </span>
+                    </button>
+                  ))}
+              </div>
+            </div>
+          )}
+
           {subscreen === 'settings_privacy' && (
             <div className="space-y-4">
               <h3 className="text-base font-bold text-slate-900 dark:text-white">{t.settings.privacy}</h3>
+              {isAuthenticated && (
+                <label className="flex items-center justify-between gap-4 p-4 rounded-2xl liquid-glass-subtle cursor-pointer">
+                  <div>
+                    <p className="text-sm font-semibold text-slate-900 dark:text-white">
+                      {t.auth.privateAccountLabel}
+                    </p>
+                    <p className="text-xs text-slate-500 dark:text-slate-400">
+                      {language === 'bn'
+                        ? 'শুধু অনুমোদিত ফলোয়াররা আপনার পোস্ট ও রিল দেখতে পারবে।'
+                        : 'Only approved followers can view your posts, reels, and lists.'}
+                    </p>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={currentUser.isPrivate}
+                    onChange={(e) => updateProfile({ isPrivate: e.target.checked })}
+                    className="w-5 h-5 text-sky-600 rounded"
+                  />
+                </label>
+              )}
+
               <div>
                 <label
                   htmlFor="who-can-message"
@@ -300,6 +545,26 @@ export function SettingsAndModals() {
           {subscreen === 'settings_security' && (
             <div className="space-y-4">
               <h3 className="text-base font-bold text-slate-900 dark:text-white">{t.settings.security}</h3>
+
+              <label className="flex items-center justify-between gap-4 p-4 rounded-2xl liquid-glass-subtle cursor-pointer">
+                <div>
+                  <p className="text-sm font-semibold text-slate-900 dark:text-white">
+                    {t.settings.twoFactor}
+                  </p>
+                  <p className="text-xs text-slate-500 dark:text-slate-400">
+                    {language === 'bn'
+                      ? 'লগইনের সময় ইমেইল ওটিপি কোড বাধ্যতামূলক করবে।'
+                      : 'Require a 6-digit email verification code on login.'}
+                  </p>
+                </div>
+                <input
+                  type="checkbox"
+                  checked={Boolean(userPrivate.twoFactorEnabled)}
+                  onChange={(e) => updatePrivateSettings({ twoFactorEnabled: e.target.checked })}
+                  className="w-5 h-5 text-sky-600 rounded"
+                />
+              </label>
+
               <label className="flex items-center justify-between gap-4 p-4 rounded-2xl liquid-glass-subtle cursor-pointer">
                 <div>
                   <p className="text-sm font-semibold text-slate-900 dark:text-white">
@@ -318,10 +583,43 @@ export function SettingsAndModals() {
                   className="w-5 h-5 text-sky-600 rounded"
                 />
               </label>
-              <div className="p-4 rounded-2xl liquid-glass-subtle text-xs text-slate-600 dark:text-slate-300 space-y-1">
-                <p className="font-semibold text-slate-900 dark:text-white">Active Session</p>
-                <p>Firebase App Check & Transport TLS active. All API endpoints enforce Firebase ID token verification.</p>
-              </div>
+
+              {isAuthenticated && (
+                <form
+                  onSubmit={handlePasswordSubmit}
+                  className="p-4 rounded-2xl liquid-glass-subtle space-y-3"
+                >
+                  <h4 className="text-xs font-bold text-slate-900 dark:text-white flex items-center gap-1.5">
+                    <KeyRound className="w-4 h-4 text-sky-600" />
+                    <span>{t.settings.changePassword}</span>
+                  </h4>
+                  <input
+                    type="password"
+                    required
+                    value={curPass}
+                    onChange={(e) => setCurPass(e.target.value)}
+                    placeholder={language === 'bn' ? 'বর্তমান পাসওয়ার্ড' : 'Current password'}
+                    className="w-full min-h-[42px] px-3 rounded-xl bg-white/80 dark:bg-slate-900/70 border border-slate-200 dark:border-slate-700 text-sm text-slate-900 dark:text-white"
+                  />
+                  <input
+                    type="password"
+                    required
+                    minLength={6}
+                    value={newPass}
+                    onChange={(e) => setNewPass(e.target.value)}
+                    placeholder={language === 'bn' ? 'নতুন পাসওয়ার্ড (কমপক্ষে ৬ অক্ষর)' : 'New password (min 6 chars)'}
+                    className="w-full min-h-[42px] px-3 rounded-xl bg-white/80 dark:bg-slate-900/70 border border-slate-200 dark:border-slate-700 text-sm text-slate-900 dark:text-white"
+                  />
+                  {passErr && <p className="text-xs text-rose-600 font-medium">{passErr}</p>}
+                  {passMsg && <p className="text-xs text-emerald-600 font-medium">{passMsg}</p>}
+                  <button
+                    type="submit"
+                    className="min-h-[40px] px-4 rounded-xl bg-sky-600 text-white text-xs font-semibold"
+                  >
+                    {t.settings.changePassword}
+                  </button>
+                </form>
+              )}
             </div>
           )}
 
@@ -336,10 +634,11 @@ export function SettingsAndModals() {
                 <div className="divide-y divide-slate-200/70 dark:divide-slate-800/70">
                   {userPrivate.blockedUserIds.map((uid) => {
                     const u = creators.find((c) => c.uid === uid);
+                    const masked = u ? getMaskedUserDisplay(u, currentUser.uid, u.uid) : null;
                     return (
                       <div key={uid} className="py-3 flex items-center justify-between">
                         <span className="text-sm font-medium text-slate-900 dark:text-white">
-                          {u ? `${u.displayName} (@${u.username})` : uid}
+                          {masked ? `${masked.displayName} (@${masked.username})` : uid}
                         </span>
                         <button
                           type="button"
@@ -425,6 +724,84 @@ export function SettingsAndModals() {
           {subscreen === 'settings_account' && (
             <div className="space-y-4">
               <h3 className="text-base font-bold text-slate-900 dark:text-white">{t.settings.account}</h3>
+
+              {/* Saved Logins / Account Switcher */}
+              <div className="p-4 rounded-2xl liquid-glass-subtle space-y-2.5">
+                <div className="flex items-center justify-between">
+                  <p className="text-xs font-bold text-slate-900 dark:text-white">
+                    {t.settings.accountSwitch}
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSubscreen(null);
+                      openAuthModal();
+                    }}
+                    className="text-xs font-semibold text-sky-600 inline-flex items-center gap-1"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>{t.profile.addAccount}</span>
+                  </button>
+                </div>
+
+                {savedLogins.length === 0 ? (
+                  <p className="text-xs text-slate-500">
+                    {language === 'bn' ? 'কোনো সেভড অ্যাকাউন্ট নেই।' : 'No saved accounts yet.'}
+                  </p>
+                ) : (
+                  <div className="space-y-2">
+                    {savedLogins.map((entry) => {
+                      const active = entry.uid === currentUser.uid && isAuthenticated;
+                      return (
+                        <div
+                          key={entry.uid}
+                          className="p-2.5 rounded-xl bg-white/60 dark:bg-slate-900/50 flex items-center justify-between gap-2"
+                        >
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              if (active) return;
+                              try {
+                                await loginWithSavedAccount(entry);
+                                setSubscreen(null);
+                              } catch (err) {
+                                showToast(err instanceof Error ? err.message : 'Sign in required');
+                              }
+                            }}
+                            className="flex items-center gap-2.5 min-w-0 text-left flex-1"
+                          >
+                            <Avatar src={entry.photoUrl} name={entry.displayName} size="sm" />
+                            <div className="min-w-0">
+                              <p className="text-xs font-bold text-slate-900 dark:text-white truncate">
+                                {entry.displayName}
+                              </p>
+                              <p className="text-[11px] text-slate-500 truncate">@{entry.username}</p>
+                            </div>
+                          </button>
+                          <div className="flex items-center gap-1.5 shrink-0">
+                            {active ? (
+                              <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-600">
+                                <UserCheck className="w-3.5 h-3.5" />
+                                Active
+                              </span>
+                            ) : (
+                              <button
+                                type="button"
+                                aria-label={`Remove ${entry.username}`}
+                                onClick={() => removeSavedLogin(entry.uid)}
+                                className="p-1.5 text-slate-400 hover:text-rose-600"
+                              >
+                                <X className="w-3.5 h-3.5" />
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
               {!isAuthenticated ? (
                 <div className="p-4 rounded-2xl liquid-glass-subtle space-y-3">
                   <p className="text-xs text-slate-600 dark:text-slate-300">
@@ -444,22 +821,92 @@ export function SettingsAndModals() {
               ) : (
                 <>
                   <p className="text-xs text-slate-500 dark:text-slate-400">
-                    Email: {firebaseUser?.email || userPrivate.email}
+                    Email: {userPrivate.email} · UID: <code className="font-mono">{currentUser.uid}</code>
                   </p>
-                  {firebaseUser && !firebaseUser.emailVerified && (
-                    <div className="p-3.5 rounded-2xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-between gap-3">
-                      <span className="text-xs text-amber-800 dark:text-amber-200">
-                        Email not verified yet.
-                      </span>
+
+                  {/* Deactivate Account (7 days or custom days) */}
+                  <div className="p-4 rounded-2xl liquid-glass-subtle space-y-3">
+                    <h4 className="text-xs font-bold text-slate-900 dark:text-white flex items-center gap-1.5">
+                      <PauseCircle className="w-4 h-4 text-amber-500" />
+                      <span>{t.settings.deactivateAccount}</span>
+                    </h4>
+                    <p className="text-xs text-slate-500 dark:text-slate-400">
+                      {language === 'bn'
+                        ? 'ডিঅ্যাক্টিভেট করলে অন্যরা আপনাকে "SocialVerse User" হিসেবে দেখবে। পুনরায় লগইন করলেই অ্যাকাউন্ট সক্রিয় হয়ে যাবে।'
+                        : 'Your profile appears as "SocialVerse User" while deactivated. Logging back in reactivates it immediately.'}
+                    </p>
+                    <div className="flex flex-wrap items-center gap-2">
                       <button
                         type="button"
-                        onClick={resendVerificationEmail}
-                        className="min-h-[34px] px-3 rounded-lg bg-amber-600 text-white text-xs font-semibold shrink-0"
+                        onClick={() => setDeactivateMode('7')}
+                        className={`min-h-[36px] px-3 rounded-xl text-xs font-semibold ${
+                          deactivateMode === '7'
+                            ? 'bg-amber-600 text-white'
+                            : 'bg-white/70 dark:bg-slate-900/60 text-slate-700 dark:text-slate-200'
+                        }`}
                       >
-                        {t.auth.resendVerification}
+                        {language === 'bn' ? '৭ দিন (ডিফল্ট)' : '7 Days'}
                       </button>
+                      <button
+                        type="button"
+                        onClick={() => setDeactivateMode('custom')}
+                        className={`min-h-[36px] px-3 rounded-xl text-xs font-semibold ${
+                          deactivateMode === 'custom'
+                            ? 'bg-amber-600 text-white'
+                            : 'bg-white/70 dark:bg-slate-900/60 text-slate-700 dark:text-slate-200'
+                        }`}
+                      >
+                        {language === 'bn' ? 'কাস্টম দিন' : 'Custom Days'}
+                      </button>
+                      {deactivateMode === 'custom' && (
+                        <input
+                          type="number"
+                          min={1}
+                          max={365}
+                          value={customDeactivateDays}
+                          onChange={(e) => setCustomDeactivateDays(e.target.value)}
+                          aria-label="Custom deactivation days"
+                          className="w-24 min-h-[36px] px-2.5 rounded-xl bg-white/80 dark:bg-slate-900/70 border border-slate-200 dark:border-slate-700 text-xs text-slate-900 dark:text-white"
+                        />
+                      )}
                     </div>
-                  )}
+
+                    {!confirmDeactivate ? (
+                      <button
+                        type="button"
+                        onClick={() => setConfirmDeactivate(true)}
+                        className="min-h-[40px] px-4 rounded-xl border border-amber-500/50 text-amber-600 dark:text-amber-400 text-xs font-semibold"
+                      >
+                        {t.settings.deactivateAccount}
+                      </button>
+                    ) : (
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setConfirmDeactivate(false)}
+                          className="min-h-[38px] px-3 rounded-xl liquid-glass-subtle text-xs font-semibold"
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            deactivateAccount(
+                              deactivateMode === '7'
+                                ? 7
+                                : Math.max(1, Number(customDeactivateDays) || 7)
+                            )
+                          }
+                          className="min-h-[38px] px-4 rounded-xl bg-amber-600 text-white text-xs font-semibold"
+                        >
+                          {language === 'bn'
+                            ? `নিশ্চিত করুন (${deactivateMode === '7' ? 7 : customDeactivateDays} দিন)`
+                            : `Confirm (${deactivateMode === '7' ? 7 : customDeactivateDays}d)`}
+                        </button>
+                      </div>
+                    )}
+                  </div>
+
                   <button
                     type="button"
                     onClick={logout}
@@ -468,6 +915,7 @@ export function SettingsAndModals() {
                     <LogOut className="w-4 h-4" />
                     <span>{t.auth.logout}</span>
                   </button>
+
                   {!confirmDelete ? (
                     <button
                       type="button"
@@ -479,7 +927,9 @@ export function SettingsAndModals() {
                   ) : (
                     <div className="p-4 rounded-2xl bg-rose-500/10 border border-rose-500/30 space-y-3">
                       <p className="text-xs text-rose-700 dark:text-rose-300">
-                        This removes your profile, private settings, and session permanently.
+                        {language === 'bn'
+                          ? 'এটি আপনার প্রোফাইল, পোস্ট এবং অ্যাকাউন্ট স্থায়ীভাবে মুছে ফেলবে।'
+                          : 'This permanently deletes your account, posts, and private data.'}
                       </p>
                       <div className="flex gap-2">
                         <button
@@ -492,9 +942,10 @@ export function SettingsAndModals() {
                         <button
                           type="button"
                           onClick={deleteAccount}
-                          className="flex-1 min-h-[40px] rounded-xl bg-rose-600 text-white text-xs font-semibold"
+                          className="flex-1 min-h-[40px] rounded-xl bg-rose-600 text-white text-xs font-semibold inline-flex items-center justify-center gap-1"
                         >
-                          Confirm Delete
+                          <Trash2 className="w-3.5 h-3.5" />
+                          <span>Confirm Delete</span>
                         </button>
                       </div>
                     </div>
@@ -510,10 +961,10 @@ export function SettingsAndModals() {
                 {t.settings.aboutLegal}
               </h3>
               <p>
-                SocialVerse (com.socialverse.app) is a user-facing social media application built with Clean Architecture, Firebase Zero-Trust Rules, and bilingual English & বাংলা support.
+                SocialVerse (com.socialverse.app) features real-time messaging, voice & video calling, broadcast channels, reels, stories, and bilingual English & বাংলা support.
               </p>
               <p className="text-xs text-slate-500 dark:text-slate-400">
-                Privacy Policy: Private user data (email, blocklists, notification controls) is isolated in owner-only subcollections. Standard TLS encryption in transit protects all Firebase traffic; end-to-end encryption is not claimed for standard cloud-synced messages.
+                Privacy Policy: Private user settings (email, 2FA, blocklists) are stored separately from public profiles. Nickname style changes are rate-limited to once per 7 days and username changes to once per 14 days.
               </p>
             </div>
           )}
@@ -524,13 +975,12 @@ export function SettingsAndModals() {
                 Android Studio & Firebase Architecture
               </h3>
               <p>
-                Complete Kotlin + Jetpack Compose Clean Architecture MVVM project included in <code className="font-mono">android/</code> along with <code className="font-mono">functions/</code>, <code className="font-mono">firestore.rules</code>, <code className="font-mono">storage.rules</code>, and <code className="font-mono">FIREBASE_SETUP_AND_BUILD.md</code>.
+                Kotlin + Jetpack Compose project included in <code className="font-mono">android/</code> alongside <code className="font-mono">firestore.rules</code>, <code className="font-mono">storage.rules</code>, and WebRTC signaling.
               </p>
               <ul className="list-disc pl-5 space-y-1">
                 <li>Package ID: com.socialverse.app (Min SDK 26, Target SDK 35)</li>
-                <li>UI: Jetpack Compose + Liquid Glass SurfaceModifiers + Material 3</li>
-                <li>DI & Media: Hilt, Coil 3, Media3 ExoPlayer, BiometricPrompt</li>
-                <li>Firebase: Auth, Firestore, Storage, FCM, App Check, Crashlytics, Analytics</li>
+                <li>Auth: Gmail SMTP OTP + Unique Username + Password + 2FA</li>
+                <li>Real-Time: WebSocket Sync + WebRTC Voice/Video Calls</li>
               </ul>
             </div>
           )}

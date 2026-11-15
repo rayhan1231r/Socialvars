@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import { Clapperboard, Hash, Search } from 'lucide-react';
 import { useSocialVerse } from '../context/SocialVerseContext';
-import { formatCompactCount } from '../utils/validation';
+import { formatCompactCount, getMaskedUserDisplay } from '../utils/validation';
 import { Avatar } from './Avatar';
 import { PostCard } from './PostCard';
 
@@ -10,10 +10,13 @@ export function ExploreView() {
     posts,
     creators,
     currentUser,
+    isAuthenticated,
     followingIds,
+    followerIds,
+    friendRequests,
     toggleFollow,
     openUserProfile,
-    setSubscreen,
+    setActiveTab,
     t,
   } = useSocialVerse();
 
@@ -27,32 +30,41 @@ export function ExploreView() {
     });
     return Array.from(counts.entries())
       .sort((a, b) => b[1] - a[1])
-      .slice(0, 6);
+      .slice(0, 8);
   }, [posts]);
 
   const normalizedQuery = queryText.trim().toLowerCase().replace(/^#/, '');
 
   const matchedUsers = useMemo(() => {
     return creators.filter((u) => {
-      if (u.uid === currentUser.uid) return false;
+      if (isAuthenticated && u.uid === currentUser.uid) return false;
+      if (u.isDeactivated && u.uid !== currentUser.uid) return false;
       if (!normalizedQuery) return true;
+      const masked = getMaskedUserDisplay(u, isAuthenticated ? currentUser.uid : null, u.uid);
       return (
-        u.username.toLowerCase().includes(normalizedQuery) ||
-        u.displayName.toLowerCase().includes(normalizedQuery) ||
+        u.uid.toLowerCase().includes(normalizedQuery) ||
+        masked.username.toLowerCase().includes(normalizedQuery) ||
+        masked.displayName.toLowerCase().includes(normalizedQuery) ||
         u.bio.toLowerCase().includes(normalizedQuery) ||
         u.interests.some((i) => i.toLowerCase().includes(normalizedQuery))
       );
     });
-  }, [creators, currentUser.uid, normalizedQuery]);
+  }, [creators, currentUser.uid, isAuthenticated, normalizedQuery]);
 
   const matchedPosts = useMemo(() => {
     const base =
-      filterTab === 'reels' ? posts.filter((p) => p.mediaType === 'reel' || p.mediaType === 'video') : posts;
+      filterTab === 'reels'
+        ? posts.filter((p) => p.mediaType === 'reel' || p.mediaType === 'video')
+        : filterTab === 'posts'
+        ? posts.filter((p) => p.mediaType !== 'reel')
+        : posts;
     if (!normalizedQuery) return base;
     return base.filter(
       (p) =>
         p.caption.toLowerCase().includes(normalizedQuery) ||
         p.authorUsername.toLowerCase().includes(normalizedQuery) ||
+        p.authorDisplayName.toLowerCase().includes(normalizedQuery) ||
+        p.authorId.toLowerCase().includes(normalizedQuery) ||
         p.hashtags.some((h) => h.toLowerCase().includes(normalizedQuery))
     );
   }, [posts, filterTab, normalizedQuery]);
@@ -102,51 +114,76 @@ export function ExploreView() {
 
         <button
           type="button"
-          onClick={() => setSubscreen('reels')}
+          onClick={() => setActiveTab('reels')}
           className="min-h-[42px] px-4 rounded-xl bg-sky-600 text-white text-xs font-semibold inline-flex items-center gap-2 hover:bg-sky-700 transition-colors"
         >
           <Clapperboard className="w-4 h-4" />
-          <span>Open Full Reels</span>
+          <span>{t.nav.reels}</span>
         </button>
       </div>
 
       {/* Trending Hashtags */}
-      <section aria-label={t.explore.trendingHashtags} className="liquid-glass rounded-2xl p-4 sm:p-5 space-y-3">
-        <h2 className="text-sm font-bold text-slate-900 dark:text-white">
-          {t.explore.trendingHashtags}
-        </h2>
-        <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5">
-          {trendingHashtags.map(([tag, count]) => (
-            <button
-              key={tag}
-              type="button"
-              onClick={() => setQueryText(`#${tag}`)}
-              className="min-h-[48px] p-3 rounded-xl liquid-glass-subtle text-left hover:bg-white/80 dark:hover:bg-slate-800/80 transition-colors flex items-center justify-between gap-2"
-            >
-              <span className="inline-flex items-center gap-1.5 text-sm font-semibold text-slate-900 dark:text-white truncate">
-                <Hash className="w-3.5 h-3.5 text-sky-600 shrink-0" />
-                {tag}
-              </span>
-              <span className="text-xs font-mono-num text-slate-500 dark:text-slate-400 shrink-0">
-                {count} posts
-              </span>
-            </button>
-          ))}
-        </div>
-      </section>
+      {trendingHashtags.length > 0 && (
+        <section aria-label={t.explore.trendingHashtags} className="liquid-glass rounded-2xl p-4 sm:p-5 space-y-3">
+          <h2 className="text-sm font-bold text-slate-900 dark:text-white">
+            {t.explore.trendingHashtags}
+          </h2>
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5">
+            {trendingHashtags.map(([tag, count]) => (
+              <button
+                key={tag}
+                type="button"
+                onClick={() => setQueryText(`#${tag}`)}
+                className="min-h-[48px] p-3 rounded-xl liquid-glass-subtle text-left hover:bg-white/80 dark:hover:bg-slate-800/80 transition-colors flex items-center justify-between gap-2"
+              >
+                <span className="inline-flex items-center gap-1.5 text-sm font-semibold text-slate-900 dark:text-white truncate">
+                  <Hash className="w-3.5 h-3.5 text-sky-600 shrink-0" />
+                  {tag}
+                </span>
+                <span className="text-xs font-mono-num text-slate-500 dark:text-slate-400 shrink-0">
+                  {count}
+                </span>
+              </button>
+            ))}
+          </div>
+        </section>
+      )}
 
-      {/* Suggested Accounts */}
+      {/* Accounts */}
       {(filterTab === 'all' || filterTab === 'users') && (
         <section aria-label={t.explore.suggestedAccounts} className="liquid-glass rounded-2xl p-4 sm:p-5 space-y-3">
           <h2 className="text-sm font-bold text-slate-900 dark:text-white">
             {t.explore.suggestedAccounts}
           </h2>
           {matchedUsers.length === 0 ? (
-            <p className="text-xs text-slate-500 dark:text-slate-400">No matching creators found.</p>
+            <p className="text-xs text-slate-500 dark:text-slate-400">
+              {normalizedQuery ? 'No matching accounts found.' : t.feed.emptyHomeDesc}
+            </p>
           ) : (
             <div className="divide-y divide-slate-200/70 dark:divide-slate-800/70">
               {matchedUsers.map((creator) => {
                 const isFollowing = followingIds.includes(creator.uid);
+                const isFollower = followerIds.includes(creator.uid);
+                const hasPendingRequest = friendRequests.some(
+                  (r) =>
+                    r.fromUid === currentUser.uid &&
+                    r.toUid === creator.uid &&
+                    r.status === 'pending'
+                );
+                const masked = getMaskedUserDisplay(
+                  creator,
+                  isAuthenticated ? currentUser.uid : null,
+                  creator.uid
+                );
+
+                const followLabel = isFollowing
+                  ? t.explore.following
+                  : hasPendingRequest
+                  ? t.explore.requestSent
+                  : isFollower
+                  ? t.explore.followBack
+                  : t.explore.follow;
+
                 return (
                   <div key={creator.uid} className="py-3 first:pt-1 last:pb-1 flex items-center justify-between gap-3">
                     <button
@@ -154,13 +191,19 @@ export function ExploreView() {
                       onClick={() => openUserProfile(creator.uid)}
                       className="flex items-center gap-3 min-w-0 text-left"
                     >
-                      <Avatar src={creator.photoUrl} name={creator.displayName} size="md" online={creator.onlineStatus === 'online'} />
+                      <Avatar
+                        src={creator.photoUrl}
+                        name={masked.displayName}
+                        size="md"
+                        online={creator.onlineStatus === 'online'}
+                      />
                       <div className="min-w-0">
                         <p className="text-sm font-semibold text-slate-900 dark:text-white truncate">
-                          {creator.displayName}
+                          {masked.displayName}
                         </p>
                         <p className="text-xs text-slate-500 dark:text-slate-400 truncate">
-                          @{creator.username} · {formatCompactCount(creator.followersCount)} {t.profile.followers.toLowerCase()}
+                          @{masked.username} · {formatCompactCount(creator.followersCount)}{' '}
+                          {t.profile.followers.toLowerCase()}
                         </p>
                       </div>
                     </button>
@@ -168,12 +211,12 @@ export function ExploreView() {
                       type="button"
                       onClick={() => toggleFollow(creator.uid)}
                       className={`min-h-[40px] px-4 rounded-xl text-xs font-semibold shrink-0 transition-colors ${
-                        isFollowing
+                        isFollowing || hasPendingRequest
                           ? 'bg-slate-200/80 dark:bg-slate-800 text-slate-700 dark:text-slate-300'
                           : 'bg-sky-600 text-white hover:bg-sky-700'
                       }`}
                     >
-                      {isFollowing ? t.explore.following : t.explore.follow}
+                      {followLabel}
                     </button>
                   </div>
                 );

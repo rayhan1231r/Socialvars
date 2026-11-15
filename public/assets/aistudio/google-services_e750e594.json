@@ -1,0 +1,40 @@
+{
+  "project_info": {
+    "project_number": "1027388394637",
+    "firebase_url": "https://socialvars-default-rtdb.firebaseio.com",
+    "project_id": "socialvars",
+    "storage_bucket": "socialvars.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:1027388394637:android:7e853c836b6d1727fee6c4",
+        "android_client_info": {
+          "package_name": "Com.social.vrs"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "1027388394637-28otuumdhkvl3sk025muutj2922q2e2t.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAwcVL_kkRZn9MjnkijQi46aLzDB7eMqhQ"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "1027388394637-28otuumdhkvl3sk025muutj2922q2e2t.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

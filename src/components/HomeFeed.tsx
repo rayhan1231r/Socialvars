@@ -1,13 +1,22 @@
-import { useState } from 'react';
-import { Clapperboard } from 'lucide-react';
+import { useRef, useState } from 'react';
+import { Clapperboard, PlusSquare, Sparkles } from 'lucide-react';
 import { useSocialVerse } from '../context/SocialVerseContext';
 import { PostCard } from './PostCard';
 import { StoriesBar } from './StoriesBar';
 
 export function HomeFeed() {
-  const { posts, visiblePostLimit, loadMorePosts, followingIds, currentUser, t, setSubscreen } =
-    useSocialVerse();
+  const {
+    posts,
+    visiblePostLimit,
+    loadMorePosts,
+    followingIds,
+    currentUser,
+    t,
+    setSubscreen,
+    setActiveTab,
+  } = useSocialVerse();
   const [feedMode, setFeedMode] = useState<'recommended' | 'following'>('recommended');
+  const swipeStartX = useRef<number | null>(null);
 
   const filteredPosts =
     feedMode === 'following'
@@ -19,11 +28,29 @@ export function HomeFeed() {
   const visiblePosts = filteredPosts.slice(0, visiblePostLimit);
   const hasMore = visiblePosts.length < filteredPosts.length;
 
+  const handleTouchStart = (e: React.TouchEvent) => {
+    swipeStartX.current = e.touches[0]?.clientX ?? null;
+  };
+
+  const handleTouchEnd = (e: React.TouchEvent) => {
+    if (swipeStartX.current === null) return;
+    const endX = e.changedTouches[0]?.clientX ?? swipeStartX.current;
+    const deltaX = swipeStartX.current - endX;
+    swipeStartX.current = null;
+    if (deltaX > 70) {
+      setSubscreen('create_sheet');
+    }
+  };
+
   return (
-    <div className="space-y-4">
+    <div
+      onTouchStart={handleTouchStart}
+      onTouchEnd={handleTouchEnd}
+      className="space-y-4"
+    >
       <StoriesBar />
 
-      <div className="flex items-center justify-between gap-3">
+      <div className="flex items-center justify-between gap-2">
         <div className="inline-flex items-center gap-1 p-1 rounded-xl liquid-glass-subtle">
           <button
             type="button"
@@ -49,19 +76,48 @@ export function HomeFeed() {
           </button>
         </div>
 
-        <button
-          type="button"
-          onClick={() => setSubscreen('reels')}
-          className="min-h-[42px] px-4 rounded-xl liquid-glass-subtle text-xs font-semibold text-slate-800 dark:text-slate-200 inline-flex items-center gap-2 hover:bg-white/80 dark:hover:bg-slate-800/80 transition-colors whitespace-nowrap"
-        >
-          <Clapperboard className="w-4 h-4 text-sky-600" />
-          <span>{t.explore.reels}</span>
-        </button>
+        <div className="flex items-center gap-1.5">
+          <button
+            type="button"
+            onClick={() => setSubscreen('create_sheet')}
+            className="min-h-[40px] px-3.5 rounded-xl bg-sky-600 text-white text-xs font-semibold inline-flex items-center gap-1.5 hover:bg-sky-700 transition-colors whitespace-nowrap"
+          >
+            <PlusSquare className="w-4 h-4" />
+            <span>{t.nav.create}</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab('reels')}
+            className="min-h-[40px] px-3.5 rounded-xl liquid-glass-subtle text-xs font-semibold text-slate-800 dark:text-slate-200 inline-flex items-center gap-1.5 hover:bg-white/80 dark:hover:bg-slate-800/80 transition-colors whitespace-nowrap"
+          >
+            <Clapperboard className="w-4 h-4 text-sky-600" />
+            <span>{t.explore.reels}</span>
+          </button>
+        </div>
       </div>
 
       {visiblePosts.length === 0 ? (
-        <div className="liquid-glass rounded-2xl p-10 text-center text-sm text-slate-500 dark:text-slate-400">
-          {t.feed.noPosts}
+        <div className="liquid-glass rounded-3xl p-8 sm:p-10 text-center space-y-4">
+          <div className="w-12 h-12 mx-auto rounded-2xl bg-sky-600/10 text-sky-600 flex items-center justify-center">
+            <Sparkles className="w-6 h-6" />
+          </div>
+          <div className="space-y-1.5 max-w-sm mx-auto">
+            <p className="text-base font-bold text-slate-900 dark:text-white">
+              {t.feed.noPosts}
+            </p>
+            <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
+              {t.feed.emptyHomeDesc}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => setSubscreen('create_sheet')}
+            className="min-h-[42px] px-5 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-xs font-semibold inline-flex items-center gap-2"
+          >
+            <PlusSquare className="w-4 h-4" />
+            <span>{t.create.newPost}</span>
+          </button>
+          <p className="text-[11px] text-slate-400">{t.feed.swipeCreateHint}</p>
         </div>
       ) : (
         <div className="space-y-4">

@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { ChevronLeft, ChevronRight, Eye, Plus, Send, Trash2, VolumeX, X } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Eye, Image as ImageIcon, Plus, Send, Trash2, VolumeX, X } from 'lucide-react';
 import { useSocialVerse } from '../context/SocialVerseContext';
 import { formatRelativeTime } from '../utils/validation';
 import { Avatar } from './Avatar';
@@ -7,6 +7,7 @@ import { Avatar } from './Avatar';
 export function StoriesBar() {
   const {
     currentUser,
+    isAuthenticated,
     stories,
     t,
     language,
@@ -19,6 +20,7 @@ export function StoriesBar() {
     deleteStory,
     muteStoryAuthor,
     createStory,
+    uploadImageDataUrl,
   } = useSocialVerse();
 
   const [replyText, setReplyText] = useState('');
@@ -27,15 +29,25 @@ export function StoriesBar() {
   // Story creator local state
   const [storyType, setStoryType] = useState<'text' | 'photo' | 'video'>('text');
   const [storyText, setStoryText] = useState('');
-  const [storyMediaUrl, setStoryMediaUrl] = useState('/src/assets/images/story_coastal_dawn_1794697851133.jpg');
+  const [storyMediaUrl, setStoryMediaUrl] = useState('');
   const [storyPrivacy, setStoryPrivacy] = useState<'everyone' | 'followers' | 'close_friends'>('everyone');
 
   const activeStory =
     activeStoryIndex !== null && stories[activeStoryIndex] ? stories[activeStoryIndex] : null;
 
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const url = await uploadImageDataUrl(file, 1080);
+    setStoryMediaUrl(url);
+    if (file.type.startsWith('video/')) setStoryType('video');
+    else setStoryType('photo');
+  };
+
   const handlePublishStory = async (e: React.FormEvent) => {
     e.preventDefault();
     if (storyType === 'text' && !storyText.trim()) return;
+    if (storyType !== 'text' && !storyMediaUrl.trim()) return;
     await createStory({
       mediaType: storyType,
       mediaUrl: storyType === 'text' ? undefined : storyMediaUrl,
@@ -43,6 +55,7 @@ export function StoriesBar() {
       privacy: storyPrivacy,
     });
     setStoryText('');
+    setStoryMediaUrl('');
   };
 
   return (
@@ -55,7 +68,11 @@ export function StoriesBar() {
             className="flex flex-col items-center gap-1.5 shrink-0 min-w-[68px] group"
           >
             <div className="relative p-0.5 rounded-full border border-dashed border-sky-500">
-              <Avatar src={currentUser.photoUrl} name={currentUser.displayName} size="lg" />
+              <Avatar
+                src={isAuthenticated ? currentUser.photoUrl : ''}
+                name={isAuthenticated ? currentUser.displayName : 'You'}
+                size="lg"
+              />
               <span className="absolute -bottom-0.5 -right-0.5 w-6 h-6 rounded-full bg-sky-600 text-white flex items-center justify-center shadow ring-2 ring-white dark:ring-slate-900">
                 <Plus className="w-3.5 h-3.5" />
               </span>
@@ -97,7 +114,6 @@ export function StoriesBar() {
           className="fixed inset-0 z-50 bg-slate-950/90 backdrop-blur-md flex items-center justify-center p-4"
         >
           <div className="relative w-full max-w-md h-[82vh] max-h-[760px] rounded-3xl overflow-hidden bg-slate-900 border border-white/15 shadow-2xl flex flex-col justify-between">
-            {/* Background media or text */}
             {activeStory.mediaType === 'photo' && activeStory.mediaUrl ? (
               <img
                 src={activeStory.mediaUrl}
@@ -127,7 +143,6 @@ export function StoriesBar() {
             )}
 
             <div className="relative z-10 p-4 bg-gradient-to-b from-black/75 via-black/35 to-transparent">
-              {/* Progress bars */}
               <div className="flex gap-1.5 mb-3">
                 {stories.map((s, i) => (
                   <div key={s.id} className="h-1 flex-1 rounded-full bg-white/30 overflow-hidden">
@@ -184,7 +199,6 @@ export function StoriesBar() {
               </div>
             </div>
 
-            {/* Side navigation */}
             <div className="relative z-10 flex items-center justify-between px-2">
               <button
                 type="button"
@@ -208,7 +222,6 @@ export function StoriesBar() {
               </button>
             </div>
 
-            {/* Bottom Controls */}
             <div className="relative z-10 p-4 bg-gradient-to-t from-black/85 via-black/55 to-transparent space-y-3">
               {activeStory.mediaType !== 'text' && activeStory.textContent && (
                 <p className="text-sm text-white/95 text-center">{activeStory.textContent}</p>
@@ -249,30 +262,34 @@ export function StoriesBar() {
                 </div>
               )}
 
-              <form
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  replyToStory(activeStory.id, replyText);
-                  setReplyText('');
-                }}
-                className="flex items-center gap-2"
-              >
-                <input
-                  type="text"
-                  value={replyText}
-                  onChange={(e) => setReplyText(e.target.value)}
-                  placeholder="Reply to story..."
-                  aria-label="Reply to story"
-                  className="flex-1 min-h-[44px] px-4 rounded-xl bg-white/15 border border-white/25 text-sm text-white placeholder:text-white/60 focus:outline-none focus:ring-2 focus:ring-sky-400"
-                />
-                <button
-                  type="submit"
-                  aria-label="Send story reply"
-                  className="min-h-[44px] min-w-[44px] rounded-xl bg-sky-600 text-white flex items-center justify-center"
+              {activeStory.authorId !== currentUser.uid && (
+                <form
+                  onSubmit={async (e) => {
+                    e.preventDefault();
+                    if (!replyText.trim()) return;
+                    const msg = replyText;
+                    setReplyText('');
+                    await replyToStory(activeStory.id, msg);
+                  }}
+                  className="flex items-center gap-2"
                 >
-                  <Send className="w-4 h-4" />
-                </button>
-              </form>
+                  <input
+                    type="text"
+                    value={replyText}
+                    onChange={(e) => setReplyText(e.target.value)}
+                    placeholder="Reply to story..."
+                    aria-label="Reply to story"
+                    className="flex-1 min-h-[44px] px-4 rounded-xl bg-white/15 border border-white/25 text-sm text-white placeholder:text-white/60 focus:outline-none focus:ring-2 focus:ring-sky-400"
+                  />
+                  <button
+                    type="submit"
+                    aria-label="Send story reply"
+                    className="min-h-[44px] min-w-[44px] rounded-xl bg-sky-600 text-white flex items-center justify-center"
+                  >
+                    <Send className="w-4 h-4" />
+                  </button>
+                </form>
+              )}
             </div>
           </div>
         </div>
@@ -318,18 +335,24 @@ export function StoriesBar() {
 
             <form onSubmit={handlePublishStory} className="space-y-4">
               {storyType !== 'text' && (
-                <div>
-                  <label
-                    htmlFor="story-media-url"
-                    className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1"
-                  >
-                    {t.create.mediaUrlLabel}
+                <div className="space-y-2">
+                  <label className="min-h-[44px] px-4 rounded-xl border border-dashed border-sky-500/50 bg-sky-500/5 text-sky-700 dark:text-sky-300 text-xs font-semibold inline-flex items-center gap-2 cursor-pointer w-full justify-center">
+                    <ImageIcon className="w-4 h-4" />
+                    <span>{t.create.mediaUrlLabel}</span>
+                    <input
+                      type="file"
+                      accept={storyType === 'video' ? 'video/*' : 'image/*'}
+                      onChange={handleFileUpload}
+                      className="sr-only"
+                    />
                   </label>
                   <input
                     id="story-media-url"
                     type="text"
                     value={storyMediaUrl}
                     onChange={(e) => setStoryMediaUrl(e.target.value)}
+                    placeholder="https://..."
+                    aria-label="Story media URL"
                     className="w-full min-h-[44px] px-3.5 rounded-xl bg-white/80 dark:bg-slate-900/70 border border-slate-200 dark:border-slate-700 text-sm text-slate-900 dark:text-white"
                   />
                 </div>

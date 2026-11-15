@@ -19,6 +19,10 @@ service cloud.firestore {
       return u is string && u.size() >= 3 && u.size() <= 24 && u.matches('^[a-z0-9_]{3,24}$');
     }
 
+    function isValidSha256(h) {
+      return h is string && h.size() == 64 && h.matches('^[a-f0-9]{64}$');
+    }
+
     function incoming() {
       return request.resource.data;
     }
@@ -38,17 +42,25 @@ service cloud.firestore {
     // Validation Blueprints
     function isValidUserPublic(data, userId) {
       return data.keys().hasAll(['uid', 'username', 'displayName', 'isPrivate', 'followersCount', 'followingCount', 'postsCount', 'onboardingCompleted', 'createdAt'])
-        && data.keys().hasOnly(['uid', 'username', 'displayName', 'bio', 'pronouns', 'website', 'photoUrl', 'coverUrl', 'interests', 'isPrivate', 'followersCount', 'followingCount', 'postsCount', 'onlineStatus', 'lastSeenAt', 'onboardingCompleted', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly([
+          'uid', 'username', 'displayName', 'nicknameFont', 'bio', 'pronouns', 'website', 'noteText',
+          'photoUrl', 'coverUrl', 'interests', 'isPrivate', 'isDeactivated', 'deactivatedUntil',
+          'followersCount', 'followingCount', 'postsCount', 'onlineStatus', 'lastSeenAt',
+          'lastNicknameChangedAt', 'lastUsernameChangedAt', 'onboardingCompleted', 'createdAt', 'updatedAt'
+        ])
         && data.uid == userId
         && isValidUsername(data.username)
         && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 50
-        && (!('bio' in data) || (data.bio is string && data.bio.size() <= 240))
+        && (!('nicknameFont' in data) || data.nicknameFont in ['classic', 'serif', 'mono', 'display', 'italic'])
+        && (!('bio' in data) || (data.bio is string && data.bio.size() <= 150))
         && (!('pronouns' in data) || (data.pronouns is string && data.pronouns.size() <= 32))
         && (!('website' in data) || (data.website is string && data.website.size() <= 200))
+        && (!('noteText' in data) || (data.noteText is string && data.noteText.size() <= 80))
         && (!('photoUrl' in data) || (data.photoUrl is string && data.photoUrl.size() <= 200000))
         && (!('coverUrl' in data) || (data.coverUrl is string && data.coverUrl.size() <= 200000))
         && (!('interests' in data) || isValidStringList(data.interests, 15))
         && data.isPrivate is bool
+        && (!('isDeactivated' in data) || data.isDeactivated is bool)
         && data.followersCount is int && data.followersCount >= 0
         && data.followingCount is int && data.followingCount >= 0
         && data.postsCount is int && data.postsCount >= 0
@@ -60,12 +72,17 @@ service cloud.firestore {
 
     function isValidUserPrivate(data, userId) {
       return data.keys().hasAll(['uid', 'email', 'language', 'whoCanMessage', 'whoCanViewStories', 'updatedAt'])
-        && data.keys().hasOnly(['uid', 'email', 'language', 'themeMode', 'biometricLockEnabled', 'whoCanMessage', 'whoCanViewStories', 'whoCanFollow', 'notificationPrefs', 'blockedUserIds', 'mutedStoryUserIds', 'updatedAt'])
+        && data.keys().hasOnly([
+          'uid', 'email', 'language', 'themeMode', 'biometricLockEnabled', 'twoFactorEnabled', 'saveLoginInfo',
+          'whoCanMessage', 'whoCanViewStories', 'whoCanFollow', 'notificationPrefs', 'blockedUserIds', 'mutedStoryUserIds', 'updatedAt'
+        ])
         && data.uid == userId
         && data.email is string && data.email.size() <= 254
         && data.language in ['en', 'bn']
         && (!('themeMode' in data) || data.themeMode in ['light', 'dark', 'system'])
         && (!('biometricLockEnabled' in data) || data.biometricLockEnabled is bool)
+        && (!('twoFactorEnabled' in data) || data.twoFactorEnabled is bool)
+        && (!('saveLoginInfo' in data) || data.saveLoginInfo is bool)
         && data.whoCanMessage in ['everyone', 'followers', 'nobody']
         && data.whoCanViewStories in ['everyone', 'followers', 'close_friends']
         && (!('whoCanFollow' in data) || data.whoCanFollow in ['everyone', 'approval'])
@@ -77,32 +94,39 @@ service cloud.firestore {
 
     function isValidPost(data) {
       return data.keys().hasAll(['id', 'authorId', 'authorUsername', 'authorDisplayName', 'caption', 'mediaType', 'likesCount', 'commentsCount', 'sharesCount', 'visibility', 'createdAt'])
-        && data.keys().hasOnly(['id', 'authorId', 'authorUsername', 'authorDisplayName', 'authorAvatar', 'caption', 'mediaUrls', 'mediaType', 'hashtags', 'likesCount', 'commentsCount', 'sharesCount', 'visibility', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly([
+          'id', 'authorId', 'authorUsername', 'authorDisplayName', 'authorAvatar', 'caption',
+          'mediaUrls', 'coverUrl', 'mediaType', 'hashtags', 'likesCount', 'commentsCount', 'sharesCount',
+          'visibility', 'createdAt', 'updatedAt'
+        ])
         && isValidId(data.id)
         && isValidId(data.authorId)
         && isValidUsername(data.authorUsername)
         && data.authorDisplayName is string && data.authorDisplayName.size() >= 1 && data.authorDisplayName.size() <= 50
-        && (!('authorAvatar' in data) || (data.authorAvatar is string && data.authorAvatar.size() <= 1000))
+        && (!('authorAvatar' in data) || (data.authorAvatar is string && data.authorAvatar.size() <= 200000))
         && data.caption is string && data.caption.size() <= 2200
         && (!('mediaUrls' in data) || isValidStringList(data.mediaUrls, 10))
+        && (!('coverUrl' in data) || (data.coverUrl is string && data.coverUrl.size() <= 200000))
         && data.mediaType in ['text', 'image', 'carousel', 'video', 'reel']
         && (!('hashtags' in data) || isValidStringList(data.hashtags, 20))
         && data.likesCount is int && data.likesCount >= 0
         && data.commentsCount is int && data.commentsCount >= 0
         && data.sharesCount is int && data.sharesCount >= 0
-        && data.visibility in ['public', 'followers']
+        && data.visibility in ['public', 'followers', 'only_me']
         && data.createdAt is timestamp
         && (!('updatedAt' in data) || data.updatedAt is timestamp);
     }
 
     function isValidComment(data, postId) {
       return data.keys().hasAll(['id', 'postId', 'authorId', 'authorUsername', 'text', 'createdAt'])
-        && data.keys().hasOnly(['id', 'postId', 'authorId', 'authorUsername', 'text', 'parentCommentId', 'createdAt'])
+        && data.keys().hasOnly(['id', 'postId', 'authorId', 'authorUsername', 'text', 'stickerUrl', 'gifUrl', 'parentCommentId', 'createdAt'])
         && isValidId(data.id)
         && data.postId == postId
         && isValidId(data.authorId)
         && isValidUsername(data.authorUsername)
         && data.text is string && data.text.size() >= 1 && data.text.size() <= 1000
+        && (!('stickerUrl' in data) || (data.stickerUrl is string && data.stickerUrl.size() <= 200000))
+        && (!('gifUrl' in data) || (data.gifUrl is string && data.gifUrl.size() <= 200000))
         && (!('parentCommentId' in data) || (data.parentCommentId is string && data.parentCommentId.size() <= 128))
         && data.createdAt is timestamp;
     }
@@ -114,7 +138,7 @@ service cloud.firestore {
         && isValidId(data.authorId)
         && isValidUsername(data.authorUsername)
         && data.mediaType in ['photo', 'video', 'text']
-        && (!('mediaUrl' in data) || (data.mediaUrl is string && data.mediaUrl.size() <= 1000))
+        && (!('mediaUrl' in data) || (data.mediaUrl is string && data.mediaUrl.size() <= 200000))
         && (!('textContent' in data) || (data.textContent is string && data.textContent.size() <= 500))
         && data.privacy in ['everyone', 'followers', 'close_friends']
         && data.viewersCount is int && data.viewersCount >= 0
@@ -124,12 +148,22 @@ service cloud.firestore {
 
     function isValidChat(data) {
       return data.keys().hasAll(['id', 'type', 'participantIds', 'createdBy', 'createdAt'])
-        && data.keys().hasOnly(['id', 'type', 'title', 'participantIds', 'lastMessageText', 'lastMessageAt', 'createdBy', 'createdAt'])
+        && data.keys().hasOnly([
+          'id', 'type', 'title', 'participantIds', 'ownerUid', 'adminUids', 'requireAddApproval',
+          'pendingMemberIds', 'maxMembers', 'theme', 'chatNicknames', 'lastMessageText', 'lastMessageAt', 'createdBy', 'createdAt'
+        ])
         && isValidId(data.id)
         && data.type in ['direct', 'group']
         && (!('title' in data) || (data.title is string && data.title.size() <= 80))
-        && data.participantIds is list && data.participantIds.size() >= 2 && data.participantIds.size() <= 50
+        && data.participantIds is list && data.participantIds.size() >= 2 && data.participantIds.size() <= 250
         && data.participantIds[0] is string
+        && (!('ownerUid' in data) || isValidId(data.ownerUid))
+        && (!('adminUids' in data) || isValidStringList(data.adminUids, 250))
+        && (!('requireAddApproval' in data) || data.requireAddApproval is bool)
+        && (!('pendingMemberIds' in data) || isValidStringList(data.pendingMemberIds, 100))
+        && (!('maxMembers' in data) || (data.maxMembers is int && data.maxMembers >= 2 && data.maxMembers <= 250))
+        && (!('theme' in data) || data.theme is map)
+        && (!('chatNicknames' in data) || data.chatNicknames is map)
         && (!('lastMessageText' in data) || (data.lastMessageText is string && data.lastMessageText.size() <= 300))
         && (!('lastMessageAt' in data) || data.lastMessageAt is timestamp)
         && isValidId(data.createdBy)
@@ -138,13 +172,18 @@ service cloud.firestore {
 
     function isValidMessage(data, chatId) {
       return data.keys().hasAll(['id', 'chatId', 'senderId', 'type', 'status', 'createdAt'])
-        && data.keys().hasOnly(['id', 'chatId', 'senderId', 'type', 'text', 'mediaUrl', 'durationMs', 'replyToId', 'status', 'reactions', 'createdAt'])
+        && data.keys().hasOnly([
+          'id', 'chatId', 'senderId', 'type', 'text', 'mediaUrl', 'stickerUrl',
+          'sharedPostId', 'durationMs', 'replyToId', 'status', 'reactions', 'createdAt'
+        ])
         && isValidId(data.id)
         && data.chatId == chatId
         && isValidId(data.senderId)
-        && data.type in ['text', 'voice', 'image', 'video', 'file']
+        && data.type in ['text', 'voice', 'image', 'video', 'file', 'sticker', 'reel_share']
         && (!('text' in data) || (data.text is string && data.text.size() <= 2000))
-        && (!('mediaUrl' in data) || (data.mediaUrl is string && data.mediaUrl.size() <= 1000))
+        && (!('mediaUrl' in data) || (data.mediaUrl is string && data.mediaUrl.size() <= 200000))
+        && (!('stickerUrl' in data) || (data.stickerUrl is string && data.stickerUrl.size() <= 200000))
+        && (!('sharedPostId' in data) || (data.sharedPostId is string && data.sharedPostId.size() <= 128))
         && (!('durationMs' in data) || (data.durationMs is int && data.durationMs >= 0 && data.durationMs <= 600000))
         && (!('replyToId' in data) || (data.replyToId is string && data.replyToId.size() <= 128))
         && data.status in ['sent', 'delivered', 'seen']
@@ -187,6 +226,43 @@ service cloud.firestore {
         && data.createdAt is timestamp;
     }
 
+    function isValidNote(data) {
+      return data.keys().hasAll(['id', 'authorUid', 'authorUsername', 'text', 'expiresAt', 'createdAt'])
+        && data.keys().hasOnly(['id', 'authorUid', 'authorUsername', 'authorDisplayName', 'text', 'likedByUids', 'expiresAt', 'createdAt'])
+        && isValidId(data.id)
+        && isValidId(data.authorUid)
+        && isValidUsername(data.authorUsername)
+        && data.text is string && data.text.size() >= 1 && data.text.size() <= 80
+        && (!('likedByUids' in data) || isValidStringList(data.likedByUids, 250))
+        && data.expiresAt is timestamp
+        && data.createdAt is timestamp;
+    }
+
+    function isValidSticker(data) {
+      return data.keys().hasAll(['id', 'creatorUid', 'label', 'imageUrl', 'kind', 'createdAt'])
+        && data.keys().hasOnly(['id', 'creatorUid', 'label', 'imageUrl', 'kind', 'createdAt'])
+        && isValidId(data.id)
+        && isValidId(data.creatorUid)
+        && data.label is string && data.label.size() >= 1 && data.label.size() <= 50
+        && data.imageUrl is string && data.imageUrl.size() <= 200000
+        && data.kind in ['sticker', 'gif']
+        && data.createdAt is timestamp;
+    }
+
+    function isValidBroadcastChannel(data) {
+      return data.keys().hasAll(['id', 'title', 'ownerUid', 'createdAt'])
+        && data.keys().hasOnly(['id', 'title', 'description', 'ownerUid', 'adminUids', 'moderatorUids', 'collaboratorUids', 'followerUids', 'createdAt'])
+        && isValidId(data.id)
+        && data.title is string && data.title.size() >= 1 && data.title.size() <= 80
+        && (!('description' in data) || (data.description is string && data.description.size() <= 300))
+        && isValidId(data.ownerUid)
+        && (!('adminUids' in data) || isValidStringList(data.adminUids, 50))
+        && (!('moderatorUids' in data) || isValidStringList(data.moderatorUids, 50))
+        && (!('collaboratorUids' in data) || isValidStringList(data.collaboratorUids, 50))
+        && (!('followerUids' in data) || isValidStringList(data.followerUids, 500))
+        && data.createdAt is timestamp;
+    }
+
     // 1. Public User Profiles (No PII)
     match /users/{userId} {
       allow get: if isSignedIn() && isValidId(userId);
@@ -195,7 +271,11 @@ service cloud.firestore {
       allow update: if isOwner(userId) && isValidId(userId) && isValidUserPublic(incoming(), userId)
         && incoming().uid == existing().uid
         && incoming().createdAt == existing().createdAt
-        && incoming().diff(existing()).affectedKeys().hasOnly(['username', 'displayName', 'bio', 'pronouns', 'website', 'photoUrl', 'coverUrl', 'interests', 'isPrivate', 'onlineStatus', 'lastSeenAt', 'onboardingCompleted', 'updatedAt']);
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'username', 'displayName', 'nicknameFont', 'bio', 'pronouns', 'website', 'noteText',
+          'photoUrl', 'coverUrl', 'interests', 'isPrivate', 'isDeactivated', 'deactivatedUntil',
+          'onlineStatus', 'lastSeenAt', 'lastNicknameChangedAt', 'lastUsernameChangedAt', 'onboardingCompleted', 'updatedAt'
+        ]);
       allow delete: if isOwner(userId) && isValidId(userId);
 
       // Owner-Only Private PII & Settings
@@ -206,21 +286,38 @@ service cloud.firestore {
         allow update: if isOwner(userId) && isValidId(docId) && isValidUserPrivate(incoming(), userId)
           && incoming().uid == existing().uid
           && incoming().updatedAt == request.time
-          && incoming().diff(existing()).affectedKeys().hasOnly(['email', 'language', 'themeMode', 'biometricLockEnabled', 'whoCanMessage', 'whoCanViewStories', 'whoCanFollow', 'notificationPrefs', 'blockedUserIds', 'mutedStoryUserIds', 'updatedAt']);
+          && incoming().diff(existing()).affectedKeys().hasOnly([
+            'email', 'language', 'themeMode', 'biometricLockEnabled', 'twoFactorEnabled', 'saveLoginInfo',
+            'whoCanMessage', 'whoCanViewStories', 'whoCanFollow', 'notificationPrefs', 'blockedUserIds', 'mutedStoryUserIds', 'updatedAt'
+          ]);
         allow delete: if isOwner(userId) && isValidId(docId);
       }
     }
 
-    // 2. Username Uniqueness Registry
+    // 2. Username Uniqueness Registry (Zero plaintext PII; encEmail is server-encrypted)
     match /usernames/{username} {
-      allow get: if isSignedIn() && isValidUsername(username);
+      allow get: if isValidUsername(username);
       allow create: if isSignedIn() && isValidUsername(username)
         && incoming().keys().hasAll(['uid', 'username', 'createdAt'])
-        && incoming().keys().hasOnly(['uid', 'username', 'createdAt'])
+        && incoming().keys().hasOnly(['uid', 'username', 'encEmail', 'createdAt'])
         && incoming().uid == request.auth.uid
         && incoming().username == username
+        && (!('encEmail' in incoming()) || (incoming().encEmail is string && incoming().encEmail.size() <= 512))
         && incoming().createdAt == request.time;
       allow delete: if isSignedIn() && isValidUsername(username) && existing().uid == request.auth.uid;
+    }
+
+    // 2b. Canonical Email Hash Registry (One account per Gmail/email; zero PII stored)
+    match /email_claims/{emailHash} {
+      allow get: if isValidSha256(emailHash);
+      allow create: if isSignedIn() && isValidSha256(emailHash)
+        && incoming().keys().hasAll(['uid', 'emailHash', 'createdAt'])
+        && incoming().keys().hasOnly(['uid', 'emailHash', 'encEmail', 'createdAt'])
+        && incoming().uid == request.auth.uid
+        && incoming().emailHash == emailHash
+        && (!('encEmail' in incoming()) || (incoming().encEmail is string && incoming().encEmail.size() <= 512))
+        && incoming().createdAt == request.time;
+      allow delete: if isSignedIn() && isValidSha256(emailHash) && existing().uid == request.auth.uid;
     }
 
     // 3. Posts & Reels + Nested Comments
@@ -239,7 +336,7 @@ service cloud.firestore {
         && incoming().authorId == existing().authorId
         && incoming().createdAt == existing().createdAt
         && (
-          (existing().authorId == request.auth.uid && incoming().diff(existing()).affectedKeys().hasOnly(['caption', 'hashtags', 'visibility', 'updatedAt']))
+          (existing().authorId == request.auth.uid && incoming().diff(existing()).affectedKeys().hasOnly(['caption', 'hashtags', 'visibility', 'coverUrl', 'updatedAt']))
           || (incoming().diff(existing()).affectedKeys().hasOnly(['likesCount', 'sharesCount', 'commentsCount']))
         );
       allow delete: if isSignedIn() && isValidId(postId) && existing().authorId == request.auth.uid;
@@ -287,7 +384,10 @@ service cloud.firestore {
         && incoming().id == existing().id
         && incoming().createdBy == existing().createdBy
         && incoming().createdAt == existing().createdAt
-        && incoming().diff(existing()).affectedKeys().hasOnly(['title', 'lastMessageText', 'lastMessageAt', 'participantIds']);
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'title', 'lastMessageText', 'lastMessageAt', 'participantIds',
+          'ownerUid', 'adminUids', 'requireAddApproval', 'pendingMemberIds', 'theme', 'chatNicknames'
+        ]);
 
       match /messages/{messageId} {
         allow get: if isSignedIn() && isValidId(chatId) && isValidId(messageId)
@@ -390,6 +490,52 @@ service cloud.firestore {
     match /announcements/{announcementId} {
       allow get: if isSignedIn() && isValidId(announcementId);
       allow list: if isSignedIn() && resource.data.title is string;
+    }
+
+    // 12. Inbox Notes (24-hour status)
+    match /notes/{noteId} {
+      allow get: if isSignedIn() && isValidId(noteId);
+      allow list: if isSignedIn() && resource.data.authorUid is string;
+      allow create: if isSignedIn() && isValidId(noteId) && isValidNote(incoming())
+        && incoming().id == noteId
+        && incoming().authorUid == request.auth.uid
+        && incoming().createdAt == request.time;
+      allow update: if isSignedIn() && isValidId(noteId) && isValidNote(incoming())
+        && incoming().id == existing().id
+        && incoming().authorUid == existing().authorUid
+        && incoming().createdAt == existing().createdAt
+        && incoming().diff(existing()).affectedKeys().hasOnly(['likedByUids', 'text']);
+      allow delete: if isSignedIn() && isValidId(noteId) && existing().authorUid == request.auth.uid;
+    }
+
+    // 13. Stickers & GIFs
+    match /stickers/{stickerId} {
+      allow get: if isSignedIn() && isValidId(stickerId);
+      allow list: if isSignedIn() && resource.data.creatorUid is string;
+      allow create: if isSignedIn() && isValidId(stickerId) && isValidSticker(incoming())
+        && incoming().id == stickerId
+        && incoming().creatorUid == request.auth.uid
+        && incoming().createdAt == request.time;
+      allow delete: if isSignedIn() && isValidId(stickerId) && existing().creatorUid == request.auth.uid;
+    }
+
+    // 14. Broadcast Channels
+    match /broadcast_channels/{channelId} {
+      allow get: if isSignedIn() && isValidId(channelId);
+      allow list: if isSignedIn() && resource.data.ownerUid is string;
+      allow create: if isSignedIn() && isValidId(channelId) && isValidBroadcastChannel(incoming())
+        && incoming().id == channelId
+        && incoming().ownerUid == request.auth.uid
+        && incoming().createdAt == request.time;
+      allow update: if isSignedIn() && isValidId(channelId) && isValidBroadcastChannel(incoming())
+        && incoming().id == existing().id
+        && incoming().createdAt == existing().createdAt
+        && (
+          existing().ownerUid == request.auth.uid
+          || request.auth.uid in existing().adminUids
+          || incoming().diff(existing()).affectedKeys().hasOnly(['followerUids'])
+        );
+      allow delete: if isSignedIn() && isValidId(channelId) && existing().ownerUid == request.auth.uid;
     }
   }
 }

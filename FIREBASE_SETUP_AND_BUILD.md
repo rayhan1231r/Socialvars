@@ -1,19 +1,17 @@
 # SocialVerse — Firebase Setup, Cloud Functions, & Android Build Guide
 
 ## 1. Provisioned Firebase Project
-- **Project ID**: `ai-studio-applet-webapp-7613c`
-- **Package ID**: `com.socialverse.app`
-- **Firestore Database ID**: `ai-studio-92b9aeb2-4283-48a0-9fe4-8928b1dc1806`
+- **Project ID**: `socialvars`
+- **Package ID**: `Com.social.vrs`
+- **Firestore Database ID**: `ai-studio-socialvars-97ff1f90-9f9c-4f3f-9c56-da1a6eacb55e`
 
 ## 2. Firebase Console Configuration
 1. **Authentication**:
-   - Enable **Google** sign-in provider and add your Android SHA-1 and SHA-256 fingerprints (`./gradlew signingReport`).
-   - Enable **Email/Password** provider and customize the Email Verification & Password Reset templates.
+   - Enable **Email/Password** provider and customize Email Verification & Password Reset templates if using Firebase Auth directly on Android.
 2. **Android App Registration**:
-   - Register `com.socialverse.app` in Firebase Project Settings.
-   - Download `google-services.json` and place it at `android/app/google-services.json` (see `android/app/google-services.json.template`).
+   - `android/app/google-services.json` is configured for `Com.social.vrs` under Firebase project `socialvars`.
 3. **App Check**:
-   - Enable **Play Integrity** in Firebase App Check for `com.socialverse.app`.
+   - Enable **Play Integrity** in Firebase App Check for `Com.social.vrs`.
 4. **Security Rules Deployment**:
    ```bash
    firebase deploy --only firestore:rules,storage

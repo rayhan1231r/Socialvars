@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 
 interface AvatarProps {
   src?: string;
@@ -17,6 +17,11 @@ const SIZE_CLASSES: Record<NonNullable<AvatarProps['size']>, string> = {
 
 export function Avatar({ src, name, size = 'md', online, className = '' }: AvatarProps) {
   const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    setFailed(false);
+  }, [src]);
+
   const initials = name
     .split(' ')
     .filter(Boolean)
