@@ -1,0 +1,15 @@
+<resources>
+    <string name="app_name">SocialVerse</string>
+    <string name="nav_home">Home</string>
+    <string name="nav_explore">Explore</string>
+    <string name="nav_create">Create</string>
+    <string name="nav_messages">Messages</string>
+    <string name="nav_profile">Profile</string>
+    <string name="auth_google">Continue with Google</string>
+    <string name="auth_sign_in">Sign In</string>
+    <string name="auth_register">Create Account</string>
+    <string name="ai_assistant">AI Profile Assistant</string>
+    <string name="settings_title">Settings</string>
+    <string name="biometric_prompt_title">Unlock SocialVerse</string>
+    <string name="biometric_prompt_subtitle">Verify your identity to access your account</string>
+</resources>

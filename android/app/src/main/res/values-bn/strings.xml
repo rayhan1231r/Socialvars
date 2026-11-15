@@ -1,0 +1,15 @@
+<resources>
+    <string name="app_name">সোশ্যালভার্স</string>
+    <string name="nav_home">হোম</string>
+    <string name="nav_explore">এক্সপ্লোর</string>
+    <string name="nav_create">তৈরি করুন</string>
+    <string name="nav_messages">মেসেজ</string>
+    <string name="nav_profile">প্রোফাইল</string>
+    <string name="auth_google">Google দিয়ে চালিয়ে যান</string>
+    <string name="auth_sign_in">সাইন ইন</string>
+    <string name="auth_register">অ্যাকাউন্ট তৈরি করুন</string>
+    <string name="ai_assistant">এআই প্রোফাইল অ্যাসিস্ট্যান্ট</string>
+    <string name="settings_title">সেটিংস</string>
+    <string name="biometric_prompt_title">সোশ্যালভার্স আনলক করুন</string>
+    <string name="biometric_prompt_subtitle">আপনার পরিচয় যাচাই করুন</string>
+</resources>

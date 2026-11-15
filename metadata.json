@@ -1,0 +1,6 @@
+{
+  "name": "SocialVerse",
+  "description": "Liquid Glass social media platform with real-time messaging, stories, short-form reels, bilingual English & Bengali localization, Firebase backend, and Gemini AI Profile Assistant.",
+  "requestFramePermissions": ["camera", "microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

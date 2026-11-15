@@ -1,0 +1,60 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidImage() {
+      return request.resource.size <= 10 * 1024 * 1024
+        && request.resource.contentType.matches('image/(jpeg|png|webp|gif)');
+    }
+
+    function isValidMedia() {
+      return request.resource.size <= 50 * 1024 * 1024
+        && (request.resource.contentType.matches('image/(jpeg|png|webp|gif)')
+            || request.resource.contentType.matches('video/(mp4|webm|quicktime)'));
+    }
+
+    function isValidVoiceOrFile() {
+      return request.resource.size <= 25 * 1024 * 1024
+        && (request.resource.contentType.matches('audio/(mp4|mpeg|ogg|webm|aac|wav)')
+            || request.resource.contentType.matches('image/(jpeg|png|webp)')
+            || request.resource.contentType.matches('video/(mp4|webm)')
+            || request.resource.contentType == 'application/pdf');
+    }
+
+    match /avatars/{userId}/{fileName} {
+      allow read: if isSignedIn();
+      allow write: if isOwner(userId) && isValidImage();
+    }
+
+    match /covers/{userId}/{fileName} {
+      allow read: if isSignedIn();
+      allow write: if isOwner(userId) && isValidImage();
+    }
+
+    match /posts/{userId}/{postId}/{fileName} {
+      allow read: if isSignedIn();
+      allow write: if isOwner(userId) && isValidMedia();
+    }
+
+    match /stories/{userId}/{storyId}/{fileName} {
+      allow read: if isSignedIn();
+      allow write: if isOwner(userId) && isValidMedia();
+    }
+
+    match /chats/{chatId}/{userId}/{fileName} {
+      allow read: if isSignedIn();
+      allow write: if isOwner(userId) && isValidVoiceOrFile();
+    }
+  }
+}

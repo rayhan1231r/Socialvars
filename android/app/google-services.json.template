@@ -1,0 +1,28 @@
+{
+  "project_info": {
+    "project_number": "183104896983",
+    "project_id": "ai-studio-applet-webapp-7613c",
+    "storage_bucket": "ai-studio-applet-webapp-7613c.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:183104896983:android:REPLACE_WITH_ANDROID_APP_ID",
+        "android_client_info": {
+          "package_name": "com.socialverse.app"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "183104896983-9i0c5t7uqq8edk9asu4kru5aikqsnevc.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "REPLACE_WITH_FIREBASE_ANDROID_API_KEY"
+        }
+      ]
+    }
+  ]
+}

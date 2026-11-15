@@ -1,0 +1,6 @@
+-keepattributes *Annotation*
+-keepclassmembers class com.socialverse.app.domain.model.** { *; }
+-keepnames class com.socialverse.app.domain.model.**
+-dontwarn com.google.firebase.**
+-keepattributes SourceFile,LineNumberTable
+-renamesourcefileattribute SourceFile
