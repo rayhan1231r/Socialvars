@@ -8,6 +8,7 @@ import {
   Bell,
   BellOff,
   Bookmark,
+  Camera,
   Check,
   CheckCheck,
   ChevronDown,
@@ -62,9 +63,11 @@ import {
   BROADCAST_MIN_FOLLOWERS,
   CHAT_THEME_PRESETS,
   MAX_GROUP_MEMBERS,
+  canEditGroupInfo,
   canOpenBroadcastChannel,
   canPostInBroadcast,
   canRemoveGroupMember,
+  canSendInGroupChat,
   formatRelativeTime,
   isGroupAdmin,
   isGroupOwner,
@@ -174,7 +177,16 @@ export function MessagesView() {
   // Modals & Drawers inside Inbox
   const [showNewGroup, setShowNewGroup] = useState(false);
   const [groupTitle, setGroupTitle] = useState('');
+  const [groupBio, setGroupBio] = useState('');
+  const [groupAvatarUrl, setGroupAvatarUrl] = useState('');
+  const [groupMemberSearch, setGroupMemberSearch] = useState('');
   const [groupMembers, setGroupMembers] = useState<string[]>([]);
+  const [showGroupPage, setShowGroupPage] = useState(false);
+  const [groupEditTitle, setGroupEditTitle] = useState('');
+  const [groupEditBio, setGroupEditBio] = useState('');
+  const [groupEditAvatar, setGroupEditAvatar] = useState('');
+  const [groupPageMemberQuery, setGroupPageMemberQuery] = useState('');
+  const [savingGroupPage, setSavingGroupPage] = useState(false);
   const [showNewDirect, setShowNewDirect] = useState(false);
   const [showStickerDrawer, setShowStickerDrawer] = useState(false);
   const [showQuickEmojiBar, setShowQuickEmojiBar] = useState(false);
@@ -311,7 +323,7 @@ export function MessagesView() {
     const ids = typingByChat[activeChat.id] || [];
     return ids
       .filter((uid) => uid !== currentUser.uid)
-      .map((uid) => activeChat.chatNicknames?.[uid] || activeChat.participantNames[uid] || 'Someone');
+      .map((uid) => activeChat.chatNicknames?.[uid] || activeChat.participantNames?.[uid] || 'Someone');
   }, [activeChat, typingByChat, currentUser.uid]);
 
   const pinnedMessage = useMemo(() => {
@@ -358,8 +370,17 @@ export function MessagesView() {
     setEditingMsg(null);
     setReplyingTo(null);
     setReactMenuMsgId(null);
+    setShowGroupPage(false);
     setInfoTab('overview');
   }, [activeChat?.id]);
+
+  // Keep Group Page form drafts synchronized with active group
+  useEffect(() => {
+    if (!activeChat || activeChat.type !== 'group') return;
+    setGroupEditTitle(activeChat.title || '');
+    setGroupEditBio(activeChat.bio || '');
+    setGroupEditAvatar(activeChat.avatarUrl || '');
+  }, [activeChat?.id, activeChat?.title, activeChat?.bio, activeChat?.avatarUrl, activeChat?.type]);
 
   const scrollToMessage = (messageId: string) => {
     const target = document.querySelector(`[data-msg-id="${messageId}"]`);
@@ -416,6 +437,7 @@ export function MessagesView() {
   const handleSelectChat = (chatId: string) => {
     setActiveChatId(chatId);
     setShowChatInfo(false);
+    setShowGroupPage(false);
     setChatMenuOpenId(null);
     setMobileShowThread(true);
     const chosen = chats.find((c) => c.id === chatId);
@@ -424,9 +446,20 @@ export function MessagesView() {
     }
   };
 
+  const textPermission = activeChat
+    ? canSendInGroupChat(activeChat, currentUser.uid, 'text')
+    : { allowed: true };
+  const mediaPermission = activeChat
+    ? canSendInGroupChat(activeChat, currentUser.uid, 'image')
+    : { allowed: true };
+
   const handleSendText = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!activeChat || !draftText.trim() || isBlocked) return;
+    if (!textPermission.allowed) {
+      showToast(textPermission.reason || 'Only group admins can send messages');
+      return;
+    }
     if (editingMsg) {
       await editMessage(activeChat.id, editingMsg.id, draftText.trim());
       setEditingMsg(null);
@@ -456,6 +489,11 @@ export function MessagesView() {
 
   const handleSendSticker = async (imageUrl: string) => {
     if (!activeChat || isBlocked) return;
+    const perm = canSendInGroupChat(activeChat, currentUser.uid, 'sticker');
+    if (!perm.allowed) {
+      showToast(perm.reason || 'Media attachments are blocked for members');
+      return;
+    }
     await sendMessage(activeChat.id, {
       type: 'sticker',
       stickerUrl: imageUrl,
@@ -483,6 +521,11 @@ export function MessagesView() {
 
   const handleToggleVoiceRecord = async () => {
     if (!activeChat || isBlocked) return;
+    const perm = canSendInGroupChat(activeChat, currentUser.uid, 'voice');
+    if (!perm.allowed) {
+      showToast(perm.reason || 'Media attachments are blocked for members');
+      return;
+    }
     if (!isRecording) {
       recordStartRef.current = Date.now();
       setIsRecording(true);
@@ -532,12 +575,17 @@ export function MessagesView() {
     const file = e.target.files?.[0];
     e.target.value = '';
     if (!file || !activeChat || isBlocked) return;
-    const dataUrl = await uploadImageDataUrl(file, 1080);
     const kind = file.type.startsWith('image/')
       ? 'image'
       : file.type.startsWith('video/')
       ? 'video'
       : 'file';
+    const perm = canSendInGroupChat(activeChat, currentUser.uid, kind);
+    if (!perm.allowed) {
+      showToast(perm.reason || 'Media attachments are blocked for members');
+      return;
+    }
+    const dataUrl = await uploadImageDataUrl(file, 1080);
     await sendMessage(activeChat.id, {
       type: kind,
       mediaUrl: dataUrl,
@@ -546,17 +594,44 @@ export function MessagesView() {
     });
   };
 
+  const handleGroupAvatarPick = async (e: React.ChangeEvent<HTMLInputElement>, isEditMode = false) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    try {
+      const dataUrl = await uploadImageDataUrl(file, 480);
+      if (isEditMode) {
+        setGroupEditAvatar(dataUrl);
+      } else {
+        setGroupAvatarUrl(dataUrl);
+      }
+    } catch {
+      showToast('Could not load group photo.');
+    }
+  };
+
   const handleCreateGroup = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!groupTitle.trim() || groupMembers.length === 0) return;
-    const id = await createDirectOrGroupChat(groupTitle, [currentUser.uid, ...groupMembers], 'group');
-    if (id) {
-      setGroupTitle('');
-      setGroupMembers([]);
-      setShowNewGroup(false);
-      setInboxFilter('groups');
-      setMobileShowThread(true);
-    }
+    const titleToCreate = groupTitle.trim();
+    const bioToCreate = groupBio.trim();
+    const avatarToCreate = groupAvatarUrl;
+    const selectedMembers = [...groupMembers];
+
+    // Instant UI reset & focus transition while optimistic store inserts group immediately
+    setGroupTitle('');
+    setGroupBio('');
+    setGroupAvatarUrl('');
+    setGroupMemberSearch('');
+    setGroupMembers([]);
+    setShowNewGroup(false);
+    setInboxFilter('groups');
+    setMobileShowThread(true);
+
+    await createDirectOrGroupChat(titleToCreate, [currentUser.uid, ...selectedMembers], 'group', {
+      avatarUrl: avatarToCreate || undefined,
+      bio: bioToCreate || undefined,
+    });
   };
 
   const handleThemeGalleryUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -603,12 +678,12 @@ export function MessagesView() {
   return (
     <div
       data-testid="fullscreen-inbox"
-      className="h-[100dvh] w-full flex overflow-hidden bg-white/40 dark:bg-slate-950/60 backdrop-blur-2xl"
+      className="h-[100dvh] w-full flex overflow-hidden relative bg-slate-50/75 dark:bg-slate-950/92 backdrop-blur-2xl"
     >
       {/* Desktop Mini Navigation Rail */}
       <nav
         aria-label="Inbox app navigation"
-        className="hidden lg:flex w-[70px] shrink-0 h-full flex-col items-center justify-between py-4 border-r border-slate-200/70 dark:border-slate-800/70 bg-white/80 dark:bg-slate-900/80 backdrop-blur-xl"
+        className="hidden lg:flex w-[72px] shrink-0 h-full flex-col items-center justify-between py-4 border-r border-slate-200/70 dark:border-white/10 bg-white/80 dark:bg-slate-950/95 backdrop-blur-2xl"
       >
         <div className="flex flex-col items-center gap-2">
           <button
@@ -616,7 +691,7 @@ export function MessagesView() {
             onClick={() => setActiveTab('home')}
             title={t.messages.backToFeed}
             aria-label={t.messages.backToFeed}
-            className="w-11 h-11 rounded-2xl bg-gradient-to-br from-sky-500 to-cyan-500 text-white font-display font-bold text-base flex items-center justify-center shadow-lg shadow-sky-500/25 mb-2"
+            className="w-11 h-11 rounded-2xl bg-gradient-to-br from-sky-500 to-cyan-500 text-white font-display font-bold text-base flex items-center justify-center shadow-lg shadow-sky-500/25 mb-2 active:scale-95 transition-transform duration-150"
           >
             SV
           </button>
@@ -626,7 +701,7 @@ export function MessagesView() {
             onClick={() => setActiveTab('home')}
             title={t.nav.home}
             aria-label={t.nav.home}
-            className="w-11 h-11 rounded-2xl flex items-center justify-center text-slate-600 dark:text-slate-300 hover:bg-slate-200/60 dark:hover:bg-slate-800 transition-colors"
+            className="w-11 h-11 rounded-2xl liquid-glass-btn flex items-center justify-center text-slate-600 dark:text-slate-300"
           >
             <Home className="w-5 h-5" />
           </button>
@@ -636,7 +711,7 @@ export function MessagesView() {
             onClick={() => setActiveTab('reels')}
             title={t.nav.reels}
             aria-label={t.nav.reels}
-            className="w-11 h-11 rounded-2xl flex items-center justify-center text-slate-600 dark:text-slate-300 hover:bg-slate-200/60 dark:hover:bg-slate-800 transition-colors"
+            className="w-11 h-11 rounded-2xl liquid-glass-btn flex items-center justify-center text-slate-600 dark:text-slate-300"
           >
             <Clapperboard className="w-5 h-5" />
           </button>
@@ -646,7 +721,7 @@ export function MessagesView() {
             aria-current="page"
             title={t.nav.messages}
             aria-label={t.nav.messages}
-            className="relative w-11 h-11 rounded-2xl bg-sky-600 text-white flex items-center justify-center shadow-md shadow-sky-600/25"
+            className="relative w-11 h-11 rounded-2xl bg-sky-600 text-white flex items-center justify-center shadow-md shadow-sky-600/30"
           >
             <MessageCircle className="w-5 h-5" />
             {totalUnreadChats > 0 && (
@@ -661,7 +736,7 @@ export function MessagesView() {
             onClick={() => setActiveTab('explore')}
             title={t.nav.explore}
             aria-label={t.nav.explore}
-            className="w-11 h-11 rounded-2xl flex items-center justify-center text-slate-600 dark:text-slate-300 hover:bg-slate-200/60 dark:hover:bg-slate-800 transition-colors"
+            className="w-11 h-11 rounded-2xl liquid-glass-btn flex items-center justify-center text-slate-600 dark:text-slate-300"
           >
             <Compass className="w-5 h-5" />
           </button>
@@ -671,7 +746,7 @@ export function MessagesView() {
             onClick={() => setSubscreen('create_sheet')}
             title={t.nav.create}
             aria-label={t.nav.create}
-            className="w-11 h-11 rounded-2xl flex items-center justify-center text-sky-600 dark:text-sky-400 hover:bg-sky-500/10 transition-colors"
+            className="w-11 h-11 rounded-2xl liquid-glass-btn flex items-center justify-center text-sky-600 dark:text-sky-400"
           >
             <PlusSquare className="w-5 h-5" />
           </button>
@@ -683,7 +758,7 @@ export function MessagesView() {
             onClick={() => setLanguage(language === 'en' ? 'bn' : 'en')}
             title={t.settings.language}
             aria-label="Toggle language"
-            className="w-10 h-9 rounded-xl liquid-glass-subtle text-[11px] font-bold text-slate-700 dark:text-slate-200 flex items-center justify-center"
+            className="w-11 h-10 rounded-xl liquid-glass-btn text-[11px] font-bold text-slate-700 dark:text-slate-200 flex items-center justify-center"
           >
             {language === 'en' ? 'বাং' : 'EN'}
           </button>
@@ -692,7 +767,7 @@ export function MessagesView() {
             onClick={() => setTheme(theme === 'light' ? 'dark' : 'light')}
             title={t.settings.theme}
             aria-label="Toggle theme"
-            className="w-10 h-10 rounded-xl liquid-glass-subtle text-slate-700 dark:text-slate-200 flex items-center justify-center"
+            className="w-11 h-11 rounded-xl liquid-glass-btn text-slate-700 dark:text-slate-200 flex items-center justify-center"
           >
             {theme === 'light' ? <Moon className="w-4 h-4" /> : <Sun className="w-4 h-4" />}
           </button>
@@ -701,7 +776,7 @@ export function MessagesView() {
             onClick={() => setSubscreen('settings_home')}
             title={t.settings.title}
             aria-label={t.settings.title}
-            className="w-10 h-10 rounded-xl liquid-glass-subtle text-slate-700 dark:text-slate-200 flex items-center justify-center"
+            className="w-11 h-11 rounded-xl liquid-glass-btn text-slate-700 dark:text-slate-200 flex items-center justify-center"
           >
             <Settings className="w-4 h-4" />
           </button>
@@ -719,18 +794,18 @@ export function MessagesView() {
 
       {/* Conversation List Sidebar */}
       <aside
-        className={`w-full md:w-[330px] lg:w-[370px] shrink-0 h-full border-r border-slate-200/70 dark:border-slate-800/70 bg-white/75 dark:bg-slate-900/75 backdrop-blur-xl flex flex-col ${
+        className={`w-full md:w-[330px] lg:w-[376px] shrink-0 h-full border-r border-slate-200/70 dark:border-white/10 bg-white/80 dark:bg-slate-950/88 backdrop-blur-2xl flex flex-col ${
           mobileShowThread ? 'hidden md:flex' : 'flex'
         }`}
       >
-        <div className="p-3.5 sm:p-4 space-y-3 border-b border-slate-200/70 dark:border-slate-800/70">
+        <div className="p-3.5 sm:p-4 space-y-3 border-b border-slate-200/70 dark:border-white/10">
           <div className="flex items-center justify-between gap-2">
             <div className="flex items-center gap-2 min-w-0">
               <button
                 type="button"
                 aria-label={t.messages.backToFeed}
                 onClick={() => setActiveTab('home')}
-                className="lg:hidden min-h-[38px] min-w-[38px] rounded-xl liquid-glass-subtle flex items-center justify-center text-slate-700 dark:text-slate-200 shrink-0"
+                className="lg:hidden min-h-[44px] min-w-[44px] rounded-xl liquid-glass-btn flex items-center justify-center text-slate-700 dark:text-slate-200 shrink-0"
               >
                 <ArrowLeft className="w-4 h-4" />
               </button>
@@ -740,8 +815,8 @@ export function MessagesView() {
                     {t.messages.chatsTitle}
                   </h1>
                   {totalUnreadChats > 0 && (
-                    <span className="px-2 py-0.5 rounded-full bg-sky-600 text-white text-[10px] font-bold font-mono-num">
-                      {totalUnreadChats}
+                    <span className="text-[11px] font-bold font-mono-num text-sky-600 dark:text-sky-400">
+                      · {totalUnreadChats}
                     </span>
                   )}
                 </div>
@@ -759,10 +834,10 @@ export function MessagesView() {
                   setShowNewDirect((s) => !s);
                   setShowNewGroup(false);
                 }}
-                className={`min-h-[36px] px-2.5 rounded-xl text-xs font-semibold inline-flex items-center gap-1 transition-colors ${
+                className={`min-h-[40px] px-3 rounded-xl text-xs font-semibold inline-flex items-center gap-1 transition-all duration-150 ${
                   showNewDirect
-                    ? 'bg-sky-600 text-white'
-                    : 'liquid-glass-subtle text-slate-800 dark:text-slate-200'
+                    ? 'bg-sky-600 text-white shadow-sm'
+                    : 'liquid-glass-btn text-slate-800 dark:text-slate-200'
                 }`}
               >
                 <SquarePen className="w-3.5 h-3.5" />
@@ -775,10 +850,10 @@ export function MessagesView() {
                   setShowNewGroup((s) => !s);
                   setShowNewDirect(false);
                 }}
-                className={`min-h-[36px] px-2.5 rounded-xl text-xs font-semibold inline-flex items-center gap-1 transition-colors ${
+                className={`min-h-[40px] px-3 rounded-xl text-xs font-semibold inline-flex items-center gap-1 transition-all duration-150 ${
                   showNewGroup
-                    ? 'bg-sky-600 text-white'
-                    : 'liquid-glass-subtle text-slate-800 dark:text-slate-200'
+                    ? 'bg-sky-600 text-white shadow-sm'
+                    : 'liquid-glass-btn text-slate-800 dark:text-slate-200'
                 }`}
               >
                 <Users className="w-3.5 h-3.5" />
@@ -938,60 +1013,111 @@ export function MessagesView() {
 
           {/* Create Group Panel */}
           {showNewGroup && (
-            <form onSubmit={handleCreateGroup} className="p-3 rounded-2xl liquid-glass-subtle space-y-2.5">
+            <form onSubmit={handleCreateGroup} className="p-3.5 rounded-2xl liquid-glass-subtle space-y-2.5">
               <div className="flex items-center justify-between">
-                <span className="text-xs font-semibold text-slate-800 dark:text-slate-200">
+                <span className="text-xs font-bold text-slate-900 dark:text-white">
                   {t.messages.newGroup}
                 </span>
                 <button
                   type="button"
+                  aria-label="Close new group form"
                   onClick={() => setShowNewGroup(false)}
-                  className="text-slate-400 hover:text-slate-700"
+                  className="text-slate-400 hover:text-slate-700 dark:hover:text-white"
                 >
-                  <X className="w-3.5 h-3.5" />
+                  <X className="w-4 h-4" />
                 </button>
               </div>
-              <input
-                type="text"
-                required
-                value={groupTitle}
-                onChange={(e) => setGroupTitle(e.target.value)}
-                placeholder="Group name (max 250 members)"
-                className="w-full min-h-[38px] px-3 rounded-lg bg-white/85 dark:bg-slate-900/70 border border-slate-200 dark:border-slate-700 text-xs text-slate-900 dark:text-white"
-              />
+
+              <div className="flex items-center gap-3">
+                <label className="relative w-12 h-12 rounded-2xl bg-sky-500/15 text-sky-600 dark:text-sky-300 flex items-center justify-center shrink-0 overflow-hidden cursor-pointer border border-sky-500/25">
+                  {groupAvatarUrl ? (
+                    <img src={groupAvatarUrl} alt="Group avatar" className="w-full h-full object-cover" />
+                  ) : (
+                    <Camera className="w-5 h-5" />
+                  )}
+                  <input
+                    type="file"
+                    accept="image/*"
+                    aria-label={t.messages.groupPhoto}
+                    onChange={(e) => handleGroupAvatarPick(e, false)}
+                    className="sr-only"
+                  />
+                </label>
+                <div className="flex-1 min-w-0 space-y-1.5">
+                  <input
+                    type="text"
+                    required
+                    value={groupTitle}
+                    onChange={(e) => setGroupTitle(e.target.value)}
+                    placeholder="Group name (max 250 members)"
+                    aria-label="Group name"
+                    className="w-full min-h-[38px] px-3 rounded-xl bg-white/90 dark:bg-slate-900/90 border border-slate-200 dark:border-white/10 text-xs text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-sky-500"
+                  />
+                  <input
+                    type="text"
+                    value={groupBio}
+                    onChange={(e) => setGroupBio(e.target.value)}
+                    placeholder={t.messages.groupBio}
+                    aria-label={t.messages.groupBio}
+                    className="w-full min-h-[34px] px-3 rounded-xl bg-white/80 dark:bg-slate-900/75 border border-slate-200 dark:border-white/10 text-xs text-slate-800 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-sky-500"
+                  />
+                </div>
+              </div>
+
               {availablePeers.length === 0 ? (
                 <p className="text-xs text-slate-500">Wait for other users to sign up first.</p>
               ) : (
-                <div className="flex flex-wrap gap-1.5 max-h-28 overflow-y-auto">
-                  {availablePeers.map((u) => {
-                    const selected = groupMembers.includes(u.uid);
-                    return (
-                      <button
-                        key={u.uid}
-                        type="button"
-                        onClick={() =>
-                          setGroupMembers((prev) =>
-                            selected ? prev.filter((id) => id !== u.uid) : [...prev, u.uid]
-                          )
-                        }
-                        className={`px-2.5 py-1 rounded-lg text-[11px] font-medium ${
-                          selected
-                            ? 'bg-sky-600 text-white'
-                            : 'bg-white/75 dark:bg-slate-800 text-slate-700 dark:text-slate-300'
-                        }`}
-                      >
-                        {u.displayName}
-                      </button>
-                    );
-                  })}
+                <div className="space-y-1.5">
+                  <input
+                    type="search"
+                    value={groupMemberSearch}
+                    onChange={(e) => setGroupMemberSearch(e.target.value)}
+                    placeholder={t.messages.addMembers}
+                    aria-label="Search members to add"
+                    className="w-full min-h-[34px] px-3 rounded-xl bg-white/85 dark:bg-slate-900/80 border border-slate-200 dark:border-white/10 text-xs text-slate-900 dark:text-white"
+                  />
+                  <div className="flex flex-wrap gap-1.5 max-h-28 overflow-y-auto">
+                    {availablePeers
+                      .filter((u) => {
+                        const q = groupMemberSearch.trim().toLowerCase();
+                        if (!q) return true;
+                        return (
+                          u.displayName.toLowerCase().includes(q) ||
+                          u.username.toLowerCase().includes(q)
+                        );
+                      })
+                      .map((u) => {
+                        const selected = groupMembers.includes(u.uid);
+                        return (
+                          <button
+                            key={u.uid}
+                            type="button"
+                            onClick={() =>
+                              setGroupMembers((prev) =>
+                                selected ? prev.filter((id) => id !== u.uid) : [...prev, u.uid]
+                              )
+                            }
+                            className={`min-h-[32px] px-2.5 py-1 rounded-xl text-[11px] font-semibold transition-colors ${
+                              selected
+                                ? 'bg-sky-600 text-white'
+                                : 'bg-white/80 dark:bg-slate-800 text-slate-700 dark:text-slate-200'
+                            }`}
+                          >
+                            {selected ? '✓ ' : ''}
+                            {u.displayName}
+                          </button>
+                        );
+                      })}
+                  </div>
                 </div>
               )}
+
               <button
                 type="submit"
-                disabled={groupMembers.length === 0}
-                className="w-full min-h-[36px] rounded-lg bg-sky-600 text-white text-xs font-semibold disabled:opacity-50"
+                disabled={!groupTitle.trim() || groupMembers.length === 0}
+                className="w-full min-h-[40px] rounded-xl bg-sky-600 hover:bg-sky-500 text-white text-xs font-semibold disabled:opacity-45 transition-colors"
               >
-                Create Group Chat
+                Create Group Chat ({groupMembers.length + 1})
               </button>
             </form>
           )}
@@ -1145,7 +1271,7 @@ export function MessagesView() {
               filteredChats.map((chat) => {
                 const active = activeChat?.id === chat.id;
                 const peerId = chat.participantIds.find((id) => id !== currentUser.uid);
-                const avatar = peerId ? chat.participantAvatars[peerId] : undefined;
+                const avatar = peerId ? chat.participantAvatars?.[peerId] : undefined;
                 const peer = peerId ? creators.find((c) => c.uid === peerId) : undefined;
                 const displayTitle =
                   chat.type === 'direct' && peerId
@@ -1175,9 +1301,17 @@ export function MessagesView() {
                         className="flex-1 min-w-0 flex items-center gap-3 text-left"
                       >
                         {chat.type === 'group' ? (
-                          <div className="w-11 h-11 rounded-full bg-gradient-to-br from-sky-500/25 to-cyan-500/25 text-sky-700 dark:text-sky-300 flex items-center justify-center shrink-0">
-                            <Users className="w-5 h-5" />
-                          </div>
+                          chat.avatarUrl ? (
+                            <img
+                              src={chat.avatarUrl}
+                              alt={displayTitle}
+                              className="w-11 h-11 rounded-full object-cover shrink-0 ring-1 ring-white/20"
+                            />
+                          ) : (
+                            <div className="w-11 h-11 rounded-full bg-gradient-to-br from-sky-500/25 to-cyan-500/25 text-sky-700 dark:text-sky-300 flex items-center justify-center shrink-0">
+                              <Users className="w-5 h-5" />
+                            </div>
+                          )
                         ) : (
                           <Avatar
                             src={avatar}
@@ -1464,20 +1598,28 @@ export function MessagesView() {
             {/* Active Conversation Column */}
             <div className="flex-1 flex flex-col min-w-0 h-full relative">
               {/* Thread Header */}
-              <div className="relative z-20 px-3.5 sm:px-5 py-3 border-b border-slate-200/70 dark:border-slate-800/70 flex items-center justify-between gap-2 bg-white/80 dark:bg-slate-900/80 backdrop-blur-xl">
+              <div className="relative z-20 px-3.5 sm:px-5 py-3 border-b border-slate-200/70 dark:border-white/10 flex items-center justify-between gap-2 bg-white/80 dark:bg-slate-950/90 backdrop-blur-2xl">
                 <div className="flex items-center gap-2.5 min-w-0">
                   <button
                     type="button"
                     aria-label={t.messages.backToInbox}
                     onClick={() => setMobileShowThread(false)}
-                    className="md:hidden min-h-[38px] min-w-[38px] -ml-1 rounded-full flex items-center justify-center text-slate-700 dark:text-slate-200"
+                    className="md:hidden min-h-[42px] min-w-[42px] -ml-1 rounded-full liquid-glass-btn flex items-center justify-center text-slate-700 dark:text-slate-200"
                   >
                     <ArrowLeft className="w-5 h-5" />
                   </button>
                   {activeChat.type === 'group' ? (
-                    <div className="w-10 h-10 rounded-full bg-sky-600/15 text-sky-600 flex items-center justify-center shrink-0">
-                      <Users className="w-4 h-4" />
-                    </div>
+                    activeChat.avatarUrl ? (
+                      <img
+                        src={activeChat.avatarUrl}
+                        alt={activeDisplayTitle}
+                        className="w-10 h-10 rounded-full object-cover shrink-0 ring-1 ring-white/20"
+                      />
+                    ) : (
+                      <div className="w-10 h-10 rounded-full bg-sky-600/15 text-sky-600 dark:text-sky-300 flex items-center justify-center shrink-0">
+                        <Users className="w-4 h-4" />
+                      </div>
+                    )
                   ) : (
                     <Avatar
                       src={otherUser?.photoUrl}
@@ -1488,7 +1630,14 @@ export function MessagesView() {
                   )}
                   <button
                     type="button"
-                    onClick={() => setShowChatInfo((s) => !s)}
+                    onClick={() => {
+                      if (activeChat.type === 'group') {
+                        setShowChatInfo(false);
+                        setShowGroupPage(true);
+                      } else {
+                        setShowChatInfo((s) => !s);
+                      }
+                    }}
                     className="min-w-0 text-left"
                   >
                     <div className="flex items-center gap-1.5">
@@ -1496,8 +1645,8 @@ export function MessagesView() {
                         {activeDisplayTitle}
                       </h2>
                       {disappearingMode !== 'off' && (
-                        <span className="px-1.5 py-0.5 rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-300 text-[10px] font-bold inline-flex items-center gap-0.5 shrink-0">
-                          <Clock className="w-2.5 h-2.5" />
+                        <span className="text-amber-600 dark:text-amber-300 text-[10px] font-bold inline-flex items-center gap-0.5 shrink-0">
+                          <Clock className="w-3 h-3" />
                           {disappearingMode}
                         </span>
                       )}
@@ -1511,7 +1660,7 @@ export function MessagesView() {
                           {activeTypingPeers.join(', ')} {t.messages.typing}
                         </span>
                       ) : activeChat.type === 'group' ? (
-                        `${activeChat.participantIds.length} / ${MAX_GROUP_MEMBERS} members`
+                        `${activeChat.participantIds.length} / ${MAX_GROUP_MEMBERS} members · ${t.messages.groupInfo}`
                       ) : otherUser?.onlineStatus === 'online' ? (
                         `@${otherUser.username} · ${t.messages.activeNow}`
                       ) : (
@@ -1521,7 +1670,7 @@ export function MessagesView() {
                   </button>
                 </div>
 
-                <div className="flex items-center gap-1 shrink-0">
+                <div className="flex items-center gap-1.5 shrink-0">
                   <button
                     type="button"
                     aria-label={t.messages.searchInChat}
@@ -1529,10 +1678,10 @@ export function MessagesView() {
                       setShowInChatSearch((s) => !s);
                       setInChatQuery('');
                     }}
-                    className={`min-h-[38px] min-w-[38px] rounded-full flex items-center justify-center transition-colors ${
+                    className={`min-h-[40px] min-w-[40px] rounded-full flex items-center justify-center transition-all duration-150 ${
                       showInChatSearch
                         ? 'bg-sky-600 text-white'
-                        : 'liquid-glass-subtle text-slate-700 dark:text-slate-200 hover:text-sky-600'
+                        : 'liquid-glass-btn text-slate-700 dark:text-slate-200 hover:text-sky-500'
                     }`}
                   >
                     <Search className="w-4 h-4" />
@@ -1543,7 +1692,7 @@ export function MessagesView() {
                         type="button"
                         aria-label={t.messages.voiceCall}
                         onClick={() => startCall(activeChat.id, otherParticipantId, 'voice')}
-                        className="min-h-[38px] min-w-[38px] rounded-full liquid-glass-subtle flex items-center justify-center text-slate-700 dark:text-slate-200 hover:text-sky-600"
+                        className="min-h-[40px] min-w-[40px] rounded-full liquid-glass-btn flex items-center justify-center text-slate-700 dark:text-slate-200 hover:text-sky-500"
                       >
                         <Phone className="w-4 h-4" />
                       </button>
@@ -1551,7 +1700,7 @@ export function MessagesView() {
                         type="button"
                         aria-label={t.messages.videoCall}
                         onClick={() => startCall(activeChat.id, otherParticipantId, 'video')}
-                        className="min-h-[38px] min-w-[38px] rounded-full liquid-glass-subtle flex items-center justify-center text-slate-700 dark:text-slate-200 hover:text-sky-600"
+                        className="min-h-[40px] min-w-[40px] rounded-full liquid-glass-btn flex items-center justify-center text-slate-700 dark:text-slate-200 hover:text-sky-500"
                       >
                         <Video className="w-4 h-4" />
                       </button>
@@ -1559,12 +1708,19 @@ export function MessagesView() {
                   )}
                   <button
                     type="button"
-                    aria-label={t.messages.chatInfo}
-                    onClick={() => setShowChatInfo((s) => !s)}
-                    className={`min-h-[38px] min-w-[38px] rounded-full flex items-center justify-center transition-colors ${
-                      showChatInfo
+                    aria-label={activeChat.type === 'group' ? t.messages.groupInfo : t.messages.chatInfo}
+                    onClick={() => {
+                      if (activeChat.type === 'group') {
+                        setShowChatInfo(false);
+                        setShowGroupPage((s) => !s);
+                      } else {
+                        setShowChatInfo((s) => !s);
+                      }
+                    }}
+                    className={`min-h-[40px] min-w-[40px] rounded-full flex items-center justify-center transition-all duration-150 ${
+                      showChatInfo || showGroupPage
                         ? 'bg-sky-600 text-white'
-                        : 'liquid-glass-subtle text-slate-700 dark:text-slate-200'
+                        : 'liquid-glass-btn text-slate-700 dark:text-slate-200'
                     }`}
                   >
                     <Info className="w-4 h-4" />
@@ -2228,23 +2384,32 @@ export function MessagesView() {
                   <p className="text-xs text-center text-rose-600 py-2">
                     You blocked this user. Unblock to send messages.
                   </p>
+                ) : !textPermission.allowed ? (
+                  <p
+                    role="status"
+                    className="text-xs text-center text-amber-600 dark:text-amber-300 font-semibold py-2.5 px-3 rounded-2xl bg-amber-500/10 border border-amber-500/20"
+                  >
+                    {textPermission.reason || 'Only group admins can send messages'}
+                  </p>
                 ) : (
                   <form
                     onSubmit={handleSendText}
-                    className="flex items-center gap-0.5 sm:gap-1 p-1 sm:p-1.5 rounded-full bg-white dark:bg-slate-800/90 border border-slate-200/90 dark:border-slate-700/80 shadow-sm w-full min-w-0"
+                    className="flex items-center gap-0.5 sm:gap-1 p-1 sm:p-1.5 rounded-full bg-white/95 dark:bg-slate-900/95 border border-slate-200/90 dark:border-white/10 shadow-sm w-full min-w-0"
                   >
-                    <button
-                      type="button"
-                      aria-label={isRecording ? t.messages.stopRecording : t.messages.recordVoice}
-                      onClick={handleToggleVoiceRecord}
-                      className={`min-h-[34px] min-w-[34px] sm:min-h-[38px] sm:min-w-[38px] shrink-0 rounded-full flex items-center justify-center transition-colors ${
-                        isRecording
-                          ? 'bg-rose-600 text-white'
-                          : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700'
-                      }`}
-                    >
-                      {isRecording ? <Square className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
-                    </button>
+                    {mediaPermission.allowed && (
+                      <button
+                        type="button"
+                        aria-label={isRecording ? t.messages.stopRecording : t.messages.recordVoice}
+                        onClick={handleToggleVoiceRecord}
+                        className={`min-h-[36px] min-w-[36px] sm:min-h-[38px] sm:min-w-[38px] shrink-0 rounded-full flex items-center justify-center transition-colors ${
+                          isRecording
+                            ? 'bg-rose-600 text-white'
+                            : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
+                        }`}
+                      >
+                        {isRecording ? <Square className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
+                      </button>
+                    )}
 
                     <button
                       type="button"
@@ -2253,10 +2418,10 @@ export function MessagesView() {
                         setShowQuickEmojiBar((s) => !s);
                         setShowStickerDrawer(false);
                       }}
-                      className={`min-h-[34px] min-w-[34px] sm:min-h-[38px] sm:min-w-[38px] shrink-0 rounded-full flex items-center justify-center ${
+                      className={`min-h-[36px] min-w-[36px] sm:min-h-[38px] sm:min-w-[38px] shrink-0 rounded-full flex items-center justify-center ${
                         showQuickEmojiBar
                           ? 'bg-sky-600 text-white'
-                          : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700'
+                          : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
                       }`}
                     >
                       <Smile className="w-4 h-4" />
@@ -2268,42 +2433,46 @@ export function MessagesView() {
                       onChange={(e) => handleDraftChange(e.target.value)}
                       placeholder={t.messages.typeMessage}
                       aria-label={t.messages.typeMessage}
-                      className="flex-1 min-w-0 w-full min-h-[34px] sm:min-h-[38px] px-1.5 sm:px-2 bg-transparent text-sm text-slate-900 dark:text-white focus:outline-none"
+                      className="flex-1 min-w-0 w-full min-h-[36px] sm:min-h-[38px] px-1.5 sm:px-2 bg-transparent text-sm text-slate-900 dark:text-white focus:outline-none"
                     />
 
-                    <button
-                      type="button"
-                      aria-label={t.messages.stickers}
-                      onClick={() => {
-                        setShowStickerDrawer((s) => !s);
-                        setShowQuickEmojiBar(false);
-                      }}
-                      className={`min-h-[34px] min-w-[34px] sm:min-h-[38px] sm:min-w-[38px] shrink-0 rounded-full flex items-center justify-center ${
-                        showStickerDrawer
-                          ? 'bg-sky-600 text-white'
-                          : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700'
-                      }`}
-                    >
-                      <Sparkles className="w-4 h-4" />
-                    </button>
+                    {mediaPermission.allowed && (
+                      <>
+                        <button
+                          type="button"
+                          aria-label={t.messages.stickers}
+                          onClick={() => {
+                            setShowStickerDrawer((s) => !s);
+                            setShowQuickEmojiBar(false);
+                          }}
+                          className={`min-h-[36px] min-w-[36px] sm:min-h-[38px] sm:min-w-[38px] shrink-0 rounded-full flex items-center justify-center ${
+                            showStickerDrawer
+                              ? 'bg-sky-600 text-white'
+                              : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
+                          }`}
+                        >
+                          <Sparkles className="w-4 h-4" />
+                        </button>
 
-                    <label
-                      aria-label="Attach image, video, or file"
-                      className="min-h-[34px] min-w-[34px] sm:min-h-[38px] sm:min-w-[38px] shrink-0 rounded-full flex items-center justify-center text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700 cursor-pointer"
-                    >
-                      <Paperclip className="w-4 h-4" />
-                      <input
-                        type="file"
-                        accept="image/*,video/*,*/*"
-                        onChange={handleFileAttachment}
-                        className="sr-only"
-                      />
-                    </label>
+                        <label
+                          aria-label="Attach image, video, or file"
+                          className="min-h-[36px] min-w-[36px] sm:min-h-[38px] sm:min-w-[38px] shrink-0 rounded-full flex items-center justify-center text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
+                        >
+                          <Paperclip className="w-4 h-4" />
+                          <input
+                            type="file"
+                            accept="image/*,video/*,*/*"
+                            onChange={handleFileAttachment}
+                            className="sr-only"
+                          />
+                        </label>
+                      </>
+                    )}
 
                     <button
                       type="submit"
                       aria-label={editingMsg ? 'Save edit' : 'Send message'}
-                      className="min-h-[34px] sm:min-h-[38px] px-3 sm:px-4 shrink-0 rounded-full bg-sky-600 hover:bg-sky-700 text-white flex items-center justify-center gap-1 text-xs font-semibold transition-colors"
+                      className="min-h-[36px] sm:min-h-[38px] px-3 sm:px-4 shrink-0 rounded-full bg-sky-600 hover:bg-sky-700 text-white flex items-center justify-center gap-1 text-xs font-semibold transition-colors"
                     >
                       {editingMsg ? <Check className="w-3.5 h-3.5" /> : <Send className="w-3.5 h-3.5" />}
                       <span className="hidden sm:inline">{editingMsg ? 'Save' : 'Send'}</span>
@@ -2592,7 +2761,7 @@ export function MessagesView() {
                           {t.messages.chatNicknames}
                         </h4>
                         {activeChat.participantIds.map((pUid) => {
-                          const defaultName = activeChat.participantNames[pUid] || pUid;
+                          const defaultName = activeChat.participantNames?.[pUid] || pUid;
                           const currentNick =
                             nicknameDrafts[pUid] ?? activeChat.chatNicknames?.[pUid] ?? '';
                           return (
@@ -2829,7 +2998,7 @@ export function MessagesView() {
                             >
                               <div className="min-w-0">
                                 <p className="text-xs font-semibold text-slate-900 dark:text-white truncate">
-                                  {activeChat.participantNames[pUid] || pUid}
+                                  {activeChat.participantNames?.[pUid] || pUid}
                                 </p>
                                 <p className="text-[10px] text-slate-500 inline-flex items-center gap-1">
                                   {owner ? (
@@ -2899,6 +3068,545 @@ export function MessagesView() {
                   )}
                 </div>
               </aside>
+            )}
+
+            {/* Dedicated Full Group Profile & Management Page */}
+            {showGroupPage && activeChat.type === 'group' && (
+              <div
+                data-testid="dedicated-group-page"
+                role="dialog"
+                aria-modal="true"
+                aria-label={t.messages.groupInfo}
+                className="fixed inset-0 md:absolute z-40 bg-slate-50/96 dark:bg-slate-950/98 backdrop-blur-2xl flex flex-col overflow-hidden"
+              >
+                <div className="px-4 sm:px-6 py-3.5 border-b border-slate-200/70 dark:border-white/10 flex items-center justify-between gap-3 bg-white/80 dark:bg-slate-950/90 backdrop-blur-xl shrink-0">
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <button
+                      type="button"
+                      aria-label={t.profile.back}
+                      onClick={() => setShowGroupPage(false)}
+                      className="min-h-[44px] min-w-[44px] rounded-xl liquid-glass-btn flex items-center justify-center text-slate-800 dark:text-slate-100 shrink-0"
+                    >
+                      <ArrowLeft className="w-5 h-5" />
+                    </button>
+                    <div className="min-w-0">
+                      <h3 className="text-base font-bold text-slate-900 dark:text-white truncate">
+                        {t.messages.groupInfo}
+                      </h3>
+                      <p className="text-xs text-slate-500 dark:text-slate-400 truncate">
+                        {activeChat.participantIds.length} / {MAX_GROUP_MEMBERS} members
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowGroupPage(false);
+                      setShowChatInfo(true);
+                      setInfoTab('customize');
+                    }}
+                    className="min-h-[40px] px-3.5 rounded-xl liquid-glass-btn text-xs font-semibold text-slate-800 dark:text-slate-100 inline-flex items-center gap-1.5 shrink-0"
+                  >
+                    <Palette className="w-4 h-4 text-sky-500" />
+                    <span>{t.messages.themes}</span>
+                  </button>
+                </div>
+
+                <div className="flex-1 overflow-y-auto p-4 sm:p-6">
+                  <div className="max-w-2xl mx-auto space-y-5 pb-12">
+                    {/* Identity Editor / Viewer */}
+                    <section className="liquid-glass rounded-3xl p-5 sm:p-6 space-y-4">
+                      <div className="flex flex-col sm:flex-row items-center gap-4">
+                        <div className="relative shrink-0">
+                          {groupEditAvatar ? (
+                            <img
+                              src={groupEditAvatar}
+                              alt={activeChat.title}
+                              className="w-20 h-20 rounded-full object-cover ring-2 ring-sky-500/40"
+                            />
+                          ) : (
+                            <div className="w-20 h-20 rounded-full bg-gradient-to-br from-sky-500/25 to-cyan-500/25 text-sky-600 dark:text-sky-300 flex items-center justify-center ring-2 ring-sky-500/30">
+                              <Users className="w-9 h-9" />
+                            </div>
+                          )}
+                          {canEditGroupInfo(activeChat, currentUser.uid) && (
+                            <label
+                              aria-label={t.messages.groupPhoto}
+                              className="absolute -bottom-1 -right-1 w-9 h-9 rounded-full bg-sky-600 hover:bg-sky-500 text-white flex items-center justify-center shadow-lg cursor-pointer"
+                            >
+                              <Camera className="w-4 h-4" />
+                              <input
+                                type="file"
+                                accept="image/*"
+                                onChange={(e) => handleGroupAvatarPick(e, true)}
+                                className="sr-only"
+                              />
+                            </label>
+                          )}
+                        </div>
+
+                        <div className="flex-1 w-full space-y-2.5 text-center sm:text-left">
+                          {canEditGroupInfo(activeChat, currentUser.uid) ? (
+                            <>
+                              <input
+                                type="text"
+                                value={groupEditTitle}
+                                onChange={(e) => setGroupEditTitle(e.target.value)}
+                                placeholder="Group name"
+                                aria-label="Edit group name"
+                                className="w-full min-h-[42px] px-3.5 rounded-xl bg-white/90 dark:bg-slate-900/90 border border-slate-200 dark:border-white/10 text-sm font-bold text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-sky-500"
+                              />
+                              <textarea
+                                rows={2}
+                                value={groupEditBio}
+                                onChange={(e) => setGroupEditBio(e.target.value)}
+                                placeholder={t.messages.groupBio}
+                                aria-label={t.messages.groupBio}
+                                className="w-full px-3.5 py-2.5 rounded-xl bg-white/85 dark:bg-slate-900/80 border border-slate-200 dark:border-white/10 text-xs text-slate-800 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-sky-500 resize-none"
+                              />
+                              <div className="flex justify-end">
+                                <button
+                                  type="button"
+                                  disabled={savingGroupPage || !groupEditTitle.trim()}
+                                  onClick={async () => {
+                                    setSavingGroupPage(true);
+                                    try {
+                                      await updateGroupSettings(activeChat.id, {
+                                        title: groupEditTitle.trim(),
+                                        bio: groupEditBio.trim(),
+                                        avatarUrl: groupEditAvatar,
+                                      });
+                                      showToast('Group info saved');
+                                    } finally {
+                                      setSavingGroupPage(false);
+                                    }
+                                  }}
+                                  className="min-h-[40px] px-4 rounded-xl bg-sky-600 hover:bg-sky-500 text-white text-xs font-semibold disabled:opacity-50"
+                                >
+                                  {t.profile.saveChanges}
+                                </button>
+                              </div>
+                            </>
+                          ) : (
+                            <>
+                              <h4 className="text-lg font-bold text-slate-900 dark:text-white">
+                                {activeChat.title}
+                              </h4>
+                              <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed">
+                                {activeChat.bio || 'No group bio yet.'}
+                              </p>
+                              <p className="text-[11px] text-amber-600 dark:text-amber-300">
+                                Only group admins can edit group details.
+                              </p>
+                            </>
+                          )}
+                        </div>
+                      </div>
+                    </section>
+
+                    {/* Quick Controls */}
+                    <section className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          updateChatPreferences(activeChat.id, { pinned: !isPinnedChat })
+                        }
+                        className="min-h-[44px] px-3 rounded-2xl liquid-glass-btn text-xs font-semibold text-slate-800 dark:text-slate-100 inline-flex items-center justify-center gap-1.5"
+                      >
+                        <Pin className="w-4 h-4 text-sky-500" />
+                        <span>{isPinnedChat ? t.messages.unpinChat : t.messages.pinChat}</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          updateChatPreferences(activeChat.id, { muted: !isMutedChat })
+                        }
+                        className="min-h-[44px] px-3 rounded-2xl liquid-glass-btn text-xs font-semibold text-slate-800 dark:text-slate-100 inline-flex items-center justify-center gap-1.5"
+                      >
+                        {isMutedChat ? (
+                          <BellOff className="w-4 h-4 text-amber-500" />
+                        ) : (
+                          <Bell className="w-4 h-4 text-sky-500" />
+                        )}
+                        <span>{isMutedChat ? t.messages.unmuteChat : t.messages.muteChat}</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          updateChatPreferences(activeChat.id, {
+                            disappearingMode:
+                              disappearingMode === 'off'
+                                ? '24h'
+                                : disappearingMode === '24h'
+                                ? '7d'
+                                : 'off',
+                          })
+                        }
+                        className="min-h-[44px] px-3 rounded-2xl liquid-glass-btn text-xs font-semibold text-slate-800 dark:text-slate-100 inline-flex items-center justify-center gap-1.5 col-span-2 sm:col-span-1"
+                      >
+                        <Clock className="w-4 h-4 text-amber-500" />
+                        <span>
+                          {t.messages.disappearing}: {disappearingMode.toUpperCase()}
+                        </span>
+                      </button>
+                    </section>
+
+                    {/* Add Members + Search */}
+                    <section className="liquid-glass-subtle rounded-3xl p-4 sm:p-5 space-y-3">
+                      <div className="flex items-center justify-between gap-2">
+                        <h4 className="text-sm font-bold text-slate-900 dark:text-white inline-flex items-center gap-2">
+                          <UserPlus className="w-4 h-4 text-sky-500" />
+                          <span>{t.messages.addMembers}</span>
+                        </h4>
+                        <span className="text-xs font-mono-num text-slate-500 dark:text-slate-400">
+                          {activeChat.participantIds.length} / {MAX_GROUP_MEMBERS}
+                        </span>
+                      </div>
+
+                      <div className="relative">
+                        <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+                        <input
+                          type="search"
+                          value={groupPageMemberQuery}
+                          onChange={(e) => setGroupPageMemberQuery(e.target.value)}
+                          placeholder="Search friends or group members..."
+                          aria-label="Search friends or group members"
+                          className="w-full min-h-[40px] pl-10 pr-3.5 rounded-xl bg-white/90 dark:bg-slate-900/90 border border-slate-200 dark:border-white/10 text-xs text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-sky-500"
+                        />
+                      </div>
+
+                      {(() => {
+                        const q = groupPageMemberQuery.trim().toLowerCase();
+                        const addCandidates = availablePeers.filter(
+                          (u) =>
+                            !activeChat.participantIds.includes(u.uid) &&
+                            (!q ||
+                              u.displayName.toLowerCase().includes(q) ||
+                              u.username.toLowerCase().includes(q))
+                        );
+                        if (addCandidates.length === 0) {
+                          return (
+                            <p className="text-xs text-slate-500 dark:text-slate-400">
+                              {q
+                                ? 'No matching users available to add.'
+                                : 'All available accounts are already in this group.'}
+                            </p>
+                          );
+                        }
+                        return (
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-48 overflow-y-auto pr-1">
+                            {addCandidates.slice(0, 12).map((u) => (
+                              <div
+                                key={u.uid}
+                                className="flex items-center justify-between gap-2 p-2.5 rounded-2xl bg-white/80 dark:bg-slate-900/80 border border-slate-200/70 dark:border-white/10"
+                              >
+                                <div className="flex items-center gap-2.5 min-w-0">
+                                  <Avatar src={u.photoUrl} name={u.displayName} size="sm" />
+                                  <div className="min-w-0">
+                                    <p className="text-xs font-semibold text-slate-900 dark:text-white truncate">
+                                      {u.displayName}
+                                    </p>
+                                    <p className="text-[11px] text-slate-500 truncate">
+                                      @{u.username}
+                                    </p>
+                                  </div>
+                                </div>
+                                <button
+                                  type="button"
+                                  onClick={async () => {
+                                    const status = await addGroupMember(activeChat.id, u.uid);
+                                    showToast(
+                                      status === 'pending_approval'
+                                        ? 'Member request sent to admins'
+                                        : 'Member added'
+                                    );
+                                  }}
+                                  className="min-h-[34px] px-3 rounded-xl bg-sky-600 hover:bg-sky-500 text-white text-xs font-semibold shrink-0"
+                                >
+                                  + Add
+                                </button>
+                              </div>
+                            ))}
+                          </div>
+                        );
+                      })()}
+                    </section>
+
+                    {/* Pending Member Approvals */}
+                    {isGroupAdmin(activeChat, currentUser.uid) &&
+                      (activeChat.pendingMemberIds?.length || 0) > 0 && (
+                        <section className="p-4 rounded-3xl bg-amber-500/10 border border-amber-500/20 space-y-2.5">
+                          <h4 className="text-xs font-bold text-amber-700 dark:text-amber-300">
+                            Pending Member Approvals ({activeChat.pendingMemberIds!.length})
+                          </h4>
+                          {activeChat.pendingMemberIds!.map((pUid) => {
+                            const u = creators.find((c) => c.uid === pUid);
+                            return (
+                              <div
+                                key={pUid}
+                                className="flex items-center justify-between gap-2 text-xs"
+                              >
+                                <span className="font-semibold text-slate-900 dark:text-white">
+                                  {u ? `${u.displayName} (@${u.username})` : pUid}
+                                </span>
+                                <div className="flex gap-1.5">
+                                  <button
+                                    type="button"
+                                    onClick={() => approveGroupMember(activeChat.id, pUid, true)}
+                                    className="min-h-[34px] px-3 rounded-xl bg-sky-600 text-white font-semibold"
+                                  >
+                                    Approve
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => approveGroupMember(activeChat.id, pUid, false)}
+                                    className="min-h-[34px] px-3 rounded-xl liquid-glass-btn text-slate-700 dark:text-slate-200 font-semibold"
+                                  >
+                                    Decline
+                                  </button>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </section>
+                      )}
+
+                    {/* Group Restrictions */}
+                    {isGroupAdmin(activeChat, currentUser.uid) && (
+                      <section className="liquid-glass-subtle rounded-3xl p-4 sm:p-5 space-y-3">
+                        <h4 className="text-sm font-bold text-slate-900 dark:text-white inline-flex items-center gap-2">
+                          <Shield className="w-4 h-4 text-sky-500" />
+                          <span>{t.messages.groupRestrictions}</span>
+                        </h4>
+                        <div className="space-y-2.5">
+                          <label className="flex items-center justify-between gap-3 p-3 rounded-2xl bg-white/75 dark:bg-slate-900/75 border border-slate-200/70 dark:border-white/10 cursor-pointer">
+                            <span className="text-xs font-medium text-slate-800 dark:text-slate-200">
+                              {t.messages.adminsOnlyMessages}
+                            </span>
+                            <input
+                              type="checkbox"
+                              checked={Boolean(activeChat.restrictions?.adminsOnlyMessages)}
+                              onChange={(e) =>
+                                updateGroupSettings(activeChat.id, {
+                                  restrictions: {
+                                    ...activeChat.restrictions,
+                                    adminsOnlyMessages: e.target.checked,
+                                  },
+                                })
+                              }
+                              className="w-4 h-4 rounded text-sky-600"
+                            />
+                          </label>
+
+                          <label className="flex items-center justify-between gap-3 p-3 rounded-2xl bg-white/75 dark:bg-slate-900/75 border border-slate-200/70 dark:border-white/10 cursor-pointer">
+                            <span className="text-xs font-medium text-slate-800 dark:text-slate-200">
+                              {t.messages.onlyAdminsEditInfo}
+                            </span>
+                            <input
+                              type="checkbox"
+                              checked={Boolean(activeChat.restrictions?.onlyAdminsEditInfo)}
+                              onChange={(e) =>
+                                updateGroupSettings(activeChat.id, {
+                                  restrictions: {
+                                    ...activeChat.restrictions,
+                                    onlyAdminsEditInfo: e.target.checked,
+                                  },
+                                })
+                              }
+                              className="w-4 h-4 rounded text-sky-600"
+                            />
+                          </label>
+
+                          <label className="flex items-center justify-between gap-3 p-3 rounded-2xl bg-white/75 dark:bg-slate-900/75 border border-slate-200/70 dark:border-white/10 cursor-pointer">
+                            <span className="text-xs font-medium text-slate-800 dark:text-slate-200">
+                              {t.messages.blockMediaAttachments}
+                            </span>
+                            <input
+                              type="checkbox"
+                              checked={Boolean(activeChat.restrictions?.blockMediaAttachments)}
+                              onChange={(e) =>
+                                updateGroupSettings(activeChat.id, {
+                                  restrictions: {
+                                    ...activeChat.restrictions,
+                                    blockMediaAttachments: e.target.checked,
+                                  },
+                                })
+                              }
+                              className="w-4 h-4 rounded text-sky-600"
+                            />
+                          </label>
+
+                          <label className="flex items-center justify-between gap-3 p-3 rounded-2xl bg-white/75 dark:bg-slate-900/75 border border-slate-200/70 dark:border-white/10 cursor-pointer">
+                            <span className="text-xs font-medium text-slate-800 dark:text-slate-200">
+                              Require admin approval when members add users
+                            </span>
+                            <input
+                              type="checkbox"
+                              checked={Boolean(activeChat.requireAddApproval)}
+                              onChange={(e) =>
+                                updateGroupSettings(activeChat.id, {
+                                  requireAddApproval: e.target.checked,
+                                })
+                              }
+                              className="w-4 h-4 rounded text-sky-600"
+                            />
+                          </label>
+                        </div>
+                      </section>
+                    )}
+
+                    {/* Group Members List (Inline role typography — zero rounded-full static pills) */}
+                    <section className="liquid-glass-subtle rounded-3xl p-4 sm:p-5 space-y-3">
+                      <h4 className="text-sm font-bold text-slate-900 dark:text-white">
+                        Members ({activeChat.participantIds.length})
+                      </h4>
+                      <div className="divide-y divide-slate-200/60 dark:divide-white/10">
+                        {[...activeChat.participantIds]
+                          .sort((a, b) => {
+                            const score = (uid: string) =>
+                              isGroupOwner(activeChat, uid)
+                                ? 0
+                                : isGroupAdmin(activeChat, uid)
+                                ? 1
+                                : 2;
+                            return score(a) - score(b);
+                          })
+                          .filter((pUid) => {
+                            const q = groupPageMemberQuery.trim().toLowerCase();
+                            if (!q) return true;
+                            const memberUser = creators.find((c) => c.uid === pUid);
+                            const name = (
+                              memberUser?.displayName ||
+                              activeChat.participantNames?.[pUid] ||
+                              pUid
+                            ).toLowerCase();
+                            return (
+                              name.includes(q) ||
+                              (memberUser?.username || '').toLowerCase().includes(q)
+                            );
+                          })
+                          .map((pUid) => {
+                            const memberUser = creators.find((c) => c.uid === pUid);
+                            const displayName =
+                              memberUser?.displayName || activeChat.participantNames?.[pUid] || pUid;
+                            const owner = isGroupOwner(activeChat, pUid);
+                            const admin = isGroupAdmin(activeChat, pUid);
+                            const canRemove = canRemoveGroupMember(
+                              activeChat,
+                              currentUser.uid,
+                              pUid
+                            );
+                            const iAmOwner = isGroupOwner(activeChat, currentUser.uid);
+                            const iAmAdmin = isGroupAdmin(activeChat, currentUser.uid);
+
+                            return (
+                              <div
+                                key={pUid}
+                                className="py-3 flex flex-wrap items-center justify-between gap-2.5"
+                              >
+                                <button
+                                  type="button"
+                                  onClick={() => openUserProfile(pUid)}
+                                  className="flex items-center gap-3 min-w-0 text-left"
+                                >
+                                  <Avatar
+                                    src={memberUser?.photoUrl}
+                                    name={displayName}
+                                    size="sm"
+                                    online={memberUser?.onlineStatus === 'online'}
+                                  />
+                                  <div className="min-w-0">
+                                    <p className="text-xs font-semibold text-slate-900 dark:text-white truncate">
+                                      {displayName}
+                                      {pUid === currentUser.uid ? ' (You)' : ''}
+                                    </p>
+                                    <p className="text-[11px] text-slate-500 dark:text-slate-400 inline-flex items-center gap-1.5">
+                                      {memberUser && <span>@{memberUser.username} ·</span>}
+                                      {owner ? (
+                                        <span className="inline-flex items-center gap-1 text-amber-600 dark:text-amber-300 font-semibold">
+                                          <Crown className="w-3 h-3" />
+                                          Owner
+                                        </span>
+                                      ) : admin ? (
+                                        <span className="inline-flex items-center gap-1 text-sky-600 dark:text-sky-400 font-semibold">
+                                          <Shield className="w-3 h-3" />
+                                          Admin
+                                        </span>
+                                      ) : (
+                                        <span>Member</span>
+                                      )}
+                                    </p>
+                                  </div>
+                                </button>
+
+                                <div className="flex flex-wrap items-center gap-1.5">
+                                  {iAmAdmin && !admin && (
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        updateGroupRole(activeChat.id, pUid, 'promote_admin')
+                                      }
+                                      className="min-h-[34px] px-2.5 rounded-xl liquid-glass-btn text-sky-700 dark:text-sky-300 text-[11px] font-semibold"
+                                    >
+                                      {t.messages.promoteAdmin}
+                                    </button>
+                                  )}
+                                  {iAmOwner && admin && !owner && (
+                                    <>
+                                      <button
+                                        type="button"
+                                        onClick={() =>
+                                          updateGroupRole(activeChat.id, pUid, 'demote_admin')
+                                        }
+                                        className="min-h-[34px] px-2.5 rounded-xl liquid-glass-btn text-slate-700 dark:text-slate-200 text-[11px] font-semibold"
+                                      >
+                                        {t.messages.demoteAdmin}
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() =>
+                                          updateGroupRole(activeChat.id, pUid, 'transfer_owner')
+                                        }
+                                        className="min-h-[34px] px-2.5 rounded-xl liquid-glass-btn text-amber-600 dark:text-amber-300 text-[11px] font-semibold"
+                                      >
+                                        {t.messages.transferOwner}
+                                      </button>
+                                    </>
+                                  )}
+                                  {canRemove && (
+                                    <button
+                                      type="button"
+                                      onClick={async () => {
+                                        await removeGroupMember(activeChat.id, pUid);
+                                        if (pUid === currentUser.uid) {
+                                          setShowGroupPage(false);
+                                        }
+                                      }}
+                                      className="min-h-[34px] px-2.5 rounded-xl bg-rose-500/12 text-rose-600 dark:text-rose-400 text-[11px] font-semibold"
+                                    >
+                                      {pUid === currentUser.uid ? 'Leave' : 'Remove'}
+                                    </button>
+                                  )}
+                                </div>
+                              </div>
+                            );
+                          })}
+                      </div>
+                    </section>
+
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        await removeGroupMember(activeChat.id, currentUser.uid);
+                        setShowGroupPage(false);
+                      }}
+                      className="w-full min-h-[44px] rounded-2xl bg-rose-500/15 hover:bg-rose-500/25 text-rose-600 dark:text-rose-400 text-xs font-bold transition-colors"
+                    >
+                      {t.messages.leaveGroup}
+                    </button>
+                  </div>
+                </div>
+              </div>
             )}
           </div>
         ) : (

@@ -1,13 +1,15 @@
 import { useState } from 'react';
 import { ChevronLeft, ChevronRight, Eye, Image as ImageIcon, Plus, Send, Trash2, VolumeX, X } from 'lucide-react';
 import { useSocialVerse } from '../context/SocialVerseContext';
-import { formatRelativeTime } from '../utils/validation';
+import { formatRelativeTime, isHomeStoryVisibleToUser } from '../utils/validation';
 import { Avatar } from './Avatar';
 
 export function StoriesBar() {
   const {
     currentUser,
     isAuthenticated,
+    creators,
+    followingIds,
     stories,
     t,
     language,
@@ -15,6 +17,7 @@ export function StoriesBar() {
     setActiveStoryIndex,
     setSubscreen,
     subscreen,
+    openUserProfile,
     reactToStory,
     replyToStory,
     deleteStory,
@@ -32,8 +35,19 @@ export function StoriesBar() {
   const [storyMediaUrl, setStoryMediaUrl] = useState('');
   const [storyPrivacy, setStoryPrivacy] = useState<'everyone' | 'followers' | 'close_friends'>('everyone');
 
+  const visibleStories = stories.filter((s) =>
+    isHomeStoryVisibleToUser(
+      s,
+      creators.find((c) => c.uid === s.authorId),
+      isAuthenticated ? currentUser.uid : null,
+      followingIds
+    )
+  );
+
   const activeStory =
-    activeStoryIndex !== null && stories[activeStoryIndex] ? stories[activeStoryIndex] : null;
+    activeStoryIndex !== null && visibleStories[activeStoryIndex]
+      ? visibleStories[activeStoryIndex]
+      : null;
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -82,7 +96,7 @@ export function StoriesBar() {
             </span>
           </button>
 
-          {stories.map((story, idx) => (
+          {visibleStories.map((story, idx) => (
             <button
               key={story.id}
               type="button"
@@ -144,7 +158,7 @@ export function StoriesBar() {
 
             <div className="relative z-10 p-4 bg-gradient-to-b from-black/75 via-black/35 to-transparent">
               <div className="flex gap-1.5 mb-3">
-                {stories.map((s, i) => (
+                {visibleStories.map((s, i) => (
                   <div key={s.id} className="h-1 flex-1 rounded-full bg-white/30 overflow-hidden">
                     <div
                       className={`h-full rounded-full ${
@@ -156,7 +170,15 @@ export function StoriesBar() {
               </div>
 
               <div className="flex items-center justify-between gap-2">
-                <div className="flex items-center gap-2.5 min-w-0">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const targetUid = activeStory.authorId;
+                    setActiveStoryIndex(null);
+                    openUserProfile(targetUid);
+                  }}
+                  className="flex items-center gap-2.5 min-w-0 text-left hover:opacity-90"
+                >
                   <Avatar src={activeStory.authorAvatar} name={activeStory.authorDisplayName} size="sm" />
                   <div className="min-w-0">
                     <p className="text-sm font-semibold text-white truncate">
@@ -166,7 +188,7 @@ export function StoriesBar() {
                       {formatRelativeTime(activeStory.createdAt, language)} · {activeStory.privacy}
                     </p>
                   </div>
-                </div>
+                </button>
                 <div className="flex items-center gap-1">
                   {activeStory.authorId === currentUser.uid ? (
                     <button
@@ -212,9 +234,11 @@ export function StoriesBar() {
               <button
                 type="button"
                 aria-label="Next story"
-                disabled={(activeStoryIndex ?? 0) >= stories.length - 1}
+                disabled={(activeStoryIndex ?? 0) >= visibleStories.length - 1}
                 onClick={() =>
-                  setActiveStoryIndex(Math.min(stories.length - 1, (activeStoryIndex ?? 0) + 1))
+                  setActiveStoryIndex(
+                    Math.min(visibleStories.length - 1, (activeStoryIndex ?? 0) + 1)
+                  )
                 }
                 className="min-h-[44px] min-w-[44px] rounded-full bg-black/30 text-white flex items-center justify-center disabled:opacity-25"
               >

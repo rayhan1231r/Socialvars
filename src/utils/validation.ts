@@ -93,10 +93,35 @@ export function isValidUsername(username: string): boolean {
   return USERNAME_REGEX.test(username);
 }
 
-const EMAIL_FORMAT_REGEX = /^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)+$/i;
+export const EMAIL_FORMAT_REGEX = /^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)+$/i;
+
+// Strict signup provider allowlist: Gmail, Yahoo Mail, Hotmail, and Outlook/Microsoft only
+export const ALLOWED_SIGNUP_EMAIL_DOMAINS = new Set<string>([
+  'gmail.com',
+  'googlemail.com',
+  'yahoo.com',
+  'yahoo.co.uk',
+  'yahoo.co.in',
+  'yahoo.in',
+  'yahoo.ca',
+  'yahoo.com.au',
+  'ymail.com',
+  'rocketmail.com',
+  'hotmail.com',
+  'hotmail.co.uk',
+  'hotmail.fr',
+  'hotmail.de',
+  'hotmail.es',
+  'hotmail.it',
+  'outlook.com',
+  'outlook.co.uk',
+  'live.com',
+  'msn.com',
+]);
 
 export const DISPOSABLE_EMAIL_DOMAINS = new Set<string>([
   '10mail.org',
+  '10mail.tk',
   '10minutemail.co.uk',
   '10minutemail.com',
   '10minutemail.de',
@@ -104,8 +129,13 @@ export const DISPOSABLE_EMAIL_DOMAINS = new Set<string>([
   '10minutemail.org',
   '10minutesmail.com',
   '10minemail.com',
+  '1secmail.com',
+  '1secmail.net',
+  '1secmail.org',
   '20email.it',
   '20mail.it',
+  '20minutemail.com',
+  '20minutemail.it',
   '33mail.com',
   'anonaddy.me',
   'anonbox.net',
@@ -134,6 +164,7 @@ export const DISPOSABLE_EMAIL_DOMAINS = new Set<string>([
   'disposableaddress.com',
   'disposableemailaddresses.com',
   'disposableinbox.com',
+  'disposablemail.com',
   'disposeamail.com',
   'disposemail.com',
   'dispostable.com',
@@ -142,12 +173,15 @@ export const DISPOSABLE_EMAIL_DOMAINS = new Set<string>([
   'donemail.ru',
   'dontreg.com',
   'dontsendmespam.de',
+  'dpptd.com',
   'dropmail.me',
+  'duck.com',
   'dump-email.info',
   'dumpandjunk.com',
   'dumpyemail.com',
   'e4ward.com',
   'easytrashmail.com',
+  'email-temp.com',
   'email60.com',
   'emailage.cf',
   'emailage.ga',
@@ -155,12 +189,14 @@ export const DISPOSABLE_EMAIL_DOMAINS = new Set<string>([
   'emailage.ml',
   'emailage.tk',
   'emailfake.com',
+  'emailfake.info',
   'emailgo.de',
   'emailias.com',
   'emailigo.de',
   'emailinfive.com',
   'emaillime.com',
   'emailmiser.com',
+  'emailnator.com',
   'emailondeck.com',
   'emailproxsy.com',
   'emailsensei.com',
@@ -174,6 +210,8 @@ export const DISPOSABLE_EMAIL_DOMAINS = new Set<string>([
   'emailx.at.hm',
   'emltmp.com',
   'ephemail.net',
+  'esiix.com',
+  'etempmail.com',
   'etranquil.com',
   'etranquil.net',
   'etranquil.org',
@@ -181,9 +219,11 @@ export const DISPOSABLE_EMAIL_DOMAINS = new Set<string>([
   'explodemail.com',
   'express.net.ua',
   'eyepaste.com',
+  'fake-mail.org',
   'fakeinbox.com',
   'fakeinformation.com',
   'fakemail.fr',
+  'fakemail.net',
   'fakemailgenerator.com',
   'fastacura.com',
   'fastchevy.com',
@@ -635,6 +675,49 @@ export const DISPOSABLE_EMAIL_DOMAINS = new Set<string>([
   'xoxy.net',
   'yep.it',
   'yogamaven.com',
+  'fviainboxes.com',
+  'gmailnator.com',
+  'inboxkitten.com',
+  'inboxes.com',
+  'instaddr.ch',
+  'internxt.com',
+  'kuku.lu',
+  'linshiyouxiang.net',
+  'm.kuku.lu',
+  'mail-temp.com',
+  'mail.gw',
+  'mail.td',
+  'mail.tm',
+  'mail7.io',
+  'mailsac.com',
+  'minutemail.cc',
+  'mozmail.com',
+  'oosln.com',
+  'passinbox.com',
+  'passmail.net',
+  'pokemail.net',
+  'relay.firefox.com',
+  'rteet.com',
+  'simplelogin.co',
+  'simplelogin.com',
+  'slmail.me',
+  'snapmail.cc',
+  'temp-mail.live',
+  'tempinbox.xyz',
+  'tempmail.cc',
+  'tempmail.dev',
+  'tempmail.ninja',
+  'tempmail.ws',
+  'tmail.gg',
+  'tmail.io',
+  'tmailor.com',
+  'tmpmail.com',
+  'trashmail.io',
+  'txen.de',
+  'vddaz.com',
+  'vmani.com',
+  'wwjmp.com',
+  'yopmail.info',
   'yopmail.com',
   'yopmail.fr',
   'yopmail.net',
@@ -646,8 +729,8 @@ export const DISPOSABLE_EMAIL_DOMAINS = new Set<string>([
   'zoemail.org',
 ]);
 
-const DISPOSABLE_HOST_PATTERN =
-  /(^|\.)(tempmail|temp-mail|tmpmail|10minutemail|10minemail|guerrillamail|mailinator|yopmail|trashmail|throwawaymail|disposable|burnermail|fakeinbox|fakemail|getnada|maildrop|mohmal|emltmp|mytemp|tempr|sharklasers|mailnesia|emailondeck|dropmail|minuteinbox|dispostable|wegwerfmail|spam4)\b/i;
+export const DISPOSABLE_HOST_PATTERN =
+  /(^|\.)(tempmail|temp-mail|tmpmail|mail-temp|email-temp|1secmail|10minutemail|10minemail|20minutemail|guerrillamail|mailinator|yopmail|trashmail|throwawaymail|disposable|burnermail|fakeinbox|fakemail|emailfake|emailnator|gmailnator|tmailor|fviainboxes|inboxkitten|linshiyouxiang|snapmail|etempmail|pokemail|getnada|maildrop|mohmal|moakt|emltmp|mytemp|tempr|sharklasers|mailnesia|emailondeck|dropmail|minuteinbox|dispostable|wegwerfmail|spam4|mailsac|anonaddy|simplelogin|mozmail)\b/i;
 
 export function isValidEmailFormat(email: string): boolean {
   const clean = email.trim().toLowerCase();
@@ -702,6 +785,19 @@ export function canonicalizeEmail(email: string): string {
   return `${local}@${domain}`;
 }
 
+export function getEmailDomain(email: string): string {
+  const clean = email.trim().toLowerCase();
+  const atIdx = clean.lastIndexOf('@');
+  if (atIdx < 1) return '';
+  return clean.slice(atIdx + 1).replace(/\.+$/, '');
+}
+
+export function isAllowedSignupEmailProvider(email: string): boolean {
+  const domain = getEmailDomain(email);
+  if (!domain) return false;
+  return ALLOWED_SIGNUP_EMAIL_DOMAINS.has(domain);
+}
+
 export function validateSignupEmail(
   email: string,
   lang: 'en' | 'bn' = 'en'
@@ -718,15 +814,15 @@ export function validateSignupEmail(
           : 'Please enter a valid email address (e.g. name@gmail.com).',
     };
   }
-  if (isDisposableEmail(cleanEmail)) {
+  if (isDisposableEmail(cleanEmail) || !isAllowedSignupEmailProvider(cleanEmail)) {
     return {
       valid: false,
       cleanEmail,
       canonicalEmail: canonicalizeEmail(cleanEmail),
       reason:
         lang === 'bn'
-          ? 'টেম্পোরারি বা ডিসপোজেবল ইমেইল অনুমোদিত নয়। আপনার আসল Gmail বা স্থায়ী ইমেইল ব্যবহার করুন।'
-          : 'Temporary or disposable email addresses are not allowed. Please use a real Gmail or permanent email.',
+          ? 'এই টেম্পোরারি বা অসমর্থিত ইমেইল অনুমোদিত নয়। শুধুমাত্র Gmail, Yahoo, Hotmail এবং Outlook ব্যবহার করা যাবে।'
+          : 'This disposable or unsupported email is not allowed. Only Gmail, Yahoo Mail, Hotmail, and Outlook are permitted.',
     };
   }
   return {
@@ -866,6 +962,54 @@ export function canAddGroupMembers(
   return { allowed: true, needsApproval: false };
 }
 
+export function canSendInGroupChat(
+  chat: Pick<Chat, 'type' | 'ownerUid' | 'createdBy' | 'adminUids' | 'restrictions'>,
+  uid: string,
+  messageType: 'text' | 'voice' | 'image' | 'video' | 'file' | 'sticker' | 'reel_share' = 'text'
+): { allowed: boolean; reason?: string } {
+  if (chat.type !== 'group') return { allowed: true };
+  if (isGroupAdmin(chat, uid)) return { allowed: true };
+  if (chat.restrictions?.adminsOnlyMessages) {
+    return { allowed: false, reason: 'Only group admins can send messages.' };
+  }
+  if (
+    chat.restrictions?.blockMediaAttachments &&
+    (messageType === 'image' || messageType === 'video' || messageType === 'file' || messageType === 'voice')
+  ) {
+    return { allowed: false, reason: 'Media and file sharing is restricted by group admins.' };
+  }
+  return { allowed: true };
+}
+
+export function canEditGroupInfo(
+  chat: Pick<Chat, 'type' | 'ownerUid' | 'createdBy' | 'adminUids' | 'restrictions' | 'participantIds'>,
+  uid: string
+): boolean {
+  if (chat.type !== 'group' || !chat.participantIds.includes(uid)) return false;
+  if (isGroupAdmin(chat, uid)) return true;
+  return chat.restrictions?.onlyAdminsEditInfo === false;
+}
+
+export function isValidHighlightTitle(title: string): boolean {
+  const clean = title.trim();
+  return clean.length >= 1 && clean.length <= 36;
+}
+
+export function isHomeStoryVisibleToUser(
+  story: Pick<Story, 'authorId' | 'expiresAt' | 'privacy'>,
+  author: Pick<UserPublic, 'uid' | 'isPrivate' | 'isDeactivated'> | undefined,
+  viewerUid: string | null,
+  followingIds: string[],
+  nowMs: number = Date.now()
+): boolean {
+  if (!isStoryActive(story, nowMs)) return false;
+  if (!author || author.isDeactivated) return false;
+  if (viewerUid && story.authorId === viewerUid) return true;
+  if (!viewerUid) return false;
+  if (!followingIds.includes(story.authorId)) return false;
+  return true;
+}
+
 export function canPostInBroadcast(
   channel: Pick<BroadcastChannel, 'ownerUid' | 'adminUids' | 'collaboratorUids'>,
   uid: string
@@ -949,7 +1093,7 @@ export function mapFirebaseAuthError(error: unknown, lang: 'en' | 'bn' = 'en'): 
   if (full.includes('auth/operation-not-allowed')) {
     return lang === 'bn'
       ? 'সাইন-ইন পদ্ধতি চালু নেই। ইমেইল ওটিপি বা ইউজারনেম লগইন ব্যবহার করুন।'
-      : 'Email/Password provider is disabled in Firebase Console for project ai-studio-applet-webapp-7613c.';
+      : 'Email/Password provider is disabled in Firebase Console for project socialvars.';
   }
   if (full.includes('auth/email-already-in-use')) {
     return lang === 'bn'

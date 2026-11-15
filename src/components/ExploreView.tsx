@@ -1,7 +1,11 @@
 import { useMemo, useState } from 'react';
 import { Clapperboard, Hash, Search } from 'lucide-react';
 import { useSocialVerse } from '../context/SocialVerseContext';
-import { formatCompactCount, getMaskedUserDisplay } from '../utils/validation';
+import {
+  canViewPrivateProfileContent,
+  formatCompactCount,
+  getMaskedUserDisplay,
+} from '../utils/validation';
 import { Avatar } from './Avatar';
 import { PostCard } from './PostCard';
 
@@ -23,15 +27,24 @@ export function ExploreView() {
   const [queryText, setQueryText] = useState('');
   const [filterTab, setFilterTab] = useState<'all' | 'users' | 'posts' | 'reels'>('all');
 
+  const accessiblePosts = useMemo(() => {
+    const viewerUid = isAuthenticated ? currentUser.uid : null;
+    return posts.filter((p) => {
+      const author = creators.find((c) => c.uid === p.authorId);
+      if (!author) return true;
+      return canViewPrivateProfileContent(author, viewerUid, followingIds);
+    });
+  }, [posts, creators, isAuthenticated, currentUser.uid, followingIds]);
+
   const trendingHashtags = useMemo(() => {
     const counts = new Map<string, number>();
-    posts.forEach((p) => {
+    accessiblePosts.forEach((p) => {
       p.hashtags.forEach((tag) => counts.set(tag, (counts.get(tag) || 0) + 1));
     });
     return Array.from(counts.entries())
       .sort((a, b) => b[1] - a[1])
       .slice(0, 8);
-  }, [posts]);
+  }, [accessiblePosts]);
 
   const normalizedQuery = queryText.trim().toLowerCase().replace(/^#/, '');
 
@@ -54,10 +67,10 @@ export function ExploreView() {
   const matchedPosts = useMemo(() => {
     const base =
       filterTab === 'reels'
-        ? posts.filter((p) => p.mediaType === 'reel' || p.mediaType === 'video')
+        ? accessiblePosts.filter((p) => p.mediaType === 'reel' || p.mediaType === 'video')
         : filterTab === 'posts'
-        ? posts.filter((p) => p.mediaType !== 'reel')
-        : posts;
+        ? accessiblePosts.filter((p) => p.mediaType !== 'reel')
+        : accessiblePosts;
     if (!normalizedQuery) return base;
     return base.filter(
       (p) =>
@@ -67,7 +80,7 @@ export function ExploreView() {
         p.authorId.toLowerCase().includes(normalizedQuery) ||
         p.hashtags.some((h) => h.toLowerCase().includes(normalizedQuery))
     );
-  }, [posts, filterTab, normalizedQuery]);
+  }, [accessiblePosts, filterTab, normalizedQuery]);
 
   return (
     <div className="space-y-5">

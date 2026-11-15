@@ -1,6 +1,5 @@
 import { useState } from 'react';
 import {
-  Bell,
   CheckCircle2,
   Code2,
   Fingerprint,
@@ -26,7 +25,6 @@ import {
   BROADCAST_MIN_FOLLOWERS,
   REPORT_SUGGESTED_REASONS,
   canOpenBroadcastChannel,
-  formatRelativeTime,
   getMaskedUserDisplay,
 } from '../utils/validation';
 import { Avatar } from './Avatar';
@@ -49,8 +47,6 @@ export function SettingsAndModals() {
     setLanguage,
     theme,
     setTheme,
-    notifications,
-    markAllNotificationsRead,
     creators,
     unblockUser,
     changePassword,
@@ -104,65 +100,6 @@ export function SettingsAndModals() {
           >
             {t.auth.biometricUnlock}
           </button>
-        </div>
-      </div>
-    );
-  }
-
-  if (subscreen === 'notifications') {
-    return (
-      <div
-        role="dialog"
-        aria-modal="true"
-        aria-label={t.settings.notifications}
-        className="fixed inset-0 z-50 bg-slate-950/60 backdrop-blur-sm flex items-center justify-center p-4"
-      >
-        <div className="liquid-glass rounded-3xl p-6 max-w-lg w-full max-h-[85vh] flex flex-col space-y-4">
-          <div className="flex items-center justify-between">
-            <h2 className="text-lg font-bold text-slate-900 dark:text-white flex items-center gap-2">
-              <Bell className="w-5 h-5 text-sky-600" />
-              <span>{t.settings.notifications}</span>
-            </h2>
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={markAllNotificationsRead}
-                className="text-xs font-semibold text-sky-600 dark:text-sky-400"
-              >
-                Mark all read
-              </button>
-              <button
-                type="button"
-                aria-label="Close notifications"
-                onClick={() => setSubscreen(null)}
-                className="min-h-[44px] min-w-[44px] flex items-center justify-center text-slate-500"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-          </div>
-
-          <div className="overflow-y-auto divide-y divide-slate-200/70 dark:divide-slate-800/70">
-            {notifications.length === 0 ? (
-              <p className="text-sm text-slate-500 dark:text-slate-400 py-8 text-center">
-                {language === 'bn' ? 'এখনো কোনো নোটিফিকেশন নেই।' : 'No notifications yet.'}
-              </p>
-            ) : (
-              notifications.map((n) => (
-                <div key={n.id} className="py-3 flex items-start gap-3">
-                  <Avatar src={n.actorAvatar} name={n.actorUsername} size="sm" />
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm text-slate-800 dark:text-slate-200">
-                      <span className="font-semibold">@{n.actorUsername}</span> {n.summary}
-                    </p>
-                    <p className="text-xs text-slate-500 mt-0.5">
-                      {formatRelativeTime(n.createdAt, language)} {!n.read ? '· Unread' : ''}
-                    </p>
-                  </div>
-                </div>
-              ))
-            )}
-          </div>
         </div>
       </div>
     );
@@ -482,8 +419,8 @@ export function SettingsAndModals() {
                     </p>
                     <p className="text-xs text-slate-500 dark:text-slate-400">
                       {language === 'bn'
-                        ? 'শুধু অনুমোদিত ফলোয়াররা আপনার পোস্ট ও রিল দেখতে পারবে।'
-                        : 'Only approved followers can view your posts, reels, and lists.'}
+                        ? 'শুধু অনুমোদিত ফলোয়াররা আপনার পোস্ট, ভিডিও/রিলস, স্টোরি, স্টোরি হাইলাইট ও তালিকা দেখতে পারবে।'
+                        : 'Only approved followers can view your posts, videos/reels, stories, story highlights, and lists.'}
                     </p>
                   </div>
                   <input
@@ -765,7 +702,10 @@ export function SettingsAndModals() {
                                 await loginWithSavedAccount(entry);
                                 setSubscreen(null);
                               } catch (err) {
-                                showToast(err instanceof Error ? err.message : 'Sign in required');
+                                const msg = err instanceof Error ? err.message : 'Sign in required';
+                                showToast(msg);
+                                setSubscreen(null);
+                                openAuthModal(msg, entry.username || entry.email);
                               }
                             }}
                             className="flex items-center gap-2.5 min-w-0 text-left flex-1"

@@ -1,16 +1,19 @@
 import { useRef, useState } from 'react';
 import { Clapperboard, PlusSquare, Sparkles } from 'lucide-react';
 import { useSocialVerse } from '../context/SocialVerseContext';
+import { canViewPrivateProfileContent } from '../utils/validation';
 import { PostCard } from './PostCard';
 import { StoriesBar } from './StoriesBar';
 
 export function HomeFeed() {
   const {
     posts,
+    creators,
     visiblePostLimit,
     loadMorePosts,
     followingIds,
     currentUser,
+    isAuthenticated,
     t,
     setSubscreen,
     setActiveTab,
@@ -18,12 +21,19 @@ export function HomeFeed() {
   const [feedMode, setFeedMode] = useState<'recommended' | 'following'>('recommended');
   const swipeStartX = useRef<number | null>(null);
 
+  const viewerUid = isAuthenticated ? currentUser.uid : null;
+  const accessiblePosts = posts.filter((p) => {
+    const author = creators.find((c) => c.uid === p.authorId);
+    if (!author) return true;
+    return canViewPrivateProfileContent(author, viewerUid, followingIds);
+  });
+
   const filteredPosts =
     feedMode === 'following'
-      ? posts.filter(
+      ? accessiblePosts.filter(
           (p) => followingIds.includes(p.authorId) || p.authorId === currentUser.uid
         )
-      : posts;
+      : accessiblePosts;
 
   const visiblePosts = filteredPosts.slice(0, visiblePostLimit);
   const hasMore = visiblePosts.length < filteredPosts.length;

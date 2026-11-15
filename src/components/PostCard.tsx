@@ -70,7 +70,7 @@ export function PostCard({ post }: { post: Post }) {
     setIsEditing(false);
   };
 
-  const currentMedia = post.mediaUrls[mediaIdx] || post.coverUrl;
+  const currentMedia = post.mediaUrls?.[mediaIdx] || post.coverUrl;
   const isVideoMedia =
     post.mediaType === 'video' ||
     post.mediaType === 'reel' ||

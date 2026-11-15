@@ -5,19 +5,24 @@ import {
   canAddGroupMembers,
   canChangeNickname,
   canChangeUsername,
+  canEditGroupInfo,
   canMessageUser,
   canOpenBroadcastChannel,
   canPostInBroadcast,
   canRemoveGroupMember,
+  canSendInGroupChat,
   canViewPrivateProfileContent,
   canonicalizeEmail,
   extractHashtags,
   formatCompactCount,
   getMaskedUserDisplay,
+  isAllowedSignupEmailProvider,
   isDisposableEmail,
+  isHomeStoryVisibleToUser,
   isStoryActive,
   isValidBio,
   isValidDisplayName,
+  isValidHighlightTitle,
   isValidPostCaption,
   isValidUsername,
   isValidWebsiteUrl,
@@ -58,22 +63,47 @@ test('email canonicalization enforces one account per Gmail and blocks disposabl
     'b@burnermail.io',
     'd@mytemp.email',
     'e@tmpmail.org',
+    'f@1secmail.com',
+    'g@mail.tm',
+    'h@mail.gw',
+    'i@emailnator.com',
+    'j@tmailor.com',
+    'k@fviainboxes.com',
   ]) {
     assert.equal(isDisposableEmail(temp), true, `Expected ${temp} to be blocked`);
     assert.equal(validateSignupEmail(temp, 'en').valid, false);
     assert.equal(validateSignupEmail(temp, 'bn').valid, false);
   }
 
-  // Real providers allowed
-  for (const real of [
+  // Allowed providers strictly limited to Gmail, Yahoo, Hotmail, and Outlook
+  for (const allowed of [
     'rafi.ahmed@gmail.com',
+    'rafi@googlemail.com',
     'aria@yahoo.com',
+    'aria.bd@ymail.com',
     'studio@outlook.com',
+    'member@hotmail.com',
+    'team@live.com',
+    'legacy@msn.com',
+  ]) {
+    assert.equal(isDisposableEmail(allowed), false, `Expected ${allowed} not disposable`);
+    assert.equal(isAllowedSignupEmailProvider(allowed), true, `Expected ${allowed} in allowlist`);
+    assert.equal(validateSignupEmail(allowed, 'en').valid, true);
+    assert.equal(validateSignupEmail(allowed, 'bn').valid, true);
+  }
+
+  // Other unknown/custom/third-party domains blocked on signup
+  for (const blocked of [
     'creator@icloud.com',
     'dev@proton.me',
+    'someone@customdomain.xyz',
+    'test@randommail.org',
   ]) {
-    assert.equal(isDisposableEmail(real), false, `Expected ${real} to be allowed`);
-    assert.equal(validateSignupEmail(real, 'en').valid, true);
+    assert.equal(isAllowedSignupEmailProvider(blocked), false, `Expected ${blocked} rejected`);
+    const resEn = validateSignupEmail(blocked, 'en');
+    assert.equal(resEn.valid, false);
+    assert.match(resEn.reason || '', /not allowed/i);
+    assert.equal(validateSignupEmail(blocked, 'bn').valid, false);
   }
 });
 
@@ -188,7 +218,7 @@ test('messaging privacy gate enforces blocklist and follower rules', () => {
 
 test('firebase auth error mapping returns actionable bilingual guidance', () => {
   const opMsg = mapFirebaseAuthError({ code: 'auth/operation-not-allowed' }, 'en');
-  assert.match(opMsg, /ai-studio-applet-webapp-7613c/);
+  assert.match(opMsg, /socialvars/);
   const credBn = mapFirebaseAuthError({ code: 'auth/invalid-credential' }, 'bn');
   assert.match(credBn, /সঠিক নয়/);
 });
@@ -203,4 +233,61 @@ test('compact number formatting and bilingual translation key parity', () => {
   assert.deepEqual(Object.keys(TRANSLATIONS.en.messages), Object.keys(TRANSLATIONS.bn.messages));
   assert.deepEqual(Object.keys(TRANSLATIONS.en.profile), Object.keys(TRANSLATIONS.bn.profile));
   assert.deepEqual(Object.keys(TRANSLATIONS.en.settings), Object.keys(TRANSLATIONS.bn.settings));
+});
+
+test('group restrictions and highlight validation rules', () => {
+  const chat = {
+    type: 'group' as const,
+    ownerUid: 'u_owner',
+    createdBy: 'u_owner',
+    adminUids: ['u_admin'],
+    participantIds: ['u_owner', 'u_admin', 'u_member'],
+    restrictions: {
+      adminsOnlyMessages: true,
+      onlyAdminsEditInfo: true,
+      blockMediaAttachments: true,
+    },
+  };
+  assert.equal(canSendInGroupChat(chat, 'u_owner', 'text').allowed, true);
+  assert.equal(canSendInGroupChat(chat, 'u_admin', 'image').allowed, true);
+  assert.equal(canSendInGroupChat(chat, 'u_member', 'text').allowed, false);
+  assert.equal(canEditGroupInfo(chat, 'u_admin'), true);
+  assert.equal(canEditGroupInfo(chat, 'u_member'), false);
+
+  const mediaRestrictedOnly = {
+    ...chat,
+    restrictions: { adminsOnlyMessages: false, onlyAdminsEditInfo: false, blockMediaAttachments: true },
+  };
+  assert.equal(canSendInGroupChat(mediaRestrictedOnly, 'u_member', 'text').allowed, true);
+  assert.equal(canSendInGroupChat(mediaRestrictedOnly, 'u_member', 'image').allowed, false);
+  assert.equal(canEditGroupInfo(mediaRestrictedOnly, 'u_member'), true);
+
+  assert.equal(isValidHighlightTitle('Dhaka Trip'), true);
+  assert.equal(isValidHighlightTitle('   '), false);
+  assert.equal(isValidHighlightTitle('A'.repeat(37)), false);
+});
+
+test('home stories bar only shows followed friends and own active stories', () => {
+  const now = Date.UTC(2026, 10, 15, 12, 0, 0);
+  const future = new Date(now + 3600_000).toISOString();
+  const storyFriend = { authorId: 'u_friend', expiresAt: future, privacy: 'everyone' as const };
+  const storyStranger = { authorId: 'u_stranger', expiresAt: future, privacy: 'everyone' as const };
+  const storyOwn = { authorId: 'u_me', expiresAt: future, privacy: 'everyone' as const };
+
+  assert.equal(
+    isHomeStoryVisibleToUser(storyOwn, { uid: 'u_me', isPrivate: true, isDeactivated: false }, 'u_me', [], now),
+    true
+  );
+  assert.equal(
+    isHomeStoryVisibleToUser(storyFriend, { uid: 'u_friend', isPrivate: true, isDeactivated: false }, 'u_me', ['u_friend'], now),
+    true
+  );
+  assert.equal(
+    isHomeStoryVisibleToUser(storyStranger, { uid: 'u_stranger', isPrivate: false, isDeactivated: false }, 'u_me', ['u_friend'], now),
+    false
+  );
+  assert.equal(
+    isHomeStoryVisibleToUser(storyStranger, { uid: 'u_stranger', isPrivate: false, isDeactivated: false }, null, [], now),
+    false
+  );
 });

@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 
 interface AvatarProps {
   src?: string;
-  name: string;
+  name?: string;
   size?: 'sm' | 'md' | 'lg' | 'xl';
   online?: boolean;
   className?: string;
@@ -22,7 +22,9 @@ export function Avatar({ src, name, size = 'md', online, className = '' }: Avata
     setFailed(false);
   }, [src]);
 
-  const initials = name
+  const safeName = (name || 'SocialVerse').trim() || 'SocialVerse';
+
+  const initials = safeName
     .split(' ')
     .filter(Boolean)
     .slice(0, 2)
@@ -34,14 +36,14 @@ export function Avatar({ src, name, size = 'md', online, className = '' }: Avata
       {src && !failed ? (
         <img
           src={src}
-          alt={name}
+          alt={safeName}
           referrerPolicy="no-referrer"
           onError={() => setFailed(true)}
           className="w-full h-full rounded-full object-cover border border-white/60 dark:border-white/15"
         />
       ) : (
         <div
-          aria-label={name}
+          aria-label={safeName}
           className="w-full h-full rounded-full bg-gradient-to-br from-sky-500 to-cyan-700 text-white font-semibold flex items-center justify-center border border-white/50 dark:border-white/15"
         >
           {initials}

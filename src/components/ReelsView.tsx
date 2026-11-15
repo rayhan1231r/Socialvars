@@ -17,7 +17,7 @@ import {
   X,
 } from 'lucide-react';
 import { useSocialVerse } from '../context/SocialVerseContext';
-import { formatCompactCount } from '../utils/validation';
+import { canViewPrivateProfileContent, formatCompactCount } from '../utils/validation';
 import { Avatar } from './Avatar';
 import { CommentsDrawer } from './CommentsDrawer';
 
@@ -32,6 +32,7 @@ export function ReelsView({ embedded = false }: { embedded?: boolean }) {
     posts,
     creators,
     currentUser,
+    isAuthenticated,
     followingIds,
     toggleFollow,
     toggleLikePost,
@@ -45,9 +46,15 @@ export function ReelsView({ embedded = false }: { embedded?: boolean }) {
     t,
   } = useSocialVerse();
 
-  const reelPosts = posts.filter(
-    (p) => p.mediaType === 'reel' || p.mediaType === 'video' || p.mediaUrls.length > 0
-  );
+  const viewerUid = isAuthenticated ? currentUser.uid : null;
+  const reelPosts = posts.filter((p) => {
+    if (p.mediaType !== 'reel' && p.mediaType !== 'video' && p.mediaUrls.length === 0) {
+      return false;
+    }
+    const author = creators.find((c) => c.uid === p.authorId);
+    if (!author) return true;
+    return canViewPrivateProfileContent(author, viewerUid, followingIds);
+  });
 
   const [index, setIndex] = useState(0);
   const [playing, setPlaying] = useState(true);
@@ -360,7 +367,7 @@ export function ReelsView({ embedded = false }: { embedded?: boolean }) {
       >
         <div className="flex items-center gap-2 pointer-events-auto">
           <span className="text-sm font-display font-bold text-white">{t.explore.reels}</span>
-          <span className="text-[11px] font-mono-num px-2 py-0.5 rounded-full bg-white/15 text-white/90">
+          <span className="text-[11px] font-mono-num text-white/80">
             {safeIndex + 1} / {reelPosts.length}
           </span>
         </div>

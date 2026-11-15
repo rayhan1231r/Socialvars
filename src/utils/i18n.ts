@@ -157,6 +157,18 @@ export interface TranslationBundle {
     starredMessages: string;
     forwardedLabel: string;
     backToFeed: string;
+    groupInfo: string;
+    groupBio: string;
+    groupPhoto: string;
+    groupRestrictions: string;
+    adminsOnlyMessages: string;
+    onlyAdminsEditInfo: string;
+    blockMediaAttachments: string;
+    leaveGroup: string;
+    promoteAdmin: string;
+    demoteAdmin: string;
+    transferOwner: string;
+    addMembers: string;
   };
   profile: {
     posts: string;
@@ -190,6 +202,11 @@ export interface TranslationBundle {
     removeCover: string;
     saveChanges: string;
     reportUser: string;
+    highlightsTitle: string;
+    newHighlight: string;
+    addHighlightTitle: string;
+    deleteHighlight: string;
+    back: string;
   };
   ai: {
     title: string;
@@ -389,6 +406,18 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationBundle> = {
       starredMessages: 'Starred Messages',
       forwardedLabel: 'Forwarded',
       backToFeed: 'Back to Feed',
+      groupInfo: 'Group Info & Settings',
+      groupBio: 'Group bio',
+      groupPhoto: 'Group photo',
+      groupRestrictions: 'Group Restrictions',
+      adminsOnlyMessages: 'Only admins can send messages',
+      onlyAdminsEditInfo: 'Only admins can edit group info',
+      blockMediaAttachments: 'Restrict media & file sharing',
+      leaveGroup: 'Leave Group',
+      promoteAdmin: 'Make Admin',
+      demoteAdmin: 'Remove Admin',
+      transferOwner: 'Transfer Owner',
+      addMembers: 'Add Members',
     },
     profile: {
       posts: 'Posts',
@@ -422,6 +451,11 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationBundle> = {
       removeCover: 'Remove cover',
       saveChanges: 'Save Changes',
       reportUser: 'Report User',
+      highlightsTitle: 'Highlights',
+      newHighlight: 'New',
+      addHighlightTitle: 'Create Highlight',
+      deleteHighlight: 'Delete highlight',
+      back: 'Back',
     },
     ai: {
       title: 'Gemini Profile Assistant',
@@ -619,6 +653,18 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationBundle> = {
       starredMessages: 'স্টারড মেসেজ',
       forwardedLabel: 'ফরওয়ার্ডেড',
       backToFeed: 'হোমে ফিরুন',
+      groupInfo: 'গ্রুপ তথ্য ও সেটিংস',
+      groupBio: 'গ্রুপ বায়ো',
+      groupPhoto: 'গ্রুপের ছবি',
+      groupRestrictions: 'গ্রুপ রেস্ট্রিকশন',
+      adminsOnlyMessages: 'শুধুমাত্র অ্যাডমিনরা মেসেজ পাঠাতে পারবেন',
+      onlyAdminsEditInfo: 'শুধুমাত্র অ্যাডমিনরা গ্রুপ তথ্য এডিট করবেন',
+      blockMediaAttachments: 'মিডিয়া ও ফাইল পাঠানো সীমিত করুন',
+      leaveGroup: 'গ্রুপ ত্যাগ করুন',
+      promoteAdmin: 'অ্যাডমিন বানান',
+      demoteAdmin: 'অ্যাডমিন সরান',
+      transferOwner: 'মালিকানা হস্তান্তর',
+      addMembers: 'সদস্য যোগ করুন',
     },
     profile: {
       posts: 'পোস্ট',
@@ -652,6 +698,11 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationBundle> = {
       removeCover: 'কভার মুছুন',
       saveChanges: 'পরিবর্তন সংরক্ষণ করুন',
       reportUser: 'ইউজার রিপোর্ট করুন',
+      highlightsTitle: 'হাইলাইটস',
+      newHighlight: 'নতুন',
+      addHighlightTitle: 'নতুন হাইলাইট তৈরি করুন',
+      deleteHighlight: 'হাইলাইট মুছুন',
+      back: 'পিছনে যান',
     },
     ai: {
       title: 'জেমিনি প্রোফাইল অ্যাসিস্ট্যান্ট',

@@ -208,10 +208,12 @@ export function AuthPanel({
   onDismiss,
   reason,
   initialMode = 'signin',
+  initialIdentifier,
 }: {
   onDismiss?: () => void;
   reason?: string | null;
   initialMode?: 'signin' | 'signup';
+  initialIdentifier?: string | null;
 }) {
   const {
     t,
@@ -238,7 +240,7 @@ export function AuthPanel({
   const [info, setInfo] = useState<string | null>(null);
 
   // Sign In state
-  const [identifier, setIdentifier] = useState('');
+  const [identifier, setIdentifier] = useState(initialIdentifier || '');
   const [loginPassword, setLoginPassword] = useState('');
   const [showLoginPassword, setShowLoginPassword] = useState(false);
   const [saveLogin, setSaveLogin] = useState(true);
@@ -280,6 +282,14 @@ export function AuthPanel({
     }
     return null;
   }, [signupEmail, language]);
+
+  // Sync prefilled identifier when AuthPanel opens for a saved account requiring password re-entry
+  useEffect(() => {
+    if (initialIdentifier) {
+      setIdentifier(initialIdentifier);
+      setMode('signin');
+    }
+  }, [initialIdentifier]);
 
   // Resend cooldown timer
   useEffect(() => {
@@ -585,9 +595,16 @@ export function AuthPanel({
     setError(null);
     setLoading(true);
     try {
-      await resetPasswordWithOtp(resetToken, resetEmail, resetNewPass);
+      const res = await resetPasswordWithOtp(resetToken, resetEmail, resetNewPass);
       setMode('signin');
-      setInfo(language === 'bn' ? 'নতুন পাসওয়ার্ড সেট হয়েছে। এখন সাইন ইন করুন।' : 'Password updated. Sign in now.');
+      setIdentifier(resetEmail);
+      setInfo(
+        res?.method === 'email_link' && res.message
+          ? res.message
+          : language === 'bn'
+          ? 'নতুন পাসওয়ার্ড সেট হয়েছে। এখন সাইন ইন করুন।'
+          : 'Password updated. Sign in now.'
+      );
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not reset password.');
     } finally {
@@ -842,7 +859,7 @@ export function AuthPanel({
                   {t.auth.emailLabel}
                 </p>
                 <p className="text-[11px] text-slate-500 dark:text-slate-400">
-                  {language === 'bn' ? 'একটি সক্রিয় ইমেইল ব্যবহার করুন' : 'Use an active Gmail or email inbox'}
+                  {language === 'bn' ? 'অনুমোদিত ইমেইল প্রোভাইডার ব্যবহার করুন' : 'Gmail · Yahoo · Hotmail · Outlook only'}
                 </p>
               </div>
             </div>
@@ -871,8 +888,8 @@ export function AuthPanel({
 
             <p className="text-[11px] text-slate-500 dark:text-slate-400">
               {language === 'bn'
-                ? 'একটি Gmail / ইমেইল দিয়ে একটি অ্যাকাউন্ট খোলা যাবে (টেম্পোরারি মেইল অনুমোদিত নয়)।'
-                : 'One account per Gmail/email · Temporary or disposable emails are blocked.'}
+                ? 'শুধুমাত্র Gmail, Yahoo, Hotmail ও Outlook অনুমোদিত। প্রতিটি ইমেইল দিয়ে একটি অ্যাকাউন্ট খোলা যাবে (টেম্পোরারি মেইল ব্লক করা হয়)।'
+                : 'Allowed: Gmail, Yahoo Mail, Hotmail, Outlook · One account per email · Temporary/other domains blocked.'}
             </p>
           </div>
 
@@ -893,25 +910,38 @@ export function AuthPanel({
             >
               <p>{error}</p>
               {existingAccountEmail && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    setIdentifier(existingAccountEmail);
-                    setError(null);
-                    setInfo(
-                      language === 'bn'
-                        ? `${existingAccountEmail}-এর পাসওয়ার্ড দিয়ে সাইন ইন করুন।`
-                        : `Sign in using your password for ${existingAccountEmail}.`
-                    );
-                    setExistingAccountEmail(null);
-                    setMode('signin');
-                  }}
-                  className="w-full min-h-[38px] rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-xs font-semibold transition-colors"
-                >
-                  {language === 'bn'
-                    ? 'এই ইমেইল দিয়ে সাইন ইন করুন →'
-                    : 'Sign In with this email →'}
-                </button>
+                <div className="flex flex-col sm:flex-row gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIdentifier(existingAccountEmail);
+                      setError(null);
+                      setInfo(
+                        language === 'bn'
+                          ? `${existingAccountEmail}-এর পাসওয়ার্ড দিয়ে সাইন ইন করুন।`
+                          : `Sign in using your password for ${existingAccountEmail}.`
+                      );
+                      setExistingAccountEmail(null);
+                      setMode('signin');
+                    }}
+                    className="flex-1 min-h-[40px] px-3 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-xs font-semibold transition-colors"
+                  >
+                    {language === 'bn'
+                      ? 'এই ইমেইল দিয়ে সাইন ইন করুন →'
+                      : 'Sign In with this email →'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSignupEmail('');
+                      setError(null);
+                      setExistingAccountEmail(null);
+                    }}
+                    className="min-h-[40px] px-3 rounded-xl liquid-glass-btn text-slate-800 dark:text-slate-100 text-xs font-semibold"
+                  >
+                    {language === 'bn' ? 'নতুন ইমেইল ব্যবহার করুন' : 'Use a different email'}
+                  </button>
+                </div>
               )}
             </div>
           )}
@@ -1313,8 +1343,46 @@ export function AuthPanel({
           </div>
 
           {error && (
-            <div role="alert" className="p-3 rounded-2xl bg-rose-500/10 border border-rose-500/30 text-xs font-medium text-rose-700 dark:text-rose-300">
-              {error}
+            <div
+              role="alert"
+              className="p-3 rounded-2xl bg-rose-500/10 border border-rose-500/30 text-xs font-medium text-rose-700 dark:text-rose-300 space-y-2.5"
+            >
+              <p>{error}</p>
+              {existingAccountEmail && (
+                <div className="flex flex-col sm:flex-row gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIdentifier(existingAccountEmail);
+                      setError(null);
+                      setInfo(
+                        language === 'bn'
+                          ? `${existingAccountEmail}-এর পাসওয়ার্ড দিয়ে সাইন ইন করুন।`
+                          : `Sign in using your password for ${existingAccountEmail}.`
+                      );
+                      setExistingAccountEmail(null);
+                      setMode('signin');
+                    }}
+                    className="flex-1 min-h-[40px] px-3 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-xs font-semibold transition-colors"
+                  >
+                    {language === 'bn'
+                      ? 'এই ইমেইল দিয়ে সাইন ইন করুন →'
+                      : 'Sign In with this email →'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSignupEmail('');
+                      setError(null);
+                      setExistingAccountEmail(null);
+                      setMode('signup_email');
+                    }}
+                    className="min-h-[40px] px-3 rounded-xl liquid-glass-btn text-slate-800 dark:text-slate-100 text-xs font-semibold"
+                  >
+                    {language === 'bn' ? 'নতুন ইমেইল ব্যবহার করুন' : 'Use a different email'}
+                  </button>
+                </div>
+              )}
             </div>
           )}
 
@@ -1482,7 +1550,7 @@ export function AuthPanel({
 }
 
 export function AuthModal() {
-  const { authModalOpen, authModalReason, closeAuthModal } = useSocialVerse();
+  const { authModalOpen, authModalReason, authModalPrefill, closeAuthModal } = useSocialVerse();
   if (!authModalOpen) return null;
 
   return (
@@ -1501,7 +1569,11 @@ export function AuthModal() {
         >
           <X className="w-5 h-5" />
         </button>
-        <AuthPanel onDismiss={closeAuthModal} reason={authModalReason} />
+        <AuthPanel
+          onDismiss={closeAuthModal}
+          reason={authModalReason}
+          initialIdentifier={authModalPrefill}
+        />
       </div>
     </div>
   );

@@ -19,6 +19,7 @@ import type {
   ChatMessage,
   ChatThemeConfig,
   FriendRequest,
+  GroupRestrictions,
   NicknameFontStyle,
   NoteItem,
   Post,
@@ -27,6 +28,8 @@ import type {
   ReportItem,
   StickerItem,
   Story,
+  StoryHighlight,
+  StoryHighlightItem,
   UserPrivate,
   UserPublic,
 } from './src/types/social';
@@ -37,9 +40,12 @@ import {
   canAddGroupMembers,
   canChangeNickname,
   canChangeUsername,
+  canEditGroupInfo,
   canOpenBroadcastChannel,
   canPostInBroadcast,
   canRemoveGroupMember,
+  canSendInGroupChat,
+  DISPOSABLE_HOST_PATTERN,
   canonicalizeEmail,
   extractHashtags,
   isDisposableEmail,
@@ -49,6 +55,7 @@ import {
   isValidCommentText,
   isValidDisplayName,
   isValidEmailFormat,
+  isValidHighlightTitle,
   isValidPostCaption,
   isValidUsername,
   normalizeUsername,
@@ -75,11 +82,18 @@ const ai = new GoogleGenAI({
   },
 });
 
-const SESSION_SECRET =
-  process.env.AUTH_SESSION_SECRET ||
-  crypto.createHash('sha256').update(`socialverse:${firebaseConfig.projectId}`).digest('hex');
+const FALLBACK_SESSION_SECRET = crypto
+  .createHash('sha256')
+  .update(`socialverse:${firebaseConfig.projectId}`)
+  .digest('hex');
+
+const SESSION_SECRET = process.env.AUTH_SESSION_SECRET || FALLBACK_SESSION_SECRET;
 
 const LOOKUP_AES_KEY = crypto.createHash('sha256').update(SESSION_SECRET).digest();
+const FALLBACK_LOOKUP_AES_KEY = crypto
+  .createHash('sha256')
+  .update(FALLBACK_SESSION_SECRET)
+  .digest();
 
 const DATA_DIR = path.resolve(process.cwd(), '.data');
 const STORE_PATH = path.join(DATA_DIR, 'socialverse-store.json');
@@ -120,6 +134,7 @@ interface PersistedStore {
   likedPostIdsByUser: Record<string, string[]>;
   savedPostIdsByUser: Record<string, string[]>;
   stories: Story[];
+  storyHighlights: StoryHighlight[];
   chats: Chat[];
   messagesByChat: Record<string, ChatMessage[]>;
   notes: NoteItem[];
@@ -145,6 +160,7 @@ function createEmptyStore(): PersistedStore {
     likedPostIdsByUser: {},
     savedPostIdsByUser: {},
     stories: [],
+    storyHighlights: [],
     chats: [],
     messagesByChat: {},
     notes: [],
@@ -258,14 +274,14 @@ function encryptLookupEmail(email: string): string {
   return `${iv.toString('base64url')}.${tag.toString('base64url')}.${enc.toString('base64url')}`;
 }
 
-function decryptLookupEmail(token: string): string | null {
+function decryptWithKey(token: string, key: Buffer): string | null {
   try {
     const parts = token.split('.');
     if (parts.length !== 3) return null;
     const [ivB64, tagB64, encB64] = parts;
     const decipher = crypto.createDecipheriv(
       'aes-256-gcm',
-      LOOKUP_AES_KEY,
+      key,
       Buffer.from(ivB64, 'base64url')
     );
     decipher.setAuthTag(Buffer.from(tagB64, 'base64url'));
@@ -277,6 +293,15 @@ function decryptLookupEmail(token: string): string | null {
   } catch {
     return null;
   }
+}
+
+function decryptLookupEmail(token: string): string | null {
+  return (
+    decryptWithKey(token, LOOKUP_AES_KEY) ||
+    (!LOOKUP_AES_KEY.equals(FALLBACK_LOOKUP_AES_KEY)
+      ? decryptWithKey(token, FALLBACK_LOOKUP_AES_KEY)
+      : null)
+  );
 }
 
 // --- Firebase Auth & Firestore REST Persistence Helpers ---
@@ -409,7 +434,8 @@ async function firestoreGetDoc(
 async function firestoreCommitWrites(
   writes: Array<Record<string, unknown>>,
   idToken: string
-): Promise<boolean> {
+): Promise<{ ok: boolean; status?: number; errorText?: string }> {
+  if (writes.length === 0) return { ok: true };
   try {
     const url = `https://firestore.googleapis.com/v1/projects/${firebaseConfig.projectId}/databases/${firebaseConfig.firestoreDatabaseId}/documents:commit?key=${encodeURIComponent(firebaseConfig.apiKey)}`;
     const res = await fetch(url, {
@@ -423,31 +449,19 @@ async function firestoreCommitWrites(
     if (!res.ok) {
       const errBody = await res.text().catch(() => '');
       console.warn('Firestore commit warning:', res.status, errBody.slice(0, 300));
-      return false;
+      return { ok: false, status: res.status, errorText: errBody };
     }
-    return true;
+    return { ok: true };
   } catch (err) {
     console.warn('Firestore commit exception:', err);
-    return false;
+    return { ok: false, errorText: err instanceof Error ? err.message : 'network error' };
   }
 }
 
-async function persistUserDocsToFirestore(params: {
-  uid: string;
-  userPublic: UserPublic;
-  userPrivate: UserPrivate;
-  canonicalEmail: string;
-  idToken: string;
-}): Promise<void> {
-  const { uid, userPublic, userPrivate, canonicalEmail, idToken } = params;
-  const emailHash = sha256Hex(canonicalEmail);
-  const encEmail = encryptLookupEmail(userPrivate.email);
-
-  // Respect firestore.rules size guards (photoUrl/coverUrl <= 200000)
+function buildPublicProfileFields(userPublic: UserPublic): Record<string, unknown> {
   const safePhotoUrl = userPublic.photoUrl.length <= 200000 ? userPublic.photoUrl : '';
   const safeCoverUrl = userPublic.coverUrl.length <= 200000 ? userPublic.coverUrl : '';
-
-  const publicFields: Record<string, unknown> = {
+  return {
     uid: userPublic.uid,
     username: userPublic.username,
     displayName: userPublic.displayName,
@@ -461,14 +475,20 @@ async function persistUserDocsToFirestore(params: {
     interests: userPublic.interests || [],
     isPrivate: userPublic.isPrivate,
     isDeactivated: Boolean(userPublic.isDeactivated),
+    deactivatedUntil: userPublic.deactivatedUntil ?? null,
     followersCount: userPublic.followersCount,
     followingCount: userPublic.followingCount,
     postsCount: userPublic.postsCount,
     onlineStatus: userPublic.onlineStatus || 'online',
+    lastSeenAt: userPublic.lastSeenAt ?? null,
+    lastNicknameChangedAt: userPublic.lastNicknameChangedAt ?? null,
+    lastUsernameChangedAt: userPublic.lastUsernameChangedAt ?? null,
     onboardingCompleted: true,
   };
+}
 
-  const privateFields: Record<string, unknown> = {
+function buildPrivateProfileFields(userPrivate: UserPrivate): Record<string, unknown> {
+  return {
     uid: userPrivate.uid,
     email: userPrivate.email,
     language: userPrivate.language,
@@ -483,26 +503,53 @@ async function persistUserDocsToFirestore(params: {
     blockedUserIds: userPrivate.blockedUserIds,
     mutedStoryUserIds: userPrivate.mutedStoryUserIds,
   };
+}
 
-  const writes = [
-    {
+async function createUserDocsInFirestore(params: {
+  uid: string;
+  userPublic: UserPublic;
+  userPrivate: UserPrivate;
+  canonicalEmail: string;
+  idToken: string;
+}): Promise<{ ok: boolean; status?: number; errorText?: string }> {
+  const { uid, userPublic, userPrivate, canonicalEmail, idToken } = params;
+  const emailHash = sha256Hex(canonicalEmail);
+  const encEmail = encryptLookupEmail(userPrivate.email);
+
+  const [existingPub, existingPriv, existingUsername, existingEmailClaim] = await Promise.all([
+    firestoreGetDoc(`users/${uid}`, idToken),
+    firestoreGetDoc(`users/${uid}/private/info`, idToken),
+    firestoreGetDoc(`usernames/${userPublic.username}`, idToken),
+    firestoreGetDoc(`email_claims/${emailHash}`, idToken),
+  ]);
+
+  const writes: Array<Record<string, unknown>> = [];
+
+  if (!existingPub) {
+    writes.push({
       update: {
         name: firestoreDocPathName(`users/${uid}`),
-        fields: toFirestoreFields(publicFields),
+        fields: toFirestoreFields(buildPublicProfileFields(userPublic)),
       },
       updateTransforms: [
         { fieldPath: 'createdAt', setToServerValue: 'REQUEST_TIME' },
         { fieldPath: 'updatedAt', setToServerValue: 'REQUEST_TIME' },
       ],
-    },
-    {
+    });
+  }
+
+  if (!existingPriv) {
+    writes.push({
       update: {
         name: firestoreDocPathName(`users/${uid}/private/info`),
-        fields: toFirestoreFields(privateFields),
+        fields: toFirestoreFields(buildPrivateProfileFields(userPrivate)),
       },
       updateTransforms: [{ fieldPath: 'updatedAt', setToServerValue: 'REQUEST_TIME' }],
-    },
-    {
+    });
+  }
+
+  if (!existingUsername) {
+    writes.push({
       update: {
         name: firestoreDocPathName(`usernames/${userPublic.username}`),
         fields: toFirestoreFields({
@@ -512,8 +559,11 @@ async function persistUserDocsToFirestore(params: {
         }),
       },
       updateTransforms: [{ fieldPath: 'createdAt', setToServerValue: 'REQUEST_TIME' }],
-    },
-    {
+    });
+  }
+
+  if (!existingEmailClaim) {
+    writes.push({
       update: {
         name: firestoreDocPathName(`email_claims/${emailHash}`),
         fields: toFirestoreFields({
@@ -523,9 +573,99 @@ async function persistUserDocsToFirestore(params: {
         }),
       },
       updateTransforms: [{ fieldPath: 'createdAt', setToServerValue: 'REQUEST_TIME' }],
+    });
+  }
+
+  return firestoreCommitWrites(writes, idToken);
+}
+
+async function updateUserPublicInFirestore(params: {
+  uid: string;
+  userPublic: UserPublic;
+  previousUsername?: string;
+  emailForClaim?: string;
+  idToken: string;
+}): Promise<boolean> {
+  const { uid, userPublic, previousUsername, emailForClaim, idToken } = params;
+  const fields = buildPublicProfileFields(userPublic);
+  // Omit createdAt & counters from updateMask so firestore.rules allows partial profile updates cleanly
+  delete fields.followersCount;
+  delete fields.followingCount;
+  delete fields.postsCount;
+  const fieldPaths = Object.keys(fields);
+
+  const writes: Array<Record<string, unknown>> = [
+    {
+      update: {
+        name: firestoreDocPathName(`users/${uid}`),
+        fields: toFirestoreFields(fields),
+      },
+      updateMask: { fieldPaths },
+      updateTransforms: [{ fieldPath: 'updatedAt', setToServerValue: 'REQUEST_TIME' }],
     },
   ];
 
+  if (previousUsername && previousUsername !== userPublic.username) {
+    writes.push({
+      delete: firestoreDocPathName(`usernames/${previousUsername}`),
+    });
+    writes.push({
+      update: {
+        name: firestoreDocPathName(`usernames/${userPublic.username}`),
+        fields: toFirestoreFields({
+          uid,
+          username: userPublic.username,
+          ...(emailForClaim ? { encEmail: encryptLookupEmail(emailForClaim) } : {}),
+        }),
+      },
+      currentDocument: { exists: false },
+      updateTransforms: [{ fieldPath: 'createdAt', setToServerValue: 'REQUEST_TIME' }],
+    });
+  }
+
+  const res = await firestoreCommitWrites(writes, idToken);
+  return res.ok;
+}
+
+async function updateUserPrivateInFirestore(params: {
+  uid: string;
+  userPrivate: UserPrivate;
+  idToken: string;
+}): Promise<boolean> {
+  const { uid, userPrivate, idToken } = params;
+  const fields = buildPrivateProfileFields(userPrivate);
+  const res = await firestoreCommitWrites(
+    [
+      {
+        update: {
+          name: firestoreDocPathName(`users/${uid}/private/info`),
+          fields: toFirestoreFields(fields),
+        },
+        updateMask: { fieldPaths: Object.keys(fields) },
+        updateTransforms: [{ fieldPath: 'updatedAt', setToServerValue: 'REQUEST_TIME' }],
+      },
+    ],
+    idToken
+  );
+  return res.ok;
+}
+
+async function deleteUserDocsFromFirestore(params: {
+  uid: string;
+  username: string;
+  canonicalEmail: string;
+  idToken: string;
+}): Promise<void> {
+  const { uid, username, canonicalEmail, idToken } = params;
+  const emailHash = sha256Hex(canonicalEmail);
+  const writes: Array<Record<string, unknown>> = [
+    { delete: firestoreDocPathName(`users/${uid}/private/info`) },
+    { delete: firestoreDocPathName(`users/${uid}`) },
+    { delete: firestoreDocPathName(`email_claims/${emailHash}`) },
+  ];
+  if (isValidUsername(username)) {
+    writes.push({ delete: firestoreDocPathName(`usernames/${username}`) });
+  }
   await firestoreCommitWrites(writes, idToken);
 }
 
@@ -550,25 +690,36 @@ const TRUSTED_MAIL_DOMAINS = new Set([
   'yandex.com',
 ]);
 
-async function verifyDomainCanReceiveEmail(email: string): Promise<boolean> {
+async function verifyDomainCanReceiveEmail(
+  email: string
+): Promise<{ valid: boolean; reason?: 'disposable' | 'invalid_domain' }> {
   const domain = email.split('@')[1]?.toLowerCase() || '';
-  if (!domain) return false;
-  if (TRUSTED_MAIL_DOMAINS.has(domain)) return true;
-  if (isDisposableEmail(email)) return false;
+  if (!domain) return { valid: false, reason: 'invalid_domain' };
+  if (isDisposableEmail(email)) return { valid: false, reason: 'disposable' };
+  if (TRUSTED_MAIL_DOMAINS.has(domain)) return { valid: true };
   try {
     const mxPromise = dns.resolveMx(domain);
     const timeoutPromise = new Promise<'timeout'>((resolve) =>
       setTimeout(() => resolve('timeout'), 2500)
     );
     const result = await Promise.race([mxPromise, timeoutPromise]);
-    if (result === 'timeout') return true;
-    return Array.isArray(result) && result.length > 0;
+    if (result === 'timeout') return { valid: true };
+    if (!Array.isArray(result) || result.length === 0) {
+      return { valid: false, reason: 'invalid_domain' };
+    }
+    for (const record of result) {
+      const mxHost = (record?.exchange || '').trim().toLowerCase().replace(/\.+$/, '');
+      if (mxHost && (isDisposableEmail(`probe@${mxHost}`) || DISPOSABLE_HOST_PATTERN.test(mxHost))) {
+        return { valid: false, reason: 'disposable' };
+      }
+    }
+    return { valid: true };
   } catch (err) {
     const code = (err as { code?: string })?.code;
     if (code === 'ENOTFOUND' || code === 'ENODATA' || code === 'NXDOMAIN') {
-      return false;
+      return { valid: false, reason: 'invalid_domain' };
     }
-    return true;
+    return { valid: true };
   }
 }
 
@@ -627,9 +778,9 @@ async function sendOtpEmail(
     host: 'smtp.gmail.com',
     port: 465,
     secure: true,
-    connectionTimeout: 8000,
-    greetingTimeout: 8000,
-    socketTimeout: 12000,
+    connectionTimeout: 5000,
+    greetingTimeout: 5000,
+    socketTimeout: 8000,
     auth: {
       user: gmailUser,
       pass: gmailPass,
@@ -696,6 +847,16 @@ async function requireAuth(req: AuthenticatedRequest, res: Response, next: NextF
   next();
 }
 
+function canViewerAccessAuthorContent(authorUid: string, viewerUid: string | null): boolean {
+  const author = store.usersPublic[authorUid];
+  if (!author) return false;
+  if (viewerUid && author.uid === viewerUid) return true;
+  if (author.isDeactivated) return false;
+  if (!author.isPrivate) return true;
+  if (!viewerUid) return false;
+  return (store.followingByUser[viewerUid] || []).includes(authorUid);
+}
+
 function buildStateForUser(viewerUid: string | null) {
   const nowMs = Date.now();
   const activeCreators = Object.values(store.usersPublic)
@@ -751,7 +912,16 @@ function buildStateForUser(viewerUid: string | null) {
     const author = store.usersPublic[s.authorId];
     if (!author || author.isDeactivated) return false;
     if (s.authorId === viewerUid) return true;
+    if (author.isPrivate && !viewerFollowing.includes(s.authorId)) return false;
     if (s.privacy !== 'everyone' && !viewerFollowing.includes(s.authorId)) return false;
+    return true;
+  });
+
+  const visibleHighlights = (store.storyHighlights || []).filter((h) => {
+    const author = store.usersPublic[h.ownerUid];
+    if (!author || author.isDeactivated) return false;
+    if (h.ownerUid === viewerUid) return true;
+    if (author.isPrivate && !viewerFollowing.includes(h.ownerUid)) return false;
     return true;
   });
 
@@ -792,6 +962,7 @@ function buildStateForUser(viewerUid: string | null) {
     posts: visiblePosts,
     commentsByPost: store.commentsByPost,
     stories: activeStories,
+    storyHighlights: visibleHighlights,
     chats: userChats,
     messagesByChat,
     notes: activeNotes,
@@ -882,25 +1053,57 @@ async function startServer() {
         language?: 'en' | 'bn';
       };
 
-      const check = validateSignupEmail(email || '', language);
-      if (!check.valid) {
-        res.status(400).json({
-          error: check.reason || 'Please enter a valid permanent email address.',
-          code: isDisposableEmail(email || '') ? 'DISPOSABLE_EMAIL' : 'INVALID_EMAIL',
-        });
-        return;
-      }
+      let cleanEmail = (email || '').trim().toLowerCase();
+      let canonicalEmail = canonicalizeEmail(cleanEmail);
 
-      const { cleanEmail, canonicalEmail } = check;
       if (purpose === 'signup') {
-        const domainValid = await verifyDomainCanReceiveEmail(cleanEmail);
-        if (!domainValid) {
+        const check = validateSignupEmail(email || '', language);
+        if (!check.valid) {
+          res.status(400).json({
+            error: check.reason || 'Please enter a valid permanent email address.',
+            code: isDisposableEmail(email || '') ? 'DISPOSABLE_EMAIL' : 'UNSUPPORTED_EMAIL',
+          });
+          return;
+        }
+        cleanEmail = check.cleanEmail;
+        canonicalEmail = check.canonicalEmail;
+
+        const domainCheck = await verifyDomainCanReceiveEmail(cleanEmail);
+        if (!domainCheck.valid) {
+          if (domainCheck.reason === 'disposable') {
+            res.status(400).json({
+              error:
+                language === 'bn'
+                  ? 'টেম্পোরারি বা ডিসপোজেবল ইমেইল অনুমোদিত নয়। শুধুমাত্র আসল Gmail, Yahoo, Hotmail বা Outlook ব্যবহার করুন।'
+                  : 'This disposable email is not allowed. Please use a real Gmail, Yahoo, Hotmail, or Outlook address.',
+              code: 'DISPOSABLE_EMAIL',
+            });
+            return;
+          }
           res.status(400).json({
             error:
               language === 'bn'
-                ? 'এই ইমেইল ডোমেইনটি কার্যকর নয়। আপনার আসল Gmail বা স্থায়ী ইমেইল ব্যবহার করুন।'
-                : 'This email domain cannot receive verification mail. Use a valid Gmail or permanent email.',
+                ? 'এই ইমেইল ডোমেইনটি কার্যকর নয়। আপনার আসল Gmail, Yahoo, Hotmail বা Outlook ব্যবহার করুন।'
+                : 'This email domain cannot receive verification mail. Use a valid Gmail, Yahoo, Hotmail, or Outlook address.',
             code: 'INVALID_DOMAIN',
+          });
+          return;
+        }
+      } else {
+        if (!isValidEmail(cleanEmail)) {
+          res.status(400).json({
+            error: language === 'bn' ? 'সঠিক ইমেইল ঠিকানা লিখুন।' : 'Please enter a valid email address.',
+            code: 'INVALID_EMAIL',
+          });
+          return;
+        }
+        if (isDisposableEmail(cleanEmail)) {
+          res.status(400).json({
+            error:
+              language === 'bn'
+                ? 'টেম্পোরারি বা ডিসপোজেবল ইমেইল অনুমোদিত নয়।'
+                : 'Temporary or disposable email addresses are not allowed.',
+            code: 'DISPOSABLE_EMAIL',
           });
           return;
         }
@@ -913,16 +1116,29 @@ async function startServer() {
           (a.email === cleanEmail || (a.canonicalEmail || canonicalizeEmail(a.email)) === canonicalEmail)
       );
       const remoteClaim = !localMatch ? await firestoreGetDoc(`email_claims/${emailHash}`) : null;
-      const accountExists = Boolean(localMatch || (remoteClaim && remoteClaim.uid));
+      const authUriRes =
+        purpose === 'signup' && !localMatch && !(remoteClaim && remoteClaim.uid)
+          ? await firebaseAuthPost<{ registered?: boolean }>('accounts:createAuthUri', {
+              identifier: cleanEmail,
+              continueUri: 'http://localhost:3000',
+            }).catch(() => null)
+          : null;
+      const accountExists = Boolean(localMatch || (remoteClaim && remoteClaim.uid) || authUriRes?.registered);
 
       if (purpose === 'signup' && accountExists) {
+        const resolvedExistingEmail =
+          localMatch?.email ||
+          (remoteClaim && typeof remoteClaim.encEmail === 'string'
+            ? decryptLookupEmail(remoteClaim.encEmail) || cleanEmail
+            : cleanEmail);
         res.status(409).json({
           error:
             language === 'bn'
-              ? 'একটি Gmail / ইমেইল দিয়ে শুধুমাত্র একটি অ্যাকাউন্ট খোলা যাবে। এই ইমেইলে ইতিমধ্যেই অ্যাকাউন্ট আছে — অনুগ্রহ করে সাইন ইন করুন।'
-              : 'Only one account is allowed per Gmail/email. An account with this email already exists — please sign in.',
+              ? 'এই ইমেইলটি ইতিমধ্যেই ভেরিফাই করা এবং এটি দিয়ে একটি অ্যাকাউন্ট খোলা আছে — অনুগ্রহ করে সাইন ইন করুন অথবা নতুন ইমেইল ব্যবহার করুন।'
+              : 'This email is already verified and registered to an account — please sign in or use a different email.',
           code: 'EMAIL_ALREADY_EXISTS',
-          existingEmail: localMatch?.email || cleanEmail,
+          alreadyVerified: true,
+          existingEmail: resolvedExistingEmail,
         });
         return;
       }
@@ -1021,12 +1237,28 @@ async function startServer() {
       if (!emailCheck.valid) {
         res.status(400).json({
           error: emailCheck.reason || 'Temporary or invalid email is not allowed.',
-          code: 'DISPOSABLE_EMAIL',
+          code: isDisposableEmail(email || '') ? 'DISPOSABLE_EMAIL' : 'INVALID_EMAIL',
         });
         return;
       }
 
       const { cleanEmail, canonicalEmail } = emailCheck;
+      const domainCheck = await verifyDomainCanReceiveEmail(cleanEmail);
+      if (!domainCheck.valid) {
+        res.status(400).json({
+          error:
+            domainCheck.reason === 'disposable'
+              ? language === 'bn'
+                ? 'টেম্পোরারি বা ডিসপোজেবল ইমেইল অনুমোদিত নয়। আপনার আসল Gmail বা স্থায়ী ইমেইল ব্যবহার করুন।'
+                : 'Temporary or disposable email addresses are not allowed. Please use a real Gmail or permanent email.'
+              : language === 'bn'
+              ? 'এই ইমেইল ডোমেইনটি কার্যকর নয়। আপনার আসল Gmail বা স্থায়ী ইমেইল ব্যবহার করুন।'
+              : 'This email domain cannot receive verification mail. Use a valid Gmail or permanent email.',
+          code: domainCheck.reason === 'disposable' ? 'DISPOSABLE_EMAIL' : 'INVALID_DOMAIN',
+        });
+        return;
+      }
+
       const grant = verificationToken ? verificationGrants.get(verificationToken) : undefined;
       if (!grant || grant.email !== cleanEmail || grant.purpose !== 'signup' || grant.expiresAt < Date.now()) {
         res.status(403).json({ error: 'Email verification required before completing sign up.' });
@@ -1051,16 +1283,25 @@ async function startServer() {
       }
 
       const emailHash = sha256Hex(canonicalEmail);
-      const localEmailTaken = store.accounts.some(
+      const localEmailMatch = store.accounts.find(
         (a) =>
           !a.deleted &&
           (a.email === cleanEmail || (a.canonicalEmail || canonicalizeEmail(a.email)) === canonicalEmail)
       );
-      const remoteEmailClaim = !localEmailTaken ? await firestoreGetDoc(`email_claims/${emailHash}`) : null;
-      if (localEmailTaken || (remoteEmailClaim && remoteEmailClaim.uid)) {
+      const remoteEmailClaim = !localEmailMatch ? await firestoreGetDoc(`email_claims/${emailHash}`) : null;
+      if (localEmailMatch || (remoteEmailClaim && remoteEmailClaim.uid)) {
+        const existingEmail =
+          localEmailMatch?.email ||
+          (remoteEmailClaim && typeof remoteEmailClaim.encEmail === 'string'
+            ? decryptLookupEmail(remoteEmailClaim.encEmail) || cleanEmail
+            : cleanEmail);
         res.status(409).json({
-          error: 'Only one account is allowed per Gmail/email. Please sign in instead.',
+          error:
+            language === 'bn'
+              ? 'একটি Gmail / ইমেইল দিয়ে শুধুমাত্র একটি অ্যাকাউন্ট খোলা যাবে। এই ইমেইলে ইতিমধ্যেই অ্যাকাউন্ট আছে — অনুগ্রহ করে সাইন ইন করুন।'
+              : 'Only one account is allowed per Gmail/email. An account with this email already exists — please sign in.',
           code: 'EMAIL_ALREADY_EXISTS',
+          existingEmail,
         });
         return;
       }
@@ -1074,51 +1315,74 @@ async function startServer() {
         return;
       }
 
-      // Create user in Firebase Auth so account survives container restarts & across deployments
-      let uid = `u_${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`;
-      let firebaseIdToken: string | undefined;
-      let firebaseRefreshToken: string | undefined;
+      // Create user in Firebase Auth so account survives container restarts & deployments (retry once on transient error)
+      let fbRes: {
+        localId: string;
+        idToken: string;
+        refreshToken: string;
+        email: string;
+      } | null = null;
 
-      try {
-        const fbRes = await firebaseAuthPost<{
-          localId: string;
-          idToken: string;
-          refreshToken: string;
-          email: string;
-        }>('accounts:signUp', {
-          email: cleanEmail,
-          password,
-          displayName: cleanDisplayName,
-          returnSecureToken: true,
-        });
-        uid = fbRes.localId;
-        firebaseIdToken = fbRes.idToken;
-        firebaseRefreshToken = fbRes.refreshToken;
-      } catch (fbErr) {
-        const msg = fbErr instanceof Error ? fbErr.message : '';
-        if (msg.includes('EMAIL_EXISTS')) {
-          res.status(409).json({
-            error: 'An account with this email already exists. Please sign in instead.',
-            code: 'EMAIL_ALREADY_EXISTS',
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          fbRes = await firebaseAuthPost<{
+            localId: string;
+            idToken: string;
+            refreshToken: string;
+            email: string;
+          }>('accounts:signUp', {
+            email: cleanEmail,
+            password,
+            displayName: cleanDisplayName,
+            returnSecureToken: true,
+          });
+          break;
+        } catch (fbErr) {
+          const msg = fbErr instanceof Error ? fbErr.message : '';
+          if (msg.includes('EMAIL_EXISTS')) {
+            res.status(409).json({
+              error:
+                language === 'bn'
+                  ? 'একটি Gmail / ইমেইল দিয়ে শুধুমাত্র একটি অ্যাকাউন্ট খোলা যাবে। এই ইমেইলে ইতিমধ্যেই অ্যাকাউন্ট আছে — অনুগ্রহ করে সাইন ইন করুন।'
+                  : 'Only one account is allowed per Gmail/email. An account with this email already exists — please sign in.',
+              code: 'EMAIL_ALREADY_EXISTS',
+              existingEmail: cleanEmail,
+            });
+            return;
+          }
+          if (msg.includes('WEAK_PASSWORD')) {
+            res.status(400).json({ error: 'Password must be at least 6 characters.' });
+            return;
+          }
+          if (msg.includes('INVALID_EMAIL')) {
+            res.status(400).json({ error: 'Please enter a valid permanent email address.' });
+            return;
+          }
+          if (attempt === 0) {
+            await new Promise((r) => setTimeout(r, 300));
+            continue;
+          }
+          console.error('Firebase signUp error:', msg);
+          res.status(503).json({
+            error:
+              language === 'bn'
+                ? 'অ্যাকাউন্ট তৈরি করতে সাময়িক সমস্যা হচ্ছে। অনুগ্রহ করে আবার চেষ্টা করুন।'
+                : 'Could not reach authentication service to create your account. Please retry.',
           });
           return;
         }
-        // Only swallow non-conflict errors if Firebase provider isn't reachable
-        console.warn('Firebase signUp fallback to local store:', msg);
       }
 
+      if (!fbRes) {
+        res.status(503).json({ error: 'Could not create account. Please retry.' });
+        return;
+      }
+
+      const uid = fbRes.localId;
+      const firebaseIdToken = fbRes.idToken;
+      const firebaseRefreshToken = fbRes.refreshToken;
       const nowIso = new Date().toISOString();
       const passwordHash = await bcrypt.hash(password, 10);
-
-      store.accounts.push({
-        uid,
-        email: cleanEmail,
-        canonicalEmail,
-        username: cleanUsername,
-        passwordHash,
-        firebaseRefreshToken,
-        createdAt: nowIso,
-      });
 
       const userPublic: UserPublic = {
         uid,
@@ -1173,15 +1437,17 @@ async function startServer() {
         updatedAt: nowIso,
       };
 
-      store.usersPublic[uid] = userPublic;
-      store.usersPrivate[uid] = userPrivate;
-
-      // Consume verification token ONLY after account creation succeeds
-      verificationGrants.delete(verificationToken!);
-      persistStoreImmediate();
-
-      if (firebaseIdToken) {
-        await persistUserDocsToFirestore({
+      // Persist to Cloud Firestore BEFORE committing locally/consuming verificationToken
+      let firestoreResult = await createUserDocsInFirestore({
+        uid,
+        userPublic,
+        userPrivate,
+        canonicalEmail,
+        idToken: firebaseIdToken,
+      });
+      if (!firestoreResult.ok) {
+        await new Promise((r) => setTimeout(r, 250));
+        firestoreResult = await createUserDocsInFirestore({
           uid,
           userPublic,
           userPrivate,
@@ -1189,6 +1455,35 @@ async function startServer() {
           idToken: firebaseIdToken,
         });
       }
+      if (!firestoreResult.ok) {
+        // Roll back newly created Firebase Auth user so email isn't left orphaned without Firestore docs
+        await firebaseAuthPost('accounts:delete', { idToken: firebaseIdToken }).catch(() => {});
+        res.status(503).json({
+          error:
+            language === 'bn'
+              ? 'ডাটাবেস সংরক্ষণে সাময়িক সমস্যা হয়েছে। অনুগ্রহ করে আবার চেষ্টা করুন।'
+              : 'Could not save your profile to Cloud Firestore. Please retry.',
+        });
+        return;
+      }
+
+      // Remove any stale deleted local entry with the same uid/email/username before pushing fresh record
+      store.accounts = store.accounts.filter((a) => a.uid !== uid);
+      store.accounts.push({
+        uid,
+        email: cleanEmail,
+        canonicalEmail,
+        username: cleanUsername,
+        passwordHash,
+        firebaseRefreshToken,
+        createdAt: nowIso,
+      });
+      store.usersPublic[uid] = userPublic;
+      store.usersPrivate[uid] = userPrivate;
+
+      // Consume verification token ONLY after Firebase Auth + Firestore + store creation succeeds
+      verificationGrants.delete(verificationToken!);
+      persistStoreImmediate();
 
       broadcastGlobalSync();
 
@@ -1210,7 +1505,8 @@ async function startServer() {
         return;
       }
 
-      const rawCanonical = rawId.includes('@') ? canonicalizeEmail(rawId) : '';
+      const isEmailInput = rawId.indexOf('@') > 0;
+      const rawCanonical = isEmailInput ? canonicalizeEmail(rawId) : '';
       const rawUsername = normalizeUsername(rawId.startsWith('@') ? rawId.slice(1) : rawId);
 
       let acct = store.accounts.find(
@@ -1218,7 +1514,7 @@ async function startServer() {
           !a.deleted &&
           (a.email === rawId ||
             (rawCanonical && (a.canonicalEmail || canonicalizeEmail(a.email)) === rawCanonical) ||
-            (!rawId.includes('@') && a.username === rawUsername))
+            (!isEmailInput && a.username === rawUsername))
       );
 
       let passwordValid = acct ? await bcrypt.compare(password, acct.passwordHash) : false;
@@ -1230,12 +1526,15 @@ async function startServer() {
 
         if (acct) {
           candidateEmails.push(acct.email);
-        } else if (rawId.includes('@')) {
-          candidateEmails.push(rawId);
+        } else if (isEmailInput) {
           const claim = await firestoreGetDoc(`email_claims/${sha256Hex(rawCanonical)}`);
           if (claim && typeof claim.encEmail === 'string') {
             const dec = decryptLookupEmail(claim.encEmail);
-            if (dec && dec !== rawId) candidateEmails.unshift(dec);
+            if (dec) candidateEmails.push(dec);
+          }
+          candidateEmails.push(rawId);
+          if (rawCanonical && rawCanonical !== rawId) {
+            candidateEmails.push(rawCanonical);
           }
         } else if (isValidUsername(rawUsername)) {
           const usernameDoc = await firestoreGetDoc(`usernames/${rawUsername}`);
@@ -1288,11 +1587,19 @@ async function startServer() {
           const resolvedUsername =
             (remotePub && typeof remotePub.username === 'string' && remotePub.username) ||
             acct?.username ||
-            (isValidUsername(fallbackUsername) ? fallbackUsername : normalizeUsername(recoveredEmail.split('@')[0]) || `user_${recoveredUid.slice(0, 6)}`);
+            (isValidUsername(fallbackUsername)
+              ? fallbackUsername
+              : normalizeUsername(recoveredEmail.split('@')[0]) || `user_${recoveredUid.slice(0, 6)}`);
+
+          // Also check if another local record with the same uid exists (even if deleted flag was stale)
+          if (!acct) {
+            acct = store.accounts.find((a) => !a.deleted && a.uid === recoveredUid);
+          }
 
           if (acct) {
             acct.passwordHash = freshHash;
             acct.firebaseRefreshToken = fbLogin.refreshToken;
+            acct.username = resolvedUsername;
             passwordValid = true;
           } else {
             acct = {
@@ -1355,8 +1662,8 @@ async function startServer() {
             const recPriv: UserPrivate = {
               uid: recoveredUid,
               email: recoveredEmail,
-              language: (remotePriv?.language === 'bn' ? 'bn' : 'en'),
-              themeMode: (remotePriv?.themeMode === 'dark' ? 'dark' : 'light'),
+              language: remotePriv?.language === 'bn' ? 'bn' : 'en',
+              themeMode: remotePriv?.themeMode === 'dark' ? 'dark' : 'light',
               biometricLockEnabled: Boolean(remotePriv?.biometricLockEnabled),
               twoFactorEnabled: Boolean(remotePriv?.twoFactorEnabled),
               saveLoginInfo: remotePriv?.saveLoginInfo !== false,
@@ -1387,16 +1694,14 @@ async function startServer() {
             store.usersPrivate[recoveredUid] = recPriv;
           }
 
-          // If remote docs didn't exist yet (older auth-only account), backfill them cleanly
-          if (!remotePub || !remotePriv) {
-            await persistUserDocsToFirestore({
-              uid: recoveredUid,
-              userPublic: store.usersPublic[recoveredUid],
-              userPrivate: store.usersPrivate[recoveredUid],
-              canonicalEmail: recoveredCanonical,
-              idToken: fbLogin.idToken,
-            });
-          }
+          // Backfill only missing docs (users, private/info, usernames, email_claims) safely
+          await createUserDocsInFirestore({
+            uid: recoveredUid,
+            userPublic: store.usersPublic[recoveredUid],
+            userPrivate: store.usersPrivate[recoveredUid],
+            canonicalEmail: recoveredCanonical,
+            idToken: fbLogin.idToken,
+          });
         }
       }
 
@@ -1426,6 +1731,7 @@ async function startServer() {
       }
 
       const pub = store.usersPublic[acct.uid];
+      const wasDeactivated = Boolean(pub?.isDeactivated);
       if (pub) {
         pub.isDeactivated = false;
         pub.deactivatedUntil = null;
@@ -1433,6 +1739,19 @@ async function startServer() {
         pub.lastSeenAt = new Date().toISOString();
       }
       persistStoreImmediate();
+      if (wasDeactivated && pub && acct.firebaseRefreshToken) {
+        refreshFirebaseIdToken(acct.firebaseRefreshToken)
+          .then((refreshed) => {
+            if (!refreshed) return;
+            acct!.firebaseRefreshToken = refreshed.refreshToken;
+            return updateUserPublicInFirestore({
+              uid: acct!.uid,
+              userPublic: pub,
+              idToken: refreshed.idToken,
+            });
+          })
+          .catch(() => {});
+      }
       broadcastGlobalSync();
 
       const token = signSessionToken(acct.uid);
@@ -1552,36 +1871,68 @@ async function startServer() {
       res.status(400).json({ error: 'New password must be at least 6 characters.' });
       return;
     }
+
     const acct = store.accounts.find(
       (a) =>
         !a.deleted &&
         (a.email === cleanEmail || (a.canonicalEmail || canonicalizeEmail(a.email)) === canonical)
     );
-    if (!acct) {
-      res.status(404).json({ error: 'Account not found.' });
-      return;
-    }
-    acct.passwordHash = await bcrypt.hash(newPassword, 10);
-    if (acct.firebaseRefreshToken) {
+
+    if (acct?.firebaseRefreshToken) {
       const refreshed = await refreshFirebaseIdToken(acct.firebaseRefreshToken);
       if (refreshed) {
         acct.firebaseRefreshToken = refreshed.refreshToken;
-        await firebaseAuthPost('accounts:update', {
-          idToken: refreshed.idToken,
-          password: newPassword,
-          returnSecureToken: true,
-        }).catch(() => {});
+        try {
+          await firebaseAuthPost('accounts:update', {
+            idToken: refreshed.idToken,
+            password: newPassword,
+            returnSecureToken: true,
+          });
+          acct.passwordHash = await bcrypt.hash(newPassword, 10);
+          verificationGrants.delete(verificationToken!);
+          persistStoreImmediate();
+          res.json({ ok: true, method: 'direct' });
+          return;
+        } catch {
+          // Fall through to Firebase PASSWORD_RESET email link if refresh/update was rejected
+        }
       }
     }
-    verificationGrants.delete(verificationToken!);
-    persistStoreImmediate();
-    res.json({ ok: true });
+
+    // Post-restart or missing refreshToken fallback: verify claim in Firestore & trigger Firebase reset email
+    const remoteClaim = !acct ? await firestoreGetDoc(`email_claims/${sha256Hex(canonical)}`) : null;
+    if (!acct && (!remoteClaim || !remoteClaim.uid)) {
+      res.status(404).json({ error: 'Account not found.' });
+      return;
+    }
+    const targetEmail =
+      acct?.email ||
+      (remoteClaim && typeof remoteClaim.encEmail === 'string'
+        ? decryptLookupEmail(remoteClaim.encEmail) || cleanEmail
+        : cleanEmail);
+
+    try {
+      await firebaseAuthPost('accounts:sendOobCode', {
+        requestType: 'PASSWORD_RESET',
+        email: targetEmail,
+      });
+      verificationGrants.delete(verificationToken!);
+      persistStoreImmediate();
+      res.json({
+        ok: true,
+        method: 'email_link',
+        message: `A password reset confirmation link has been sent to ${targetEmail}. Open the link to finalize your new password, then sign in.`,
+      });
+    } catch {
+      res.status(500).json({ error: 'Could not reset password right now. Please try again.' });
+    }
   });
 
   app.post('/api/auth/deactivate', requireAuth, (req: AuthenticatedRequest, res) => {
     const { days = 7 } = req.body as { days?: number };
     const safeDays = Math.min(365, Math.max(1, Number(days) || 7));
     const user = store.usersPublic[req.uid!];
+    const acct = store.accounts.find((a) => !a.deleted && a.uid === req.uid);
     if (!user) {
       res.status(404).json({ error: 'User not found.' });
       return;
@@ -1590,6 +1941,19 @@ async function startServer() {
     user.deactivatedUntil = new Date(Date.now() + safeDays * 24 * 3_600_000).toISOString();
     user.onlineStatus = 'offline';
     persistStoreImmediate();
+    if (acct?.firebaseRefreshToken) {
+      refreshFirebaseIdToken(acct.firebaseRefreshToken)
+        .then((refreshed) => {
+          if (!refreshed) return;
+          acct.firebaseRefreshToken = refreshed.refreshToken;
+          return updateUserPublicInFirestore({
+            uid: acct.uid,
+            userPublic: user,
+            idToken: refreshed.idToken,
+          });
+        })
+        .catch(() => {});
+    }
     broadcastGlobalSync();
     res.json({ ok: true, deactivatedUntil: user.deactivatedUntil });
   });
@@ -1598,18 +1962,27 @@ async function startServer() {
     const uid = req.uid!;
     const acct = store.accounts.find((a) => a.uid === uid);
     if (acct) {
-      acct.deleted = true;
       if (acct.firebaseRefreshToken) {
         const refreshed = await refreshFirebaseIdToken(acct.firebaseRefreshToken);
         if (refreshed) {
+          const canonical = acct.canonicalEmail || canonicalizeEmail(acct.email);
+          // Delete Firestore docs BEFORE deleting Firebase Auth user so idToken remains authorized
+          await deleteUserDocsFromFirestore({
+            uid,
+            username: acct.username,
+            canonicalEmail: canonical,
+            idToken: refreshed.idToken,
+          }).catch(() => {});
           await firebaseAuthPost('accounts:delete', { idToken: refreshed.idToken }).catch(() => {});
         }
       }
+      acct.deleted = true;
     }
     delete store.usersPublic[uid];
     delete store.usersPrivate[uid];
     store.posts = store.posts.filter((p) => p.authorId !== uid);
     store.stories = store.stories.filter((s) => s.authorId !== uid);
+    store.storyHighlights = (store.storyHighlights || []).filter((h) => h.ownerUid !== uid);
     store.notes = store.notes.filter((n) => n.authorUid !== uid);
     persistStoreImmediate();
     broadcastGlobalSync();
@@ -1659,6 +2032,7 @@ async function startServer() {
       }
     }
 
+    const previousUsername = user.username;
     const nextUsername =
       updates.username !== undefined ? normalizeUsername(updates.username) : user.username;
     const usernameChanged = nextUsername !== user.username;
@@ -1743,23 +2117,19 @@ async function startServer() {
 
     persistStoreImmediate();
     if (acct.firebaseRefreshToken) {
-      const priv = store.usersPrivate[uid];
-      const canonical = acct.canonicalEmail || canonicalizeEmail(acct.email);
-      if (priv) {
-        refreshFirebaseIdToken(acct.firebaseRefreshToken)
-          .then((refreshed) => {
-            if (!refreshed) return;
-            acct.firebaseRefreshToken = refreshed.refreshToken;
-            return persistUserDocsToFirestore({
-              uid,
-              userPublic: updated,
-              userPrivate: priv,
-              canonicalEmail: canonical,
-              idToken: refreshed.idToken,
-            });
-          })
-          .catch(() => {});
-      }
+      refreshFirebaseIdToken(acct.firebaseRefreshToken)
+        .then((refreshed) => {
+          if (!refreshed) return;
+          acct.firebaseRefreshToken = refreshed.refreshToken;
+          return updateUserPublicInFirestore({
+            uid,
+            userPublic: updated,
+            previousUsername: usernameChanged ? previousUsername : undefined,
+            emailForClaim: acct.email,
+            idToken: refreshed.idToken,
+          });
+        })
+        .catch(() => {});
     }
     broadcastGlobalSync();
     res.json({ user: updated });
@@ -1768,6 +2138,7 @@ async function startServer() {
   app.patch('/api/settings/private', requireAuth, (req: AuthenticatedRequest, res) => {
     const uid = req.uid!;
     const current = store.usersPrivate[uid];
+    const acct = store.accounts.find((a) => !a.deleted && a.uid === uid);
     if (!current) {
       res.status(404).json({ error: 'Private settings not found.' });
       return;
@@ -1781,7 +2152,44 @@ async function startServer() {
     };
     store.usersPrivate[uid] = next;
     persistStore();
+    if (acct?.firebaseRefreshToken) {
+      refreshFirebaseIdToken(acct.firebaseRefreshToken)
+        .then((refreshed) => {
+          if (!refreshed) return;
+          acct.firebaseRefreshToken = refreshed.refreshToken;
+          return updateUserPrivateInFirestore({
+            uid,
+            userPrivate: next,
+            idToken: refreshed.idToken,
+          });
+        })
+        .catch(() => {});
+    }
     res.json({ userPrivate: next });
+  });
+
+  // Profile connections (Followers / Following) respecting private accounts
+  app.get('/api/users/:targetUid/connections', async (req, res) => {
+    const viewerUid = await resolveUidFromHeader(req);
+    const targetUid = String(req.params.targetUid);
+    const target = store.usersPublic[targetUid];
+    if (!target || (target.isDeactivated && viewerUid !== targetUid)) {
+      res.status(404).json({ error: 'User not found.' });
+      return;
+    }
+    const viewerFollowing = viewerUid ? store.followingByUser[viewerUid] || [] : [];
+    const allowed =
+      !target.isPrivate ||
+      viewerUid === targetUid ||
+      viewerFollowing.includes(targetUid);
+    if (!allowed) {
+      res.status(403).json({ error: 'This account is private.' });
+      return;
+    }
+    res.json({
+      followerIds: store.followersByUser[targetUid] || [],
+      followingIds: store.followingByUser[targetUid] || [],
+    });
   });
 
   // Follow / Private Follow Request
@@ -1809,7 +2217,11 @@ async function startServer() {
       target.followersCount = store.followersByUser[targetUid].length;
       persistStore();
       broadcastGlobalSync();
-      res.json({ status: 'unfollowed' });
+      res.json({
+        status: 'unfollowed',
+        followingIds: store.followingByUser[actorUid],
+        targetFollowersCount: target.followersCount,
+      });
       return;
     }
 
@@ -1821,7 +2233,11 @@ async function startServer() {
         store.friendRequests = store.friendRequests.filter((r) => r.id !== existingReq.id);
         persistStore();
         broadcastGlobalSync();
-        res.json({ status: 'cancelled' });
+        res.json({
+          status: 'cancelled',
+          followingIds: store.followingByUser[actorUid] || [],
+          targetFollowersCount: target.followersCount,
+        });
         return;
       }
       const reqItem: FriendRequest = {
@@ -1849,7 +2265,11 @@ async function startServer() {
       });
       persistStore();
       broadcastGlobalSync();
-      res.json({ status: 'requested' });
+      res.json({
+        status: 'requested',
+        followingIds: store.followingByUser[actorUid] || [],
+        targetFollowersCount: target.followersCount,
+      });
       return;
     }
 
@@ -1871,7 +2291,11 @@ async function startServer() {
     });
     persistStore();
     broadcastGlobalSync();
-    res.json({ status: 'following' });
+    res.json({
+      status: 'following',
+      followingIds: store.followingByUser[actorUid],
+      targetFollowersCount: target.followersCount,
+    });
   });
 
   app.post('/api/friend-requests/:reqId/respond', requireAuth, (req: AuthenticatedRequest, res) => {
@@ -1898,7 +2322,11 @@ async function startServer() {
     }
     persistStore();
     broadcastGlobalSync();
-    res.json({ ok: true });
+    res.json({
+      ok: true,
+      followingIds: store.followingByUser[uid] || [],
+      followerIds: store.followersByUser[uid] || [],
+    });
   });
 
   app.delete('/api/followers/:followerUid', requireAuth, (req: AuthenticatedRequest, res) => {
@@ -1923,9 +2351,19 @@ async function startServer() {
     const uid = req.uid!;
     const targetUid = String(req.params.targetUid);
     const priv = store.usersPrivate[uid];
+    const acct = store.accounts.find((a) => !a.deleted && a.uid === uid);
     if (priv) {
       priv.blockedUserIds = Array.from(new Set([...priv.blockedUserIds, targetUid]));
       persistStore();
+      if (acct?.firebaseRefreshToken) {
+        refreshFirebaseIdToken(acct.firebaseRefreshToken)
+          .then((refreshed) => {
+            if (!refreshed) return;
+            acct.firebaseRefreshToken = refreshed.refreshToken;
+            return updateUserPrivateInFirestore({ uid, userPrivate: priv, idToken: refreshed.idToken });
+          })
+          .catch(() => {});
+      }
     }
     res.json({ ok: true });
   });
@@ -1934,9 +2372,19 @@ async function startServer() {
     const uid = req.uid!;
     const targetUid = String(req.params.targetUid);
     const priv = store.usersPrivate[uid];
+    const acct = store.accounts.find((a) => !a.deleted && a.uid === uid);
     if (priv) {
       priv.blockedUserIds = priv.blockedUserIds.filter((id) => id !== targetUid);
       persistStore();
+      if (acct?.firebaseRefreshToken) {
+        refreshFirebaseIdToken(acct.firebaseRefreshToken)
+          .then((refreshed) => {
+            if (!refreshed) return;
+            acct.firebaseRefreshToken = refreshed.refreshToken;
+            return updateUserPrivateInFirestore({ uid, userPrivate: priv, idToken: refreshed.idToken });
+          })
+          .catch(() => {});
+      }
     }
     res.json({ ok: true });
   });
@@ -2025,6 +2473,10 @@ async function startServer() {
       res.status(404).json({ error: 'Post not found.' });
       return;
     }
+    if (!canViewerAccessAuthorContent(post.authorId, uid)) {
+      res.status(403).json({ error: 'This account is private.' });
+      return;
+    }
     const list = store.likedPostIdsByUser[uid] || [];
     const liked = list.includes(postId);
     store.likedPostIdsByUser[uid] = liked ? list.filter((id) => id !== postId) : [...list, postId];
@@ -2045,8 +2497,13 @@ async function startServer() {
   });
 
   app.post('/api/posts/:postId/share', requireAuth, (req: AuthenticatedRequest, res) => {
+    const uid = req.uid!;
     const post = store.posts.find((p) => p.id === String(req.params.postId));
     if (post) {
+      if (!canViewerAccessAuthorContent(post.authorId, uid)) {
+        res.status(403).json({ error: 'This account is private.' });
+        return;
+      }
       post.sharesCount += 1;
       persistStore();
       broadcastGlobalSync();
@@ -2061,6 +2518,10 @@ async function startServer() {
     const post = store.posts.find((p) => p.id === postId);
     if (!author || !post) {
       res.status(404).json({ error: 'Post not found.' });
+      return;
+    }
+    if (!canViewerAccessAuthorContent(post.authorId, uid)) {
+      res.status(403).json({ error: 'This account is private.' });
       return;
     }
     const { text, stickerUrl, gifUrl, parentCommentId } = req.body as {
@@ -2140,13 +2601,126 @@ async function startServer() {
   });
 
   app.post('/api/stories/:storyId/react', requireAuth, (req: AuthenticatedRequest, res) => {
-    const author = store.usersPublic[req.uid!];
+    const uid = req.uid!;
+    const author = store.usersPublic[uid];
     const story = store.stories.find((s) => s.id === String(req.params.storyId));
     if (story && author) {
+      if (!canViewerAccessAuthorContent(story.authorId, uid)) {
+        res.status(403).json({ error: 'This account is private.' });
+        return;
+      }
       story.reactions.push({ username: author.username, emoji: String(req.body.emoji || '❤️') });
       persistStore();
       broadcastGlobalSync();
     }
+    res.json({ ok: true });
+  });
+
+  // Story Highlights CRUD
+  app.post('/api/highlights', requireAuth, (req: AuthenticatedRequest, res) => {
+    const uid = req.uid!;
+    const { title = '', coverUrl = '', storyIds = [], items = [] } = req.body as {
+      title?: string;
+      coverUrl?: string;
+      storyIds?: string[];
+      items?: StoryHighlightItem[];
+    };
+    if (!isValidHighlightTitle(title)) {
+      res.status(400).json({ error: 'Highlight title must be 1–36 characters.' });
+      return;
+    }
+    const fromStories: StoryHighlightItem[] = (storyIds || [])
+      .map((sid) => store.stories.find((s) => s.id === sid && s.authorId === uid))
+      .filter((s): s is Story => Boolean(s))
+      .map((s) => ({
+        id: `hi_${s.id}_${Math.random().toString(36).slice(2, 5)}`,
+        mediaType: s.mediaType,
+        mediaUrl: s.mediaUrl,
+        textContent: s.textContent,
+        backgroundGradient: s.backgroundGradient,
+        createdAt: s.createdAt,
+      }));
+    const customItems: StoryHighlightItem[] = Array.isArray(items)
+      ? items
+          .filter((it) => it && (it.mediaUrl || it.textContent))
+          .map((it) => ({
+            id: it.id || `hi_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
+            mediaType: it.mediaType || 'photo',
+            mediaUrl: it.mediaUrl,
+            textContent: it.textContent,
+            backgroundGradient: it.backgroundGradient || 'from-sky-600 via-indigo-700 to-slate-900',
+            createdAt: it.createdAt || new Date().toISOString(),
+          }))
+      : [];
+    const finalItems = [...fromStories, ...customItems];
+    if (finalItems.length === 0) {
+      res.status(400).json({ error: 'Select at least one story or media item for the highlight.' });
+      return;
+    }
+    const resolvedCover =
+      (coverUrl || '').trim() ||
+      finalItems.find((it) => it.mediaUrl)?.mediaUrl ||
+      '';
+    const highlight: StoryHighlight = {
+      id: `hl_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
+      ownerUid: uid,
+      title: title.trim().slice(0, 36),
+      coverUrl: resolvedCover,
+      items: finalItems,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    store.storyHighlights = [highlight, ...(store.storyHighlights || [])];
+    persistStore();
+    broadcastGlobalSync();
+    res.json({ highlight });
+  });
+
+  app.patch('/api/highlights/:id', requireAuth, (req: AuthenticatedRequest, res) => {
+    const uid = req.uid!;
+    const id = String(req.params.id);
+    const hl = (store.storyHighlights || []).find((h) => h.id === id && h.ownerUid === uid);
+    if (!hl) {
+      res.status(404).json({ error: 'Highlight not found.' });
+      return;
+    }
+    const { title, coverUrl, items } = req.body as {
+      title?: string;
+      coverUrl?: string;
+      items?: StoryHighlightItem[];
+    };
+    if (title !== undefined) {
+      if (!isValidHighlightTitle(title)) {
+        res.status(400).json({ error: 'Highlight title must be 1–36 characters.' });
+        return;
+      }
+      hl.title = title.trim().slice(0, 36);
+    }
+    if (coverUrl !== undefined) {
+      hl.coverUrl = coverUrl;
+    }
+    if (Array.isArray(items) && items.length > 0) {
+      hl.items = items;
+    }
+    hl.updatedAt = new Date().toISOString();
+    persistStore();
+    broadcastGlobalSync();
+    res.json({ highlight: hl });
+  });
+
+  app.delete('/api/highlights/:id', requireAuth, (req: AuthenticatedRequest, res) => {
+    const uid = req.uid!;
+    const id = String(req.params.id);
+    const before = (store.storyHighlights || []).length;
+    store.storyHighlights = (store.storyHighlights || []).filter(
+      (h) => !(h.id === id && h.ownerUid === uid)
+    );
+    if (store.storyHighlights.length === before) {
+      res.status(404).json({ error: 'Highlight not found.' });
+      return;
+    }
+    persistStore();
+    broadcastGlobalSync();
     res.json({ ok: true });
   });
 
@@ -2274,10 +2848,20 @@ async function startServer() {
   // Chats & Groups (max 250 members)
   app.post('/api/chats', requireAuth, (req: AuthenticatedRequest, res) => {
     const uid = req.uid!;
-    const { title, participantUids, type = 'direct' } = req.body as {
+    const {
+      title,
+      participantUids,
+      type = 'direct',
+      avatarUrl = '',
+      bio = '',
+      restrictions,
+    } = req.body as {
       title?: string;
       participantUids?: string[];
       type?: 'direct' | 'group';
+      avatarUrl?: string;
+      bio?: string;
+      restrictions?: GroupRestrictions;
     };
     const uniqueParticipants = Array.from(new Set([uid, ...(participantUids || [])]));
     if (uniqueParticipants.length < 2) {
@@ -2314,6 +2898,8 @@ async function startServer() {
       id: `chat_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
       type,
       title: (title || '').trim() || (type === 'group' ? 'New Group' : 'Direct Chat'),
+      avatarUrl: type === 'group' ? avatarUrl : undefined,
+      bio: type === 'group' ? bio.trim().slice(0, 160) : undefined,
       participantIds: uniqueParticipants,
       participantNames,
       participantAvatars,
@@ -2321,6 +2907,14 @@ async function startServer() {
       ownerUid: type === 'group' ? uid : undefined,
       adminUids: type === 'group' ? [uid] : undefined,
       requireAddApproval: false,
+      restrictions:
+        type === 'group'
+          ? {
+              adminsOnlyMessages: Boolean(restrictions?.adminsOnlyMessages),
+              onlyAdminsEditInfo: restrictions?.onlyAdminsEditInfo ?? true,
+              blockMediaAttachments: Boolean(restrictions?.blockMediaAttachments),
+            }
+          : undefined,
       pendingMemberIds: [],
       maxMembers: MAX_GROUP_MEMBERS,
       theme: { presetId: 'default' },
@@ -2349,6 +2943,11 @@ async function startServer() {
     }
 
     const payload = req.body as Partial<ChatMessage>;
+    const sendCheck = canSendInGroupChat(chat, uid, payload.type || 'text');
+    if (!sendCheck.allowed) {
+      res.status(403).json({ error: sendCheck.reason || 'Messaging is restricted in this group.' });
+      return;
+    }
     const msg: ChatMessage = {
       id: `m_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
       chatId,
@@ -2644,7 +3243,7 @@ async function startServer() {
       return;
     }
     if (chat.participantIds.includes(targetUid)) {
-      res.json({ ok: true, status: 'already_member' });
+      res.json({ ok: true, status: 'already_member', chat });
       return;
     }
 
@@ -2658,7 +3257,7 @@ async function startServer() {
       chat.pendingMemberIds = Array.from(new Set([...(chat.pendingMemberIds || []), targetUid]));
       persistStore();
       broadcastGlobalSync();
-      res.json({ ok: true, status: 'pending_approval' });
+      res.json({ ok: true, status: 'pending_approval', chat });
       return;
     }
 
@@ -2668,7 +3267,7 @@ async function startServer() {
     chat.pendingMemberIds = (chat.pendingMemberIds || []).filter((id) => id !== targetUid);
     persistStore();
     broadcastGlobalSync();
-    res.json({ ok: true, status: 'added' });
+    res.json({ ok: true, status: 'added', chat });
   });
 
   app.post('/api/chats/:chatId/members/approve', requireAuth, (req: AuthenticatedRequest, res) => {
@@ -2696,7 +3295,7 @@ async function startServer() {
     }
     persistStore();
     broadcastGlobalSync();
-    res.json({ ok: true });
+    res.json({ ok: true, chat });
   });
 
   app.delete('/api/chats/:chatId/members/:targetUid', requireAuth, (req: AuthenticatedRequest, res) => {
@@ -2717,7 +3316,7 @@ async function startServer() {
     chat.adminUids = (chat.adminUids || []).filter((id) => id !== targetUid);
     persistStore();
     broadcastGlobalSync();
-    res.json({ ok: true });
+    res.json({ ok: true, chat });
   });
 
   app.patch('/api/chats/:chatId/roles', requireAuth, (req: AuthenticatedRequest, res) => {
@@ -2767,16 +3366,41 @@ async function startServer() {
     const chat = store.chats.find(
       (c) => c.id === String(req.params.chatId) && c.type === 'group' && c.participantIds.includes(uid)
     );
-    if (!chat || !isGroupAdmin(chat, uid)) {
-      res.status(403).json({ error: 'Admin permission required.' });
+    if (!chat) {
+      res.status(404).json({ error: 'Group not found.' });
       return;
     }
-    const { title, requireAddApproval } = req.body as {
+    const { title, bio, avatarUrl, requireAddApproval, restrictions } = req.body as {
       title?: string;
+      bio?: string;
+      avatarUrl?: string;
       requireAddApproval?: boolean;
+      restrictions?: GroupRestrictions;
     };
+    const isAdminEditingRestrictions =
+      requireAddApproval !== undefined || restrictions !== undefined;
+    const isInfoEdit =
+      title !== undefined || bio !== undefined || avatarUrl !== undefined;
+
+    if (isAdminEditingRestrictions && !isGroupAdmin(chat, uid)) {
+      res.status(403).json({ error: 'Admin permission required to update group restrictions.' });
+      return;
+    }
+    if (isInfoEdit && !canEditGroupInfo(chat, uid)) {
+      res.status(403).json({ error: 'Only group admins can edit group info.' });
+      return;
+    }
+
     if (title !== undefined && title.trim()) chat.title = title.trim().slice(0, 80);
+    if (bio !== undefined) chat.bio = bio.trim().slice(0, 160);
+    if (avatarUrl !== undefined) chat.avatarUrl = avatarUrl;
     if (requireAddApproval !== undefined) chat.requireAddApproval = Boolean(requireAddApproval);
+    if (restrictions !== undefined) {
+      chat.restrictions = {
+        ...(chat.restrictions || {}),
+        ...restrictions,
+      };
+    }
     persistStore();
     broadcastGlobalSync();
     res.json({ chat });

@@ -24,6 +24,7 @@ import { CreateView } from './CreateView';
 import { ExploreView } from './ExploreView';
 import { HomeFeed } from './HomeFeed';
 import { MessagesView } from './MessagesView';
+import { NotificationsView } from './NotificationsView';
 import { ProfileView } from './ProfileView';
 import { ReelsView } from './ReelsView';
 import { SettingsAndModals } from './SettingsAndModals';
@@ -43,6 +44,7 @@ export function AppShell() {
     toggleFollow,
     openUserProfile,
     notifications,
+    chats,
     language,
     setLanguage,
     theme,
@@ -56,6 +58,11 @@ export function AppShell() {
   }
 
   const unreadNotifs = notifications.filter((n) => !n.read).length;
+  const unreadMessages = chats.filter(
+    (c) =>
+      !c.archivedByUids?.includes(currentUser.uid) &&
+      (c.unreadCount > 0 || c.unreadByUids?.includes(currentUser.uid))
+  ).length;
 
   // Exact 5 bottom tabs: Home, Reels, Inbox (middle), Explore, Profile
   const navItems: { id: MainTab; label: string; icon: typeof Home }[] = [
@@ -98,12 +105,12 @@ export function AppShell() {
               {t.appName}
             </span>
 
-            <div className="flex items-center gap-0.5 shrink-0">
+            <div className="flex items-center gap-1 shrink-0">
               <button
                 type="button"
                 aria-label={t.nav.create}
                 onClick={() => setSubscreen('create_sheet')}
-                className="min-h-[40px] min-w-[34px] flex items-center justify-center rounded-xl text-slate-700 dark:text-slate-200"
+                className="min-h-[40px] min-w-[38px] flex items-center justify-center rounded-xl liquid-glass-btn text-slate-700 dark:text-slate-100"
               >
                 <PlusSquare className="w-4.5 h-4.5" />
               </button>
@@ -111,11 +118,15 @@ export function AppShell() {
                 type="button"
                 aria-label={t.settings.notifications}
                 onClick={() => setSubscreen('notifications')}
-                className="relative min-h-[40px] min-w-[34px] flex items-center justify-center rounded-xl text-slate-700 dark:text-slate-200"
+                className={`relative min-h-[40px] min-w-[38px] flex items-center justify-center rounded-xl transition-all duration-150 ${
+                  subscreen === 'notifications'
+                    ? 'bg-sky-600 text-white shadow-md shadow-sky-600/25'
+                    : 'liquid-glass-btn text-slate-700 dark:text-slate-100'
+                }`}
               >
                 <Bell className="w-4.5 h-4.5" />
                 {unreadNotifs > 0 && (
-                  <span className="absolute top-2 right-2 w-2 h-2 rounded-full bg-sky-600" />
+                  <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-sky-500 ring-2 ring-white dark:ring-slate-950" />
                 )}
               </button>
               <button
@@ -173,22 +184,27 @@ export function AppShell() {
                   </button>
                 </div>
 
-                <nav aria-label="Main navigation" className="space-y-1">
+                <nav aria-label="Main navigation" className="space-y-1.5">
                   {navItems.map(({ id, label, icon: Icon }) => {
-                    const active = activeTab === id;
+                    const active = activeTab === id && subscreen !== 'notifications';
                     return (
                       <button
                         key={id}
                         type="button"
                         onClick={() => handleNavClick(id)}
-                        className={`w-full min-h-[44px] px-3.5 rounded-xl flex items-center gap-3 text-sm font-semibold transition-colors whitespace-nowrap ${
+                        className={`w-full min-h-[44px] px-3.5 rounded-2xl flex items-center justify-between gap-3 text-sm font-semibold transition-all duration-150 whitespace-nowrap ${
                           active
-                            ? 'bg-sky-600 text-white shadow-md shadow-sky-600/20'
-                            : 'text-slate-700 dark:text-slate-300 hover:bg-white/60 dark:hover:bg-slate-800/60'
+                            ? 'bg-gradient-to-r from-sky-600 to-blue-600 text-white shadow-md shadow-sky-600/25'
+                            : 'text-slate-700 dark:text-slate-300 hover:bg-white/60 dark:hover:bg-white/10'
                         }`}
                       >
-                        <Icon className="w-5 h-5 shrink-0" />
-                        <span>{label}</span>
+                        <span className="inline-flex items-center gap-3">
+                          <Icon className="w-5 h-5 shrink-0" />
+                          <span>{label}</span>
+                        </span>
+                        {id === 'messages' && unreadMessages > 0 && (
+                          <span className="w-2 h-2 rounded-full bg-sky-400 shrink-0" />
+                        )}
                       </button>
                     );
                   })}
@@ -196,25 +212,35 @@ export function AppShell() {
                   <button
                     type="button"
                     onClick={() => setSubscreen('create_sheet')}
-                    className="w-full min-h-[44px] px-3.5 rounded-xl flex items-center gap-3 text-sm font-semibold text-sky-700 dark:text-sky-300 hover:bg-sky-500/10 transition-colors whitespace-nowrap"
+                    className="w-full min-h-[44px] px-3.5 rounded-2xl liquid-glass-btn flex items-center gap-3 text-sm font-semibold text-sky-700 dark:text-sky-300 whitespace-nowrap mt-1"
                   >
                     <PlusSquare className="w-5 h-5 shrink-0" />
                     <span>{t.nav.create}</span>
                   </button>
                 </nav>
 
-                <div className="pt-3 border-t border-slate-200/70 dark:border-slate-800/70 space-y-1">
+                <div className="pt-3 border-t border-slate-200/70 dark:border-white/10 space-y-1">
                   <button
                     type="button"
                     onClick={() => setSubscreen('notifications')}
-                    className="w-full min-h-[42px] px-3.5 rounded-xl flex items-center justify-between text-xs font-semibold text-slate-700 dark:text-slate-300 hover:bg-white/60 dark:hover:bg-slate-800/60"
+                    className={`w-full min-h-[42px] px-3.5 rounded-xl flex items-center justify-between text-xs font-semibold transition-all duration-150 ${
+                      subscreen === 'notifications'
+                        ? 'bg-sky-600 text-white shadow-sm'
+                        : 'text-slate-700 dark:text-slate-300 hover:bg-white/60 dark:hover:bg-white/10'
+                    }`}
                   >
                     <span className="inline-flex items-center gap-2.5">
                       <Bell className="w-4 h-4" />
                       <span>{t.settings.notifications}</span>
                     </span>
                     {unreadNotifs > 0 && (
-                      <span className="font-mono-num text-sky-600 dark:text-sky-400">
+                      <span
+                        className={`font-mono-num ${
+                          subscreen === 'notifications'
+                            ? 'text-white'
+                            : 'text-sky-600 dark:text-sky-400'
+                        }`}
+                      >
                         {unreadNotifs}
                       </span>
                     )}
@@ -223,7 +249,7 @@ export function AppShell() {
                   <button
                     type="button"
                     onClick={() => setLanguage(language === 'en' ? 'bn' : 'en')}
-                    className="w-full min-h-[42px] px-3.5 rounded-xl flex items-center justify-between text-xs font-semibold text-slate-700 dark:text-slate-300 hover:bg-white/60 dark:hover:bg-slate-800/60"
+                    className="w-full min-h-[42px] px-3.5 rounded-xl flex items-center justify-between text-xs font-semibold text-slate-700 dark:text-slate-300 hover:bg-white/60 dark:hover:bg-white/10 transition-colors duration-150"
                   >
                     <span className="inline-flex items-center gap-2.5">
                       <Globe className="w-4 h-4" />
@@ -237,7 +263,7 @@ export function AppShell() {
                   <button
                     type="button"
                     onClick={() => setSubscreen('settings_home')}
-                    className="w-full min-h-[42px] px-3.5 rounded-xl flex items-center gap-2.5 text-xs font-semibold text-slate-700 dark:text-slate-300 hover:bg-white/60 dark:hover:bg-slate-800/60"
+                    className="w-full min-h-[42px] px-3.5 rounded-xl flex items-center gap-2.5 text-xs font-semibold text-slate-700 dark:text-slate-300 hover:bg-white/60 dark:hover:bg-white/10 transition-colors duration-150"
                   >
                     <Settings className="w-4 h-4" />
                     <span>{t.settings.title}</span>
@@ -284,10 +310,16 @@ export function AppShell() {
 
             {/* Main Center Workspace */}
             <main className="lg:col-span-6">
-              {activeTab === 'home' && <HomeFeed />}
-              {activeTab === 'reels' && <ReelsView embedded />}
-              {activeTab === 'explore' && <ExploreView />}
-              {activeTab === 'profile' && <ProfileView />}
+              {subscreen === 'notifications' ? (
+                <NotificationsView />
+              ) : (
+                <>
+                  {activeTab === 'home' && <HomeFeed />}
+                  {activeTab === 'reels' && <ReelsView embedded />}
+                  {activeTab === 'explore' && <ExploreView />}
+                  {activeTab === 'profile' && <ProfileView />}
+                </>
+              )}
             </main>
 
             {/* Right Discovery & AI Assistant Rail (Desktop) */}
@@ -360,25 +392,30 @@ export function AppShell() {
             </aside>
           </div>
 
-          {/* Mobile Fixed 5-Tab Bottom Navigation Bar (Home, Reels, Inbox middle, Explore, Profile) */}
+          {/* Mobile Fixed 5-Tab iOS Liquid Glass Floating Dock */}
           <nav
             aria-label="Mobile bottom navigation"
-            className="lg:hidden fixed bottom-0 left-0 right-0 z-40 h-16 liquid-glass border-x-0 border-b-0 grid grid-cols-5 items-center"
+            className="lg:hidden fixed bottom-2.5 left-2.5 right-2.5 z-40 h-16 px-1.5 rounded-[26px] liquid-glass-dock grid grid-cols-5 items-center gap-1"
           >
             {navItems.map(({ id, label, icon: Icon }) => {
-              const active = activeTab === id;
+              const active = activeTab === id && subscreen !== 'notifications';
               return (
                 <button
                   key={id}
                   type="button"
                   onClick={() => handleNavClick(id)}
-                  className={`min-h-[48px] flex flex-col items-center justify-center gap-0.5 transition-colors ${
+                  className={`relative min-h-[48px] mx-0.5 rounded-[20px] flex flex-col items-center justify-center gap-0.5 transition-all duration-150 active:scale-95 ${
                     active
-                      ? 'text-sky-600 dark:text-sky-400'
-                      : 'text-slate-600 dark:text-slate-400'
+                      ? 'bg-white/80 dark:bg-white/15 text-sky-600 dark:text-sky-300 shadow-[inset_0_1px_0_rgba(255,255,255,0.9),0_4px_14px_rgba(14,165,233,0.18)] dark:shadow-[inset_0_1px_0_rgba(255,255,255,0.24),0_4px_16px_rgba(56,189,248,0.22)]'
+                      : 'text-slate-600 dark:text-slate-300 hover:bg-white/35 dark:hover:bg-white/5'
                   }`}
                 >
-                  <Icon className="w-5 h-5" />
+                  <div className="relative">
+                    <Icon className="w-5 h-5" />
+                    {id === 'messages' && unreadMessages > 0 && (
+                      <span className="absolute -top-0.5 -right-1 w-2 h-2 rounded-full bg-sky-500 ring-2 ring-white dark:ring-slate-900" />
+                    )}
+                  </div>
                   <span className="text-[10px] font-semibold tracking-tight whitespace-nowrap">
                     {label}
                   </span>

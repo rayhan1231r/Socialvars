@@ -29,6 +29,8 @@ export type ActiveModalOrSubscreen =
   | 'report'
   | 'story_viewer'
   | 'story_creator'
+  | 'highlight_creator'
+  | 'highlight_viewer'
   | 'android_project';
 
 export interface UserPublic {
@@ -147,10 +149,37 @@ export interface ChatThemeConfig {
   overlayOpacity?: number;
 }
 
+export interface StoryHighlightItem {
+  id: string;
+  mediaType: 'photo' | 'video' | 'text';
+  mediaUrl?: string;
+  textContent?: string;
+  backgroundGradient?: string;
+  createdAt: string;
+}
+
+export interface StoryHighlight {
+  id: string;
+  ownerUid: string;
+  title: string;
+  coverUrl: string;
+  items: StoryHighlightItem[];
+  createdAt: string;
+  updatedAt?: string;
+}
+
+export interface GroupRestrictions {
+  adminsOnlyMessages?: boolean;
+  onlyAdminsEditInfo?: boolean;
+  blockMediaAttachments?: boolean;
+}
+
 export interface Chat {
   id: string;
   type: 'direct' | 'group';
   title: string;
+  avatarUrl?: string;
+  bio?: string;
   participantIds: string[];
   participantNames: Record<string, string>;
   participantAvatars: Record<string, string>;
@@ -158,6 +187,7 @@ export interface Chat {
   ownerUid?: string;
   adminUids?: string[];
   requireAddApproval?: boolean;
+  restrictions?: GroupRestrictions;
   pendingMemberIds?: string[];
   maxMembers?: number;
   theme?: ChatThemeConfig;

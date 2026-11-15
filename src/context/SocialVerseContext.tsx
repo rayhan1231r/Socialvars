@@ -24,6 +24,7 @@ import type {
   ChatMessage,
   ChatThemeConfig,
   FriendRequest,
+  GroupRestrictions,
   MainTab,
   MediaType,
   NicknameFontStyle,
@@ -35,6 +36,8 @@ import type {
   SavedLoginEntry,
   StickerItem,
   Story,
+  StoryHighlight,
+  StoryHighlightItem,
   ThemeMode,
   UserPrivate,
   UserPublic,
@@ -49,13 +52,21 @@ export class ApiError extends Error {
   status: number;
   code?: string;
   existingEmail?: string;
+  alreadyVerified?: boolean;
 
-  constructor(message: string, status: number, code?: string, existingEmail?: string) {
+  constructor(
+    message: string,
+    status: number,
+    code?: string,
+    existingEmail?: string,
+    alreadyVerified?: boolean
+  ) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
     this.code = code;
     this.existingEmail = existingEmail;
+    this.alreadyVerified = alreadyVerified;
   }
 }
 
@@ -72,6 +83,13 @@ export interface ProfileUpdatePayload {
   isPrivate?: boolean;
 }
 
+interface NavSnapshot {
+  tab: MainTab;
+  viewedProfileUid: string | null;
+  subscreen: ActiveModalOrSubscreen;
+  activeChatId: string | null;
+}
+
 interface BackendStateResponse {
   currentUser: UserPublic | null;
   userPrivate: UserPrivate | null;
@@ -79,6 +97,7 @@ interface BackendStateResponse {
   posts: Post[];
   commentsByPost: Record<string, PostComment[]>;
   stories: Story[];
+  storyHighlights?: StoryHighlight[];
   chats: Chat[];
   messagesByChat: Record<string, ChatMessage[]>;
   notes: NoteItem[];
@@ -98,7 +117,8 @@ interface SocialVerseContextValue {
   isAuthenticated: boolean;
   authModalOpen: boolean;
   authModalReason: string | null;
-  openAuthModal: (reason?: string) => void;
+  authModalPrefill: string | null;
+  openAuthModal: (reason?: string, prefillIdentifier?: string) => void;
   closeAuthModal: () => void;
   requireAuth: (reason?: string) => boolean;
   isLocked: boolean;
@@ -121,8 +141,12 @@ interface SocialVerseContextValue {
   setSubscreen: (sub: ActiveModalOrSubscreen) => void;
   viewedProfileUid: string | null;
   openUserProfile: (uid: string) => void;
+  canGoBack: boolean;
+  goBack: () => void;
   activeStoryIndex: number | null;
   setActiveStoryIndex: (idx: number | null) => void;
+  activeHighlightId: string | null;
+  setActiveHighlightId: (id: string | null) => void;
   activeChatId: string | null;
   setActiveChatId: (id: string | null) => void;
   reportTarget: { type: 'post' | 'user' | 'story' | 'comment'; id: string; label: string } | null;
@@ -134,6 +158,7 @@ interface SocialVerseContextValue {
   loadMorePosts: () => void;
   commentsByPost: Record<string, PostComment[]>;
   stories: Story[];
+  storyHighlights: StoryHighlight[];
   chats: Chat[];
   messagesByChat: Record<string, ChatMessage[]>;
   notes: NoteItem[];
@@ -181,7 +206,11 @@ interface SocialVerseContextValue {
   verifyTwoFactorLogin: (email: string, code: string, saveLogin?: boolean) => Promise<void>;
   loginWithSavedAccount: (entry: SavedLoginEntry) => Promise<void>;
   changePassword: (currentPassword: string, newPassword: string) => Promise<void>;
-  resetPasswordWithOtp: (verificationToken: string, email: string, newPassword: string) => Promise<void>;
+  resetPasswordWithOtp: (
+    verificationToken: string,
+    email: string,
+    newPassword: string
+  ) => Promise<{ method?: 'direct' | 'email_link'; message?: string }>;
   deactivateAccount: (days: number) => Promise<void>;
   logout: () => Promise<void>;
   deleteAccount: () => Promise<void>;
@@ -218,6 +247,18 @@ interface SocialVerseContextValue {
   replyToStory: (storyId: string, text: string) => Promise<void>;
   deleteStory: (storyId: string) => Promise<void>;
   muteStoryAuthor: (authorId: string) => void;
+  createHighlight: (payload: {
+    title: string;
+    coverUrl?: string;
+    storyIds?: string[];
+    items?: StoryHighlightItem[];
+  }) => Promise<StoryHighlight | null>;
+  updateHighlight: (
+    highlightId: string,
+    updates: { title?: string; coverUrl?: string; items?: StoryHighlightItem[] }
+  ) => Promise<void>;
+  deleteHighlight: (highlightId: string) => Promise<void>;
+  fetchUserConnections: (targetUid: string) => Promise<{ followerIds: string[]; followingIds: string[] }>;
 
   // Notes & Stickers
   publishNote: (text: string) => Promise<void>;
@@ -266,7 +307,8 @@ interface SocialVerseContextValue {
   createDirectOrGroupChat: (
     title: string,
     participantUids: string[],
-    type: 'direct' | 'group'
+    type: 'direct' | 'group',
+    extra?: { avatarUrl?: string; bio?: string; restrictions?: GroupRestrictions }
   ) => Promise<string | null>;
   updateChatTheme: (chatId: string, theme: ChatThemeConfig) => Promise<void>;
   updateChatNickname: (chatId: string, targetUid: string, nickname: string) => Promise<void>;
@@ -278,7 +320,16 @@ interface SocialVerseContextValue {
     targetUid: string,
     action: 'promote_admin' | 'demote_admin' | 'transfer_owner'
   ) => Promise<void>;
-  updateGroupSettings: (chatId: string, updates: { title?: string; requireAddApproval?: boolean }) => Promise<void>;
+  updateGroupSettings: (
+    chatId: string,
+    updates: {
+      title?: string;
+      bio?: string;
+      avatarUrl?: string;
+      requireAddApproval?: boolean;
+      restrictions?: GroupRestrictions;
+    }
+  ) => Promise<void>;
 
   // Broadcast Channels
   createBroadcastChannel: (title: string, description: string) => Promise<void>;
@@ -409,6 +460,7 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
   const [savedLogins, setSavedLogins] = useState<SavedLoginEntry[]>(() => loadSavedLogins());
   const [authModalOpen, setAuthModalOpen] = useState<boolean>(false);
   const [authModalReason, setAuthModalReason] = useState<string | null>(null);
+  const [authModalPrefill, setAuthModalPrefill] = useState<string | null>(null);
   const [isLocked, setIsLocked] = useState<boolean>(false);
   const [pendingPhotoSetup, setPendingPhotoSetup] = useState<boolean>(false);
 
@@ -417,10 +469,12 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
   const [language, setLanguageState] = useState<AppLanguage>('en');
   const [theme, setThemeState] = useState<ThemeMode>('light');
 
-  const [activeTab, setActiveTab] = useState<MainTab>('home');
+  const [activeTab, setActiveTabState] = useState<MainTab>('home');
   const [subscreen, setSubscreenState] = useState<ActiveModalOrSubscreen>(null);
   const [viewedProfileUid, setViewedProfileUid] = useState<string | null>(null);
+  const [navHistory, setNavHistory] = useState<NavSnapshot[]>([]);
   const [activeStoryIndex, setActiveStoryIndex] = useState<number | null>(null);
+  const [activeHighlightId, setActiveHighlightId] = useState<string | null>(null);
   const [activeChatId, setActiveChatId] = useState<string | null>(null);
   const [reportTarget, setReportTarget] = useState<{
     type: 'post' | 'user' | 'story' | 'comment';
@@ -433,6 +487,7 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
   const [visiblePostLimit, setVisiblePostLimit] = useState<number>(10);
   const [commentsByPost, setCommentsByPost] = useState<Record<string, PostComment[]>>(INITIAL_COMMENTS);
   const [stories, setStories] = useState<Story[]>(INITIAL_STORIES);
+  const [storyHighlights, setStoryHighlights] = useState<StoryHighlight[]>([]);
   const [chats, setChats] = useState<Chat[]>(INITIAL_CHATS);
   const [messagesByChat, setMessagesByChat] = useState<Record<string, ChatMessage[]>>(INITIAL_MESSAGES);
   const [notes, setNotes] = useState<NoteItem[]>(INITIAL_NOTES);
@@ -527,7 +582,7 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
       setCurrentUser(data.currentUser);
     }
     if (data.userPrivate) {
-      setUserPrivate(data.userPrivate);
+      setUserPrivate({ ...INITIAL_USER_PRIVATE, ...data.userPrivate });
       if (data.userPrivate.language) setLanguageState(data.userPrivate.language);
       if (data.userPrivate.themeMode) setThemeState(data.userPrivate.themeMode === 'dark' ? 'dark' : 'light');
     }
@@ -535,6 +590,7 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
     setPosts(data.posts || []);
     setCommentsByPost(data.commentsByPost || {});
     setStories(data.stories || []);
+    setStoryHighlights(data.storyHighlights || []);
     setChats(data.chats || []);
     setMessagesByChat(data.messagesByChat || {});
     setNotes(data.notes || []);
@@ -560,12 +616,18 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
       const res = await fetch(url, { ...options, headers });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        const errBody = data as { error?: string; code?: string; existingEmail?: string };
+        const errBody = data as {
+          error?: string;
+          code?: string;
+          existingEmail?: string;
+          alreadyVerified?: boolean;
+        };
         throw new ApiError(
           errBody.error || `Request failed (${res.status})`,
           res.status,
           errBody.code,
-          errBody.existingEmail
+          errBody.existingEmail,
+          errBody.alreadyVerified
         );
       }
       return data as T;
@@ -686,14 +748,16 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
     };
   }, [sessionToken, applyServerState, refreshState, cleanupMediaAndPeer, showToast]);
 
-  const openAuthModal = (reason?: string) => {
+  const openAuthModal = (reason?: string, prefillIdentifier?: string) => {
     setAuthModalReason(reason || null);
+    setAuthModalPrefill(prefillIdentifier || null);
     setAuthModalOpen(true);
   };
 
   const closeAuthModal = () => {
     setAuthModalOpen(false);
     setAuthModalReason(null);
+    setAuthModalPrefill(null);
   };
 
   const requireAuth = (reason?: string): boolean => {
@@ -702,10 +766,18 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
     return false;
   };
 
+  const setActiveTab = (tab: MainTab) => {
+    setActiveTabState(tab);
+    if (subscreen === 'notifications') {
+      setSubscreenState(null);
+    }
+  };
+
   const setSubscreen = (sub: ActiveModalOrSubscreen) => {
     if (
       (sub === 'edit_profile' ||
         sub === 'story_creator' ||
+        sub === 'highlight_creator' ||
         sub === 'ai_assistant' ||
         sub === 'create_sheet' ||
         sub === 'broadcast_channel') &&
@@ -713,6 +785,12 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
     ) {
       openAuthModal();
       return;
+    }
+    if (sub === 'notifications' && subscreen !== 'notifications') {
+      setNavHistory((prev) => [
+        ...prev.slice(-19),
+        { tab: activeTab, viewedProfileUid, subscreen, activeChatId },
+      ]);
     }
     setSubscreenState(sub);
   };
@@ -1018,11 +1096,17 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
     email: string,
     newPassword: string
   ) => {
-    await apiFetch('/api/auth/reset-password', {
-      method: 'POST',
-      body: JSON.stringify({ verificationToken, email, newPassword }),
-    });
-    showToast(language === 'bn' ? 'পাসওয়ার্ড রিসেট সম্পন্ন হয়েছে' : 'Password reset complete');
+    const res = await apiFetch<{ ok: boolean; method?: 'direct' | 'email_link'; message?: string }>(
+      '/api/auth/reset-password',
+      {
+        method: 'POST',
+        body: JSON.stringify({ verificationToken, email, newPassword }),
+      }
+    );
+    showToast(
+      res.message || (language === 'bn' ? 'পাসওয়ার্ড রিসেট সম্পন্ন হয়েছে' : 'Password reset complete')
+    );
+    return res;
   };
 
   const deactivateAccount = async (days: number) => {
@@ -1051,8 +1135,9 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
     setNotifications([]);
     setSubscreenState(null);
     setViewedProfileUid(null);
+    setNavHistory([]);
     setActiveChatId(null);
-    setActiveTab('home');
+    setActiveTabState('home');
     await refreshState('');
     showToast(language === 'bn' ? 'লগ আউট সম্পন্ন হয়েছে' : 'Logged out');
   };
@@ -1067,7 +1152,8 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
     setUserPrivate(INITIAL_USER_PRIVATE);
     setSubscreenState(null);
     setViewedProfileUid(null);
-    setActiveTab('home');
+    setNavHistory([]);
+    setActiveTabState('home');
     await refreshState('');
     showToast(language === 'bn' ? 'অ্যাকাউন্ট স্থায়ীভাবে মুছে ফেলা হয়েছে' : 'Account deleted permanently.');
   };
@@ -1279,10 +1365,48 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
 
   const muteStoryAuthor = (authorId: string) => {
     if (!requireAuth()) return;
-    const next = Array.from(new Set([...userPrivate.mutedStoryUserIds, authorId]));
+    const next = Array.from(new Set([...(userPrivate.mutedStoryUserIds || []), authorId]));
     updatePrivateSettings({ mutedStoryUserIds: next });
     setActiveStoryIndex(null);
     showToast(language === 'bn' ? 'স্টোরি মিউট করা হয়েছে' : 'Stories muted');
+  };
+
+  const createHighlight: SocialVerseContextValue['createHighlight'] = async (payload) => {
+    if (!requireAuth()) return null;
+    const res = await apiFetch<{ highlight: StoryHighlight }>('/api/highlights', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+    setStoryHighlights((prev) => [res.highlight, ...prev.filter((h) => h.id !== res.highlight.id)]);
+    void refreshState();
+    showToast(language === 'bn' ? 'হাইলাইট যুক্ত হয়েছে' : 'Story highlight added');
+    return res.highlight;
+  };
+
+  const updateHighlight: SocialVerseContextValue['updateHighlight'] = async (highlightId, updates) => {
+    if (!requireAuth()) return;
+    const res = await apiFetch<{ highlight: StoryHighlight }>(`/api/highlights/${highlightId}`, {
+      method: 'PATCH',
+      body: JSON.stringify(updates),
+    });
+    setStoryHighlights((prev) => prev.map((h) => (h.id === highlightId ? res.highlight : h)));
+    void refreshState();
+    showToast(language === 'bn' ? 'হাইলাইট আপডেট হয়েছে' : 'Highlight updated');
+  };
+
+  const deleteHighlight = async (highlightId: string) => {
+    if (!requireAuth()) return;
+    await apiFetch(`/api/highlights/${highlightId}`, { method: 'DELETE' });
+    setStoryHighlights((prev) => prev.filter((h) => h.id !== highlightId));
+    if (activeHighlightId === highlightId) setActiveHighlightId(null);
+    void refreshState();
+    showToast(language === 'bn' ? 'হাইলাইট মুছে ফেলা হয়েছে' : 'Highlight removed');
+  };
+
+  const fetchUserConnections = async (targetUid: string) => {
+    return apiFetch<{ followerIds: string[]; followingIds: string[] }>(
+      `/api/users/${targetUid}/connections`
+    );
   };
 
   // Notes & Stickers
@@ -1424,7 +1548,8 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
   const createDirectOrGroupChat = async (
     title: string,
     participantUids: string[],
-    type: 'direct' | 'group'
+    type: 'direct' | 'group',
+    extra?: { avatarUrl?: string; bio?: string; restrictions?: GroupRestrictions }
   ): Promise<string | null> => {
     if (!requireAuth()) return null;
     const uniqueParticipants = Array.from(
@@ -1438,55 +1563,234 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
       );
       return null;
     }
-    const res = await apiFetch<{ chat: Chat }>('/api/chats', {
-      method: 'POST',
-      body: JSON.stringify({ title, participantUids: uniqueParticipants, type }),
-    });
-    await refreshState();
-    setActiveChatId(res.chat.id);
-    return res.chat.id;
+
+    const tempId = type === 'group' ? `temp_grp_${Date.now()}` : null;
+    if (tempId) {
+      const nowIso = new Date().toISOString();
+      const participantNames: Record<string, string> = {};
+      const participantAvatars: Record<string, string> = {};
+      for (const uid of uniqueParticipants) {
+        const profile =
+          uid === currentUser.uid ? currentUser : creators.find((c) => c.uid === uid);
+        if (profile) {
+          participantNames[uid] = profile.displayName;
+          participantAvatars[uid] = profile.photoUrl || '';
+        }
+      }
+      const optimisticGroup: Chat = {
+        id: tempId,
+        type: 'group',
+        title: title.trim() || 'New Group',
+        bio: extra?.bio?.trim() || '',
+        avatarUrl: extra?.avatarUrl || '',
+        participantIds: uniqueParticipants,
+        participantNames,
+        participantAvatars,
+        ownerUid: currentUser.uid,
+        adminUids: [currentUser.uid],
+        restrictions: extra?.restrictions || {},
+        lastMessageText: '',
+        lastMessageAt: nowIso,
+        unreadCount: 0,
+        unreadByUids: [],
+        createdBy: currentUser.uid,
+        createdAt: nowIso,
+        typingUsers: [],
+      };
+      setChats((prev) => [optimisticGroup, ...prev]);
+      setActiveChatId(tempId);
+    }
+
+    try {
+      const res = await apiFetch<{ chat: Chat }>('/api/chats', {
+        method: 'POST',
+        body: JSON.stringify({ title, participantUids: uniqueParticipants, type, ...extra }),
+      });
+      setChats((prev) => {
+        const filtered = prev.filter((c) => c.id !== tempId && c.id !== res.chat.id);
+        return [res.chat, ...filtered];
+      });
+      setActiveChatId((prev) => (!prev || prev === tempId ? res.chat.id : res.chat.id));
+      void refreshState();
+      return res.chat.id;
+    } catch (err) {
+      if (tempId) {
+        setChats((prev) => prev.filter((c) => c.id !== tempId));
+        setActiveChatId((prev) => (prev === tempId ? null : prev));
+      }
+      showToast(err instanceof Error ? err.message : 'Could not create chat.');
+      return null;
+    }
   };
 
   const updateChatTheme = async (chatId: string, nextTheme: ChatThemeConfig) => {
     if (!requireAuth()) return;
-    await apiFetch(`/api/chats/${chatId}/theme`, {
-      method: 'PATCH',
-      body: JSON.stringify(nextTheme),
-    });
-    await refreshState();
+    setChats((prev) => prev.map((c) => (c.id === chatId ? { ...c, theme: nextTheme } : c)));
     showToast(language === 'bn' ? 'চ্যাট থিম আপডেট হয়েছে' : 'Chat theme updated');
+    try {
+      await apiFetch(`/api/chats/${chatId}/theme`, {
+        method: 'PATCH',
+        body: JSON.stringify(nextTheme),
+      });
+    } catch (err) {
+      void refreshState();
+      showToast(err instanceof Error ? err.message : 'Failed to update chat theme.');
+    }
   };
 
   const updateChatNickname = async (chatId: string, targetUid: string, nickname: string) => {
     if (!requireAuth()) return;
-    await apiFetch(`/api/chats/${chatId}/nicknames`, {
-      method: 'PATCH',
-      body: JSON.stringify({ targetUid, nickname }),
-    });
-    await refreshState();
+    setChats((prev) =>
+      prev.map((c) =>
+        c.id === chatId
+          ? {
+              ...c,
+              chatNicknames: {
+                ...(c.chatNicknames || {}),
+                [targetUid]: nickname,
+              },
+            }
+          : c
+      )
+    );
     showToast(language === 'bn' ? 'নিকনেম সেভ হয়েছে' : 'Chat nickname updated');
+    try {
+      const res = await apiFetch<{ chatNicknames: Record<string, string> }>(
+        `/api/chats/${chatId}/nicknames`,
+        {
+          method: 'PATCH',
+          body: JSON.stringify({ targetUid, nickname }),
+        }
+      );
+      if (res?.chatNicknames) {
+        setChats((prev) =>
+          prev.map((c) => (c.id === chatId ? { ...c, chatNicknames: res.chatNicknames } : c))
+        );
+      }
+    } catch (err) {
+      void refreshState();
+      showToast(err instanceof Error ? err.message : 'Failed to update nickname.');
+    }
   };
 
   const addGroupMember = async (chatId: string, targetUid: string) => {
-    const res = await apiFetch<{ status: string }>(`/api/chats/${chatId}/members`, {
-      method: 'POST',
-      body: JSON.stringify({ targetUid }),
-    });
-    await refreshState();
-    return res.status;
+    const existing = chats.find((c) => c.id === chatId);
+    const isAdmin =
+      existing?.ownerUid === currentUser.uid || existing?.adminUids?.includes(currentUser.uid);
+    const optimisticPending = Boolean(existing?.requireAddApproval && !isAdmin);
+    const targetUser = creators.find((c) => c.uid === targetUid);
+
+    setChats((prev) =>
+      prev.map((c) => {
+        if (c.id !== chatId) return c;
+        if (optimisticPending) {
+          const pending = Array.from(new Set([...(c.pendingMemberIds || []), targetUid]));
+          return { ...c, pendingMemberIds: pending };
+        }
+        const participantIds = Array.from(new Set([...c.participantIds, targetUid]));
+        return {
+          ...c,
+          participantIds,
+          participantNames: targetUser
+            ? { ...(c.participantNames || {}), [targetUid]: targetUser.displayName }
+            : c.participantNames,
+          participantAvatars: targetUser
+            ? { ...(c.participantAvatars || {}), [targetUid]: targetUser.photoUrl || '' }
+            : c.participantAvatars,
+        };
+      })
+    );
+
+    try {
+      const res = await apiFetch<{ status: string; chat?: Chat }>(`/api/chats/${chatId}/members`, {
+        method: 'POST',
+        body: JSON.stringify({ targetUid }),
+      });
+      if (res.chat) {
+        setChats((prev) => prev.map((c) => (c.id === chatId ? res.chat! : c)));
+      }
+      return res.status;
+    } catch (err) {
+      void refreshState();
+      showToast(err instanceof Error ? err.message : 'Failed to add member.');
+      return 'error';
+    }
   };
 
   const approveGroupMember = async (chatId: string, targetUid: string, accept: boolean) => {
-    await apiFetch(`/api/chats/${chatId}/members/approve`, {
-      method: 'POST',
-      body: JSON.stringify({ targetUid, accept }),
-    });
-    await refreshState();
+    const targetUser = creators.find((c) => c.uid === targetUid);
+    setChats((prev) =>
+      prev.map((c) => {
+        if (c.id !== chatId) return c;
+        const pendingMemberIds = (c.pendingMemberIds || []).filter((id) => id !== targetUid);
+        const participantIds = accept
+          ? Array.from(new Set([...c.participantIds, targetUid]))
+          : c.participantIds;
+        return {
+          ...c,
+          pendingMemberIds,
+          participantIds,
+          participantNames:
+            accept && targetUser
+              ? { ...(c.participantNames || {}), [targetUid]: targetUser.displayName }
+              : c.participantNames,
+          participantAvatars:
+            accept && targetUser
+              ? { ...(c.participantAvatars || {}), [targetUid]: targetUser.photoUrl || '' }
+              : c.participantAvatars,
+        };
+      })
+    );
+
+    try {
+      const res = await apiFetch<{ ok: boolean; chat?: Chat }>(
+        `/api/chats/${chatId}/members/approve`,
+        {
+          method: 'POST',
+          body: JSON.stringify({ targetUid, accept }),
+        }
+      );
+      if (res.chat) {
+        setChats((prev) => prev.map((c) => (c.id === chatId ? res.chat! : c)));
+      }
+    } catch (err) {
+      void refreshState();
+      showToast(err instanceof Error ? err.message : 'Failed to update member request.');
+    }
   };
 
   const removeGroupMember = async (chatId: string, targetUid: string) => {
-    await apiFetch(`/api/chats/${chatId}/members/${targetUid}`, { method: 'DELETE' });
-    await refreshState();
+    if (targetUid === currentUser.uid) {
+      setChats((prev) => prev.filter((c) => c.id !== chatId));
+      if (activeChatId === chatId) setActiveChatId(null);
+    } else {
+      setChats((prev) =>
+        prev.map((c) =>
+          c.id === chatId
+            ? {
+                ...c,
+                participantIds: c.participantIds.filter((id) => id !== targetUid),
+                adminUids: (c.adminUids || []).filter((id) => id !== targetUid),
+              }
+            : c
+        )
+      );
+    }
+
+    try {
+      const res = await apiFetch<{ ok: boolean; chat?: Chat }>(
+        `/api/chats/${chatId}/members/${targetUid}`,
+        {
+          method: 'DELETE',
+        }
+      );
+      if (targetUid !== currentUser.uid && res.chat) {
+        setChats((prev) => prev.map((c) => (c.id === chatId ? res.chat! : c)));
+      }
+    } catch (err) {
+      void refreshState();
+      showToast(err instanceof Error ? err.message : 'Failed to remove member.');
+    }
   };
 
   const updateGroupRole = async (
@@ -1494,22 +1798,82 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
     targetUid: string,
     action: 'promote_admin' | 'demote_admin' | 'transfer_owner'
   ) => {
-    await apiFetch(`/api/chats/${chatId}/roles`, {
-      method: 'PATCH',
-      body: JSON.stringify({ targetUid, action }),
-    });
-    await refreshState();
+    setChats((prev) =>
+      prev.map((c) => {
+        if (c.id !== chatId) return c;
+        const currentAdmins = c.adminUids || [];
+        if (action === 'promote_admin') {
+          return { ...c, adminUids: Array.from(new Set([...currentAdmins, targetUid])) };
+        }
+        if (action === 'demote_admin') {
+          return { ...c, adminUids: currentAdmins.filter((id) => id !== targetUid) };
+        }
+        return {
+          ...c,
+          ownerUid: targetUid,
+          adminUids: Array.from(new Set([...currentAdmins, currentUser.uid, targetUid])),
+        };
+      })
+    );
+
+    try {
+      const res = await apiFetch<{ chat: Chat }>(`/api/chats/${chatId}/roles`, {
+        method: 'PATCH',
+        body: JSON.stringify({ targetUid, action }),
+      });
+      if (res?.chat) {
+        setChats((prev) => prev.map((c) => (c.id === chatId ? res.chat : c)));
+      }
+    } catch (err) {
+      void refreshState();
+      showToast(err instanceof Error ? err.message : 'Failed to update role.');
+    }
   };
 
   const updateGroupSettings = async (
     chatId: string,
-    updates: { title?: string; requireAddApproval?: boolean }
+    updates: {
+      title?: string;
+      bio?: string;
+      avatarUrl?: string;
+      requireAddApproval?: boolean;
+      restrictions?: GroupRestrictions;
+    }
   ) => {
-    await apiFetch(`/api/chats/${chatId}/settings`, {
-      method: 'PATCH',
-      body: JSON.stringify(updates),
-    });
-    await refreshState();
+    setChats((prev) =>
+      prev.map((c) => {
+        if (c.id !== chatId) return c;
+        return {
+          ...c,
+          ...(updates.title !== undefined ? { title: updates.title } : {}),
+          ...(updates.bio !== undefined ? { bio: updates.bio } : {}),
+          ...(updates.avatarUrl !== undefined ? { avatarUrl: updates.avatarUrl } : {}),
+          ...(updates.requireAddApproval !== undefined
+            ? { requireAddApproval: updates.requireAddApproval }
+            : {}),
+          ...(updates.restrictions !== undefined
+            ? {
+                restrictions: {
+                  ...(c.restrictions || {}),
+                  ...updates.restrictions,
+                },
+              }
+            : {}),
+        };
+      })
+    );
+    try {
+      const res = await apiFetch<{ chat: Chat }>(`/api/chats/${chatId}/settings`, {
+        method: 'PATCH',
+        body: JSON.stringify(updates),
+      });
+      if (res?.chat) {
+        setChats((prev) => prev.map((c) => (c.id === chatId ? res.chat : c)));
+      }
+    } catch (err) {
+      void refreshState();
+      showToast(err instanceof Error ? err.message : 'Failed to update group settings.');
+    }
   };
 
   // Broadcast Channels
@@ -1564,22 +1928,66 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
   // Social Graph & Profile
   const toggleFollow = async (targetUid: string) => {
     if (!requireAuth()) return;
-    const res = await apiFetch<{ status: string }>(`/api/users/${targetUid}/follow`, {
-      method: 'POST',
-    });
-    await refreshState();
-    if (res.status === 'requested') {
-      showToast(language === 'bn' ? 'ফলো রিকোয়েস্ট পাঠানো হয়েছে' : 'Follow request sent');
+    const target = creators.find((c) => c.uid === targetUid);
+    const wasFollowing = followingIds.includes(targetUid);
+    const wasPending = friendRequests.some(
+      (r) => r.fromUid === currentUser.uid && r.toUid === targetUid && r.status === 'pending'
+    );
+
+    // Optimistic update for snappy Follow / Follow Back feedback
+    if (wasFollowing) {
+      setFollowingIds((prev) => prev.filter((id) => id !== targetUid));
+    } else if (!target?.isPrivate) {
+      setFollowingIds((prev) => Array.from(new Set([...prev, targetUid])));
+    } else if (wasPending) {
+      setFriendRequests((prev) =>
+        prev.filter((r) => !(r.fromUid === currentUser.uid && r.toUid === targetUid && r.status === 'pending'))
+      );
+    }
+
+    try {
+      const res = await apiFetch<{
+        status: string;
+        followingIds?: string[];
+        targetFollowersCount?: number;
+      }>(`/api/users/${targetUid}/follow`, {
+        method: 'POST',
+      });
+      if (Array.isArray(res.followingIds)) {
+        setFollowingIds(res.followingIds);
+      }
+      if (res.status === 'requested') {
+        showToast(language === 'bn' ? 'ফলো রিকোয়েস্ট পাঠানো হয়েছে' : 'Follow request sent');
+      } else if (res.status === 'cancelled') {
+        showToast(language === 'bn' ? 'ফলো রিকোয়েস্ট বাতিল হয়েছে' : 'Follow request cancelled');
+      }
+      void refreshState();
+    } catch (err) {
+      void refreshState();
+      showToast(err instanceof Error ? err.message : 'Could not update follow status');
     }
   };
 
   const respondToFriendRequest = async (requestId: string, accept: boolean) => {
     if (!requireAuth()) return;
-    await apiFetch(`/api/friend-requests/${requestId}/respond`, {
-      method: 'POST',
-      body: JSON.stringify({ accept }),
-    });
-    await refreshState();
+    setFriendRequests((prev) =>
+      prev.map((r) => (r.id === requestId ? { ...r, status: accept ? 'accepted' : 'rejected' } : r))
+    );
+    try {
+      const res = await apiFetch<{ ok: boolean; followerIds?: string[]; followingIds?: string[] }>(
+        `/api/friend-requests/${requestId}/respond`,
+        {
+          method: 'POST',
+          body: JSON.stringify({ accept }),
+        }
+      );
+      if (Array.isArray(res.followerIds)) setFollowerIds(res.followerIds);
+      if (Array.isArray(res.followingIds)) setFollowingIds(res.followingIds);
+      void refreshState();
+    } catch (err) {
+      void refreshState();
+      showToast(err instanceof Error ? err.message : 'Could not update follow request');
+    }
   };
 
   const removeFollower = async (followerUid: string) => {
@@ -1677,8 +2085,35 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
   };
 
   const openUserProfile = (uid: string) => {
+    const isAlreadyThatProfile =
+      activeTab === 'profile' && (viewedProfileUid ?? currentUser.uid) === uid && subscreen === null;
+    if (!isAlreadyThatProfile) {
+      setNavHistory((prev) => [
+        ...prev.slice(-19),
+        { tab: activeTab, viewedProfileUid, subscreen, activeChatId },
+      ]);
+    }
     setViewedProfileUid(uid);
-    setActiveTab('profile');
+    setActiveTabState('profile');
+    setSubscreenState(null);
+  };
+
+  const goBack = () => {
+    const prevSnap = navHistory[navHistory.length - 1];
+    if (prevSnap) {
+      setNavHistory((prev) => prev.slice(0, -1));
+      setActiveTabState(prevSnap.tab);
+      setViewedProfileUid(prevSnap.viewedProfileUid);
+      setSubscreenState(prevSnap.subscreen);
+      setActiveChatId(prevSnap.activeChatId);
+      return;
+    }
+    if (subscreen === 'notifications') {
+      setSubscreenState(null);
+      return;
+    }
+    setViewedProfileUid(null);
+    setActiveTabState('home');
     setSubscreenState(null);
   };
 
@@ -1700,20 +2135,23 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
     });
   };
 
-  const activeStories = useMemo(
-    () =>
-      stories.filter(
-        (s) =>
-          !userPrivate.mutedStoryUserIds.includes(s.authorId) &&
-          !userPrivate.blockedUserIds.includes(s.authorId)
-      ),
-    [stories, userPrivate.mutedStoryUserIds, userPrivate.blockedUserIds]
-  );
+  const activeStories = useMemo(() => {
+    const muted = userPrivate.mutedStoryUserIds || [];
+    const blocked = userPrivate.blockedUserIds || [];
+    return stories.filter(
+      (s) => !muted.includes(s.authorId) && !blocked.includes(s.authorId)
+    );
+  }, [stories, userPrivate.mutedStoryUserIds, userPrivate.blockedUserIds]);
 
-  const visiblePosts = useMemo(
-    () => posts.filter((p) => !userPrivate.blockedUserIds.includes(p.authorId)),
-    [posts, userPrivate.blockedUserIds]
-  );
+  const visibleHighlights = useMemo(() => {
+    const blocked = userPrivate.blockedUserIds || [];
+    return storyHighlights.filter((h) => !blocked.includes(h.ownerUid));
+  }, [storyHighlights, userPrivate.blockedUserIds]);
+
+  const visiblePosts = useMemo(() => {
+    const blocked = userPrivate.blockedUserIds || [];
+    return posts.filter((p) => !blocked.includes(p.authorId));
+  }, [posts, userPrivate.blockedUserIds]);
 
   return (
     <SocialVerseContext.Provider
@@ -1724,6 +2162,7 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
         isAuthenticated,
         authModalOpen,
         authModalReason,
+        authModalPrefill,
         openAuthModal,
         closeAuthModal,
         requireAuth,
@@ -1746,8 +2185,12 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
         setSubscreen,
         viewedProfileUid,
         openUserProfile,
+        canGoBack: navHistory.length > 0 || subscreen === 'notifications' || Boolean(viewedProfileUid && viewedProfileUid !== currentUser.uid),
+        goBack,
         activeStoryIndex,
         setActiveStoryIndex,
+        activeHighlightId,
+        setActiveHighlightId,
         activeChatId,
         setActiveChatId,
         reportTarget,
@@ -1758,6 +2201,7 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
         loadMorePosts: () => setVisiblePostLimit((v) => v + 6),
         commentsByPost,
         stories: activeStories,
+        storyHighlights: visibleHighlights,
         chats,
         messagesByChat,
         notes,
@@ -1806,6 +2250,10 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
         replyToStory,
         deleteStory,
         muteStoryAuthor,
+        createHighlight,
+        updateHighlight,
+        deleteHighlight,
+        fetchUserConnections,
         publishNote,
         deleteMyNote,
         toggleLikeNote,
