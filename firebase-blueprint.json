@@ -229,6 +229,18 @@
       },
       "required": ["uid", "postId", "createdAt"]
     },
+    "PostLike": {
+      "title": "PostLike",
+      "description": "Like toggle record owned by a user for a post.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "uid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "postId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "uid", "postId", "createdAt"]
+    },
     "Report": {
       "title": "Report",
       "description": "User-submitted moderation report for posts, stories, or accounts.",
@@ -356,6 +368,10 @@
     "/saved_posts/{saveId}": {
       "schema": { "$ref": "#/entities/SavedPost" },
       "description": "Bookmarks scoped strictly to owner uid."
+    },
+    "/post_likes/{likeId}": {
+      "schema": { "$ref": "#/entities/PostLike" },
+      "description": "Per-user post like records scoped strictly to owner uid."
     },
     "/reports/{reportId}": {
       "schema": { "$ref": "#/entities/Report" },

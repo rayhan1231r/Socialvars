@@ -16,14 +16,17 @@
    ```bash
    firebase deploy --only firestore:rules,storage
    ```
-5. **Cloud Functions & Gemini Secret**:
+5. **Cloud Functions & SMTP OTP Secrets**:
    ```bash
    cd functions
    npm install
    firebase functions:secrets:set GEMINI_API_KEY
+   firebase functions:secrets:set GMAIL_USER
+   firebase functions:secrets:set GMAIL_APP_PASSWORD
+   firebase functions:secrets:set APP_SECRET
    npm run deploy
    ```
-   All endpoints on `socialverseApi` enforce Firebase ID Token verification (`Authorization: Bearer <token>`), keeping `GEMINI_API_KEY` strictly server-side.
+   `socialverseApi` keeps `GEMINI_API_KEY`, `GMAIL_USER`, `GMAIL_APP_PASSWORD`, and `APP_SECRET` strictly server-side, powering Gmail SMTP 6-digit OTP verification and username login resolution for the Android APK.
 
 ## 3. Release-Ready APK / AAB Build Instructions
 1. Create `android/keystore.properties`:

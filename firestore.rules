@@ -39,6 +39,10 @@ service cloud.firestore {
       return arr is list && arr.size() <= maxLen && (arr.size() == 0 || (arr[0] is string && arr[0].size() <= 128));
     }
 
+    function isValidMediaUrlList(arr, maxLen) {
+      return arr is list && arr.size() <= maxLen && (arr.size() == 0 || (arr[0] is string && arr[0].size() <= 350000));
+    }
+
     // Validation Blueprints
     function isValidUserPublic(data, userId) {
       return data.keys().hasAll(['uid', 'username', 'displayName', 'isPrivate', 'followersCount', 'followingCount', 'postsCount', 'onboardingCompleted', 'createdAt'])
@@ -75,7 +79,7 @@ service cloud.firestore {
       return data.keys().hasAll(['uid', 'email', 'language', 'whoCanMessage', 'whoCanViewStories', 'updatedAt'])
         && data.keys().hasOnly([
           'uid', 'email', 'language', 'themeMode', 'biometricLockEnabled', 'twoFactorEnabled', 'saveLoginInfo',
-          'whoCanMessage', 'whoCanViewStories', 'whoCanFollow', 'notificationPrefs', 'blockedUserIds', 'mutedStoryUserIds', 'updatedAt'
+          'whoCanMessage', 'whoCanViewStories', 'whoCanFollow', 'notificationPrefs', 'blockedUserIds', 'mutedStoryUserIds', 'closeFriendUids', 'updatedAt'
         ])
         && data.uid == userId
         && data.email is string && data.email.size() <= 254
@@ -90,6 +94,7 @@ service cloud.firestore {
         && (!('notificationPrefs' in data) || data.notificationPrefs is map)
         && (!('blockedUserIds' in data) || isValidStringList(data.blockedUserIds, 200))
         && (!('mutedStoryUserIds' in data) || isValidStringList(data.mutedStoryUserIds, 200))
+        && (!('closeFriendUids' in data) || isValidStringList(data.closeFriendUids, 200))
         && data.updatedAt is timestamp;
     }
 
@@ -106,7 +111,7 @@ service cloud.firestore {
         && data.authorDisplayName is string && data.authorDisplayName.size() >= 1 && data.authorDisplayName.size() <= 50
         && (!('authorAvatar' in data) || (data.authorAvatar is string && data.authorAvatar.size() <= 200000))
         && data.caption is string && data.caption.size() <= 2200
-        && (!('mediaUrls' in data) || isValidStringList(data.mediaUrls, 10))
+        && (!('mediaUrls' in data) || isValidMediaUrlList(data.mediaUrls, 10))
         && (!('coverUrl' in data) || (data.coverUrl is string && data.coverUrl.size() <= 200000))
         && data.mediaType in ['text', 'image', 'carousel', 'video', 'reel']
         && (!('hashtags' in data) || isValidStringList(data.hashtags, 20))
@@ -266,8 +271,8 @@ service cloud.firestore {
 
     // 1. Public User Profiles (No PII)
     match /users/{userId} {
-      allow get: if isSignedIn() && isValidId(userId);
-      allow list: if isSignedIn() && resource.data.onboardingCompleted == true;
+      allow get: if isValidId(userId) && (isSignedIn() || (existing().onboardingCompleted == true && existing().isDeactivated != true));
+      allow list: if resource.data.onboardingCompleted == true;
       allow create: if isOwner(userId) && isValidId(userId) && isValidUserPublic(incoming(), userId) && incoming().createdAt == request.time;
       allow update: if isOwner(userId) && isValidId(userId) && isValidUserPublic(incoming(), userId)
         && incoming().uid == existing().uid
@@ -290,7 +295,7 @@ service cloud.firestore {
           && incoming().updatedAt == request.time
           && incoming().diff(existing()).affectedKeys().hasOnly([
             'email', 'language', 'themeMode', 'biometricLockEnabled', 'twoFactorEnabled', 'saveLoginInfo',
-            'whoCanMessage', 'whoCanViewStories', 'whoCanFollow', 'notificationPrefs', 'blockedUserIds', 'mutedStoryUserIds', 'updatedAt'
+            'whoCanMessage', 'whoCanViewStories', 'whoCanFollow', 'notificationPrefs', 'blockedUserIds', 'mutedStoryUserIds', 'closeFriendUids', 'updatedAt'
           ]);
         allow delete: if isOwner(userId) && isValidId(docId);
       }
@@ -324,8 +329,8 @@ service cloud.firestore {
 
     // 3. Posts & Reels + Nested Comments
     match /posts/{postId} {
-      allow get: if isSignedIn() && isValidId(postId) && (existing().visibility == 'public' || existing().authorId == request.auth.uid);
-      allow list: if isSignedIn() && (resource.data.visibility == 'public' || resource.data.authorId == request.auth.uid);
+      allow get: if isValidId(postId) && (existing().visibility == 'public' || (isSignedIn() && existing().authorId == request.auth.uid));
+      allow list: if resource.data.visibility == 'public' || (isSignedIn() && resource.data.authorId == request.auth.uid);
       allow create: if isSignedIn() && isValidId(postId) && isValidPost(incoming())
         && incoming().id == postId
         && incoming().authorId == request.auth.uid
@@ -344,8 +349,8 @@ service cloud.firestore {
       allow delete: if isSignedIn() && isValidId(postId) && existing().authorId == request.auth.uid;
 
       match /comments/{commentId} {
-        allow get: if isSignedIn() && isValidId(postId) && isValidId(commentId);
-        allow list: if isSignedIn() && isValidId(postId) && resource.data.postId == postId;
+        allow get: if isValidId(postId) && isValidId(commentId);
+        allow list: if isValidId(postId) && resource.data.postId == postId;
         allow create: if isSignedIn() && isValidId(postId) && isValidId(commentId)
           && isValidComment(incoming(), postId)
           && incoming().id == commentId
@@ -358,8 +363,8 @@ service cloud.firestore {
 
     // 4. Ephemeral Stories
     match /stories/{storyId} {
-      allow get: if isSignedIn() && isValidId(storyId);
-      allow list: if isSignedIn() && (resource.data.privacy == 'everyone' || resource.data.authorId == request.auth.uid);
+      allow get: if isValidId(storyId) && (existing().privacy == 'everyone' || (isSignedIn() && existing().authorId == request.auth.uid));
+      allow list: if resource.data.privacy == 'everyone' || (isSignedIn() && resource.data.authorId == request.auth.uid);
       allow create: if isSignedIn() && isValidId(storyId) && isValidStory(incoming())
         && incoming().id == storyId
         && incoming().authorId == request.auth.uid
@@ -476,6 +481,20 @@ service cloud.firestore {
         && isValidId(incoming().postId)
         && incoming().createdAt == request.time;
       allow delete: if isSignedIn() && isValidId(saveId) && existing().uid == request.auth.uid;
+    }
+
+    // 9b. Post Likes (Strictly owner-scoped)
+    match /post_likes/{likeId} {
+      allow get: if isSignedIn() && isValidId(likeId) && existing().uid == request.auth.uid;
+      allow list: if isSignedIn() && resource.data.uid == request.auth.uid;
+      allow create: if isSignedIn() && isValidId(likeId)
+        && incoming().keys().hasAll(['id', 'uid', 'postId', 'createdAt'])
+        && incoming().keys().hasOnly(['id', 'uid', 'postId', 'createdAt'])
+        && incoming().id == likeId
+        && incoming().uid == request.auth.uid
+        && isValidId(incoming().postId)
+        && incoming().createdAt == request.time;
+      allow delete: if isSignedIn() && isValidId(likeId) && existing().uid == request.auth.uid;
     }
 
     // 10. Reports (User-submitted moderation)

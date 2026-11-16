@@ -674,6 +674,391 @@ async function deleteUserDocsFromFirestore(params: {
   await firestoreCommitWrites(writes, idToken);
 }
 
+async function firestoreRunQuery(
+  collectionId: string,
+  filters: Array<{ field: string; op: 'EQUAL' | 'ARRAY_CONTAINS' | 'GREATER_THAN'; value: FirestoreRestValue }>,
+  idToken?: string,
+  parentDocPath?: string
+): Promise<Array<{ id: string; data: Record<string, unknown> }>> {
+  try {
+    const base = parentDocPath
+      ? `https://firestore.googleapis.com/v1/${firestoreDocPathName(parentDocPath)}:runQuery?key=${encodeURIComponent(firebaseConfig.apiKey)}`
+      : `https://firestore.googleapis.com/v1/projects/${firebaseConfig.projectId}/databases/${firebaseConfig.firestoreDatabaseId}/documents:runQuery?key=${encodeURIComponent(firebaseConfig.apiKey)}`;
+    const structuredQuery: Record<string, unknown> = {
+      from: [{ collectionId }],
+    };
+    if (filters.length === 1) {
+      structuredQuery.where = {
+        fieldFilter: {
+          field: { fieldPath: filters[0].field },
+          op: filters[0].op,
+          value: filters[0].value,
+        },
+      };
+    } else if (filters.length > 1) {
+      structuredQuery.where = {
+        compositeFilter: {
+          op: 'AND',
+          filters: filters.map((f) => ({
+            fieldFilter: {
+              field: { fieldPath: f.field },
+              op: f.op,
+              value: f.value,
+            },
+          })),
+        },
+      };
+    }
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (idToken) headers.Authorization = `Bearer ${idToken}`;
+    const res = await fetch(base, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ structuredQuery }),
+    });
+    if (!res.ok) return [];
+    const rows = (await res.json()) as Array<{
+      document?: { name?: string; fields?: Record<string, FirestoreRestValue> };
+    }>;
+    const out: Array<{ id: string; data: Record<string, unknown> }> = [];
+    for (const row of rows) {
+      if (!row.document?.fields || !row.document.name) continue;
+      const id = row.document.name.split('/').pop() || '';
+      const data: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(row.document.fields)) {
+        data[k] = fromFirestoreValue(v);
+      }
+      out.push({ id, data });
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+async function withUserIdToken(
+  uid: string,
+  fn: (idToken: string) => Promise<void>
+): Promise<void> {
+  const acct = store.accounts.find((a) => !a.deleted && a.uid === uid);
+  if (!acct?.firebaseRefreshToken) return;
+  try {
+    const refreshed = await refreshFirebaseIdToken(acct.firebaseRefreshToken);
+    if (!refreshed) return;
+    acct.firebaseRefreshToken = refreshed.refreshToken;
+    await fn(refreshed.idToken);
+  } catch (err) {
+    console.warn('Firestore background sync warning:', err);
+  }
+}
+
+function buildPostFieldsForFirestore(post: Post, forceCoverFallback = false): Record<string, unknown> {
+  const safeAvatar = post.authorAvatar && post.authorAvatar.length <= 200000 ? post.authorAvatar : '';
+  const rawMedia = Array.isArray(post.mediaUrls) ? post.mediaUrls.slice(0, 10) : [];
+  const hasOversizedMedia = rawMedia.some((u) => u.length > 128);
+  let finalMediaUrls = rawMedia;
+  let finalCoverUrl = post.coverUrl && post.coverUrl.length <= 200000 ? post.coverUrl : undefined;
+
+  if (forceCoverFallback || hasOversizedMedia) {
+    if (!finalCoverUrl && rawMedia[0] && rawMedia[0].length <= 200000) {
+      finalCoverUrl = rawMedia[0];
+    }
+    finalMediaUrls = rawMedia.filter((u) => u.length <= 128);
+  }
+
+  return {
+    id: post.id,
+    authorId: post.authorId,
+    authorUsername: post.authorUsername,
+    authorDisplayName: post.authorDisplayName,
+    authorAvatar: safeAvatar,
+    caption: post.caption.slice(0, 2200),
+    mediaUrls: finalMediaUrls,
+    ...(finalCoverUrl ? { coverUrl: finalCoverUrl } : {}),
+    mediaType: post.mediaType,
+    hashtags: (post.hashtags || []).slice(0, 20).map((h) => h.slice(0, 128)),
+    likesCount: Math.max(0, Math.floor(post.likesCount || 0)),
+    commentsCount: Math.max(0, Math.floor(post.commentsCount || 0)),
+    sharesCount: Math.max(0, Math.floor(post.sharesCount || 0)),
+    visibility: post.visibility || 'public',
+  };
+}
+
+async function syncPostToFirestore(post: Post, idToken: string): Promise<boolean> {
+  const docName = firestoreDocPathName(`posts/${post.id}`);
+  const fields = buildPostFieldsForFirestore(post, false);
+  let res = await firestoreCommitWrites(
+    [
+      {
+        update: { name: docName, fields: toFirestoreFields(fields) },
+        updateTransforms: [
+          { fieldPath: 'createdAt', setToServerValue: 'REQUEST_TIME' },
+          { fieldPath: 'updatedAt', setToServerValue: 'REQUEST_TIME' },
+        ],
+      },
+    ],
+    idToken
+  );
+  if (!res.ok && res.status === 403) {
+    const fallbackFields = buildPostFieldsForFirestore(post, true);
+    res = await firestoreCommitWrites(
+      [
+        {
+          update: { name: docName, fields: toFirestoreFields(fallbackFields) },
+          updateTransforms: [
+            { fieldPath: 'createdAt', setToServerValue: 'REQUEST_TIME' },
+            { fieldPath: 'updatedAt', setToServerValue: 'REQUEST_TIME' },
+          ],
+        },
+      ],
+      idToken
+    );
+  }
+  return res.ok;
+}
+
+async function updatePostMetaInFirestore(post: Post, idToken: string): Promise<boolean> {
+  const docName = firestoreDocPathName(`posts/${post.id}`);
+  const fields = buildPostFieldsForFirestore(post, true);
+  const res = await firestoreCommitWrites(
+    [
+      {
+        update: { name: docName, fields: toFirestoreFields(fields) },
+        updateMask: { fieldPaths: ['caption', 'hashtags', 'visibility', ...(fields.coverUrl ? ['coverUrl'] : [])] },
+        updateTransforms: [{ fieldPath: 'updatedAt', setToServerValue: 'REQUEST_TIME' }],
+      },
+    ],
+    idToken
+  );
+  return res.ok;
+}
+
+async function updatePostCountersInFirestore(post: Post, idToken: string): Promise<boolean> {
+  const docName = firestoreDocPathName(`posts/${post.id}`);
+  const fields = {
+    likesCount: Math.max(0, Math.floor(post.likesCount || 0)),
+    commentsCount: Math.max(0, Math.floor(post.commentsCount || 0)),
+    sharesCount: Math.max(0, Math.floor(post.sharesCount || 0)),
+  };
+  const res = await firestoreCommitWrites(
+    [
+      {
+        update: { name: docName, fields: toFirestoreFields(fields) },
+        updateMask: { fieldPaths: ['likesCount', 'commentsCount', 'sharesCount'] },
+      },
+    ],
+    idToken
+  );
+  return res.ok;
+}
+
+async function syncCommentToFirestore(comment: PostComment, idToken: string): Promise<boolean> {
+  const fields: Record<string, unknown> = {
+    id: comment.id,
+    postId: comment.postId,
+    authorId: comment.authorId,
+    authorUsername: comment.authorUsername,
+    text: comment.text.slice(0, 1000),
+    ...(comment.stickerUrl && comment.stickerUrl.length <= 200000 ? { stickerUrl: comment.stickerUrl } : {}),
+    ...(comment.gifUrl && comment.gifUrl.length <= 200000 ? { gifUrl: comment.gifUrl } : {}),
+    ...(comment.parentCommentId ? { parentCommentId: comment.parentCommentId.slice(0, 128) } : {}),
+  };
+  const res = await firestoreCommitWrites(
+    [
+      {
+        update: {
+          name: firestoreDocPathName(`posts/${comment.postId}/comments/${comment.id}`),
+          fields: toFirestoreFields(fields),
+        },
+        updateTransforms: [{ fieldPath: 'createdAt', setToServerValue: 'REQUEST_TIME' }],
+      },
+    ],
+    idToken
+  );
+  return res.ok;
+}
+
+async function syncStoryToFirestore(story: Story, idToken: string): Promise<boolean> {
+  const fields: Record<string, unknown> = {
+    id: story.id,
+    authorId: story.authorId,
+    authorUsername: story.authorUsername,
+    mediaType: story.mediaType,
+    ...(story.mediaUrl && story.mediaUrl.length <= 200000 ? { mediaUrl: story.mediaUrl } : {}),
+    ...(story.textContent ? { textContent: story.textContent.slice(0, 500) } : {}),
+    privacy: story.privacy,
+    viewersCount: Math.max(0, Math.floor(story.viewersCount || 0)),
+  };
+  const restFields = {
+    ...toFirestoreFields(fields),
+    expiresAt: { timestampValue: new Date(story.expiresAt).toISOString() },
+  };
+  const res = await firestoreCommitWrites(
+    [
+      {
+        update: {
+          name: firestoreDocPathName(`stories/${story.id}`),
+          fields: restFields,
+        },
+        updateTransforms: [{ fieldPath: 'createdAt', setToServerValue: 'REQUEST_TIME' }],
+      },
+    ],
+    idToken
+  );
+  return res.ok;
+}
+
+async function syncSavedPostInFirestore(uid: string, postId: string, saved: boolean, idToken: string): Promise<void> {
+  const docName = firestoreDocPathName(`saved_posts/${postId}__${uid}`);
+  if (saved) {
+    await firestoreCommitWrites(
+      [
+        {
+          update: {
+            name: docName,
+            fields: toFirestoreFields({ uid, postId }),
+          },
+          updateTransforms: [{ fieldPath: 'createdAt', setToServerValue: 'REQUEST_TIME' }],
+        },
+      ],
+      idToken
+    );
+  } else {
+    await firestoreCommitWrites([{ delete: docName }], idToken);
+  }
+}
+
+async function syncFollowEdgeInFirestore(followerUid: string, targetUid: string, following: boolean, idToken: string): Promise<void> {
+  const docName = firestoreDocPathName(`followers/${followerUid}__${targetUid}`);
+  if (following) {
+    await firestoreCommitWrites(
+      [
+        {
+          update: {
+            name: docName,
+            fields: toFirestoreFields({ followerUid, targetUid }),
+          },
+          updateTransforms: [{ fieldPath: 'createdAt', setToServerValue: 'REQUEST_TIME' }],
+        },
+      ],
+      idToken
+    );
+  } else {
+    await firestoreCommitWrites([{ delete: docName }], idToken);
+  }
+}
+
+async function syncChatToFirestore(chat: Chat, idToken: string): Promise<void> {
+  const fields: Record<string, unknown> = {
+    id: chat.id,
+    type: chat.type,
+    ...(chat.title ? { title: chat.title.slice(0, 80) } : {}),
+    participantIds: chat.participantIds.slice(0, 250),
+    ...(chat.ownerUid ? { ownerUid: chat.ownerUid } : {}),
+    ...(chat.adminUids ? { adminUids: chat.adminUids.slice(0, 250) } : {}),
+    ...(chat.requireAddApproval !== undefined ? { requireAddApproval: chat.requireAddApproval } : {}),
+    ...(chat.pendingMemberIds ? { pendingMemberIds: chat.pendingMemberIds.slice(0, 100) } : {}),
+    ...(chat.maxMembers ? { maxMembers: chat.maxMembers } : {}),
+    ...(chat.theme ? { theme: chat.theme } : {}),
+    ...(chat.chatNicknames ? { chatNicknames: chat.chatNicknames } : {}),
+    ...(chat.lastMessageText ? { lastMessageText: chat.lastMessageText.slice(0, 300) } : {}),
+    createdBy: chat.createdBy,
+  };
+  await firestoreCommitWrites(
+    [
+      {
+        update: {
+          name: firestoreDocPathName(`chats/${chat.id}`),
+          fields: toFirestoreFields(fields),
+        },
+        updateTransforms: [
+          { fieldPath: 'createdAt', setToServerValue: 'REQUEST_TIME' },
+          { fieldPath: 'lastMessageAt', setToServerValue: 'REQUEST_TIME' },
+        ],
+      },
+    ],
+    idToken
+  );
+}
+
+async function syncChatMessageToFirestore(chatId: string, msg: ChatMessage, idToken: string): Promise<void> {
+  const fields: Record<string, unknown> = {
+    id: msg.id,
+    chatId,
+    senderId: msg.senderId,
+    type: msg.type,
+    ...(msg.text ? { text: msg.text.slice(0, 2000) } : {}),
+    ...(msg.mediaUrl && msg.mediaUrl.length <= 200000 ? { mediaUrl: msg.mediaUrl } : {}),
+    ...(msg.stickerUrl && msg.stickerUrl.length <= 200000 ? { stickerUrl: msg.stickerUrl } : {}),
+    ...(msg.sharedPostId ? { sharedPostId: msg.sharedPostId.slice(0, 128) } : {}),
+    ...(typeof msg.durationMs === 'number' ? { durationMs: Math.max(0, Math.min(600000, Math.floor(msg.durationMs))) } : {}),
+    ...(msg.replyToId ? { replyToId: msg.replyToId.slice(0, 128) } : {}),
+    status: msg.status,
+    reactions: msg.reactions || {},
+  };
+  await firestoreCommitWrites(
+    [
+      {
+        update: {
+          name: firestoreDocPathName(`chats/${chatId}/messages/${msg.id}`),
+          fields: toFirestoreFields(fields),
+        },
+        updateTransforms: [{ fieldPath: 'createdAt', setToServerValue: 'REQUEST_TIME' }],
+      },
+    ],
+    idToken
+  );
+}
+
+async function backfillStoreToFirestore(): Promise<void> {
+  try {
+    const accountsWithToken = store.accounts.filter((a) => !a.deleted && a.firebaseRefreshToken);
+    for (const acct of accountsWithToken) {
+      await withUserIdToken(acct.uid, async (idToken) => {
+        const pub = store.usersPublic[acct.uid];
+        const priv = store.usersPrivate[acct.uid];
+        if (pub && priv) {
+          await createUserDocsInFirestore({
+            uid: acct.uid,
+            userPublic: pub,
+            userPrivate: priv,
+            canonicalEmail: acct.canonicalEmail || canonicalizeEmail(acct.email),
+            idToken,
+          });
+        }
+        const remotePosts = await firestoreRunQuery(
+          'posts',
+          [{ field: 'authorId', op: 'EQUAL', value: { stringValue: acct.uid } }],
+          idToken
+        );
+        const remoteIds = new Set(remotePosts.map((r) => r.id));
+        const localPosts = store.posts.filter((p) => p.authorId === acct.uid);
+        for (const post of localPosts) {
+          if (!remoteIds.has(post.id)) {
+            const okSync = await syncPostToFirestore(post, idToken);
+            if (okSync) {
+              console.log(`Synced existing post ${post.id} ("${post.caption.slice(0, 24)}") to Cloud Firestore.`);
+            }
+          }
+          const cmts = store.commentsByPost[post.id] || [];
+          for (const cmt of cmts) {
+            if (cmt.authorId === acct.uid) {
+              await syncCommentToFirestore(cmt, idToken);
+            }
+          }
+        }
+        for (const story of store.stories.filter((s) => s.authorId === acct.uid)) {
+          if (Date.parse(story.expiresAt) > Date.now()) {
+            await syncStoryToFirestore(story, idToken);
+          }
+        }
+      });
+    }
+  } catch (err) {
+    console.warn('Startup Firestore backfill notice:', err);
+  }
+}
+
 const TRUSTED_MAIL_DOMAINS = new Set([
   'gmail.com',
   'googlemail.com',
@@ -2607,6 +2992,7 @@ async function startServer() {
       actor.followingCount = store.followingByUser[actorUid].length;
       target.followersCount = store.followersByUser[targetUid].length;
       persistStore();
+      void withUserIdToken(actorUid, (idToken) => syncFollowEdgeInFirestore(actorUid, targetUid, false, idToken));
       broadcastGlobalSync();
       res.json({
         status: 'unfollowed',
@@ -2672,6 +3058,7 @@ async function startServer() {
       summary: 'started following you.',
     });
     persistStore();
+    void withUserIdToken(actorUid, (idToken) => syncFollowEdgeInFirestore(actorUid, targetUid, true, idToken));
     broadcastGlobalSync();
     res.json({
       status: 'following',
@@ -2707,6 +3094,7 @@ async function startServer() {
           summary: 'accepted your follow request.',
         });
       }
+      void withUserIdToken(found.fromUid, (idToken) => syncFollowEdgeInFirestore(found.fromUid, uid, true, idToken));
     }
     persistStore();
     broadcastGlobalSync();
@@ -2731,6 +3119,7 @@ async function startServer() {
       store.usersPublic[followerUid].followingCount = store.followingByUser[followerUid].length;
     }
     persistStore();
+    void withUserIdToken(uid, (idToken) => syncFollowEdgeInFirestore(followerUid, uid, false, idToken));
     broadcastGlobalSync();
     res.json({ ok: true });
   });
@@ -2816,6 +3205,9 @@ async function startServer() {
     store.posts.unshift(post);
     author.postsCount = store.posts.filter((p) => p.authorId === uid).length;
     persistStore();
+    void withUserIdToken(uid, async (idToken) => {
+      await syncPostToFirestore(post, idToken);
+    });
     broadcastGlobalSync();
     res.json({ post });
   });
@@ -2834,6 +3226,9 @@ async function startServer() {
     }
     if (visibility) post.visibility = visibility;
     persistStore();
+    void withUserIdToken(req.uid!, async (idToken) => {
+      await updatePostMetaInFirestore(post, idToken);
+    });
     broadcastGlobalSync();
     res.json({ post });
   });
@@ -2849,6 +3244,9 @@ async function startServer() {
     const author = store.usersPublic[req.uid!];
     if (author) author.postsCount = store.posts.filter((p) => p.authorId === req.uid).length;
     persistStore();
+    void withUserIdToken(req.uid!, async (idToken) => {
+      await firestoreCommitWrites([{ delete: firestoreDocPathName(`posts/${postId}`) }], idToken);
+    });
     broadcastGlobalSync();
     res.json({ ok: true });
   });
@@ -2879,6 +3277,9 @@ async function startServer() {
       });
     }
     persistStore();
+    void withUserIdToken(uid, async (idToken) => {
+      await updatePostCountersInFirestore(post, idToken);
+    });
     broadcastGlobalSync();
     res.json({ liked: !liked, likesCount: post.likesCount });
   });
@@ -2890,6 +3291,9 @@ async function startServer() {
     const saved = list.includes(postId);
     store.savedPostIdsByUser[uid] = saved ? list.filter((id) => id !== postId) : [...list, postId];
     persistStore();
+    void withUserIdToken(uid, async (idToken) => {
+      await syncSavedPostInFirestore(uid, postId, !saved, idToken);
+    });
     res.json({ saved: !saved });
   });
 
@@ -2903,6 +3307,9 @@ async function startServer() {
       }
       post.sharesCount += 1;
       persistStore();
+      void withUserIdToken(uid, async (idToken) => {
+        await updatePostCountersInFirestore(post, idToken);
+      });
       broadcastGlobalSync();
     }
     res.json({ ok: true });
@@ -2954,6 +3361,10 @@ async function startServer() {
       targetId: post.id,
     });
     persistStore();
+    void withUserIdToken(uid, async (idToken) => {
+      await syncCommentToFirestore(comment, idToken);
+      await updatePostCountersInFirestore(post, idToken);
+    });
     broadcastGlobalSync();
     res.json({ comment });
   });
@@ -2991,15 +3402,22 @@ async function startServer() {
     };
     store.stories.unshift(story);
     persistStore();
+    void withUserIdToken(uid, async (idToken) => {
+      await syncStoryToFirestore(story, idToken);
+    });
     broadcastGlobalSync();
     res.json({ story });
   });
 
   app.delete('/api/stories/:storyId', requireAuth, (req: AuthenticatedRequest, res) => {
+    const storyId = String(req.params.storyId);
     store.stories = store.stories.filter(
-      (s) => !(s.id === String(req.params.storyId) && s.authorId === req.uid)
+      (s) => !(s.id === storyId && s.authorId === req.uid)
     );
     persistStore();
+    void withUserIdToken(req.uid!, async (idToken) => {
+      await firestoreCommitWrites([{ delete: firestoreDocPathName(`stories/${storyId}`) }], idToken);
+    });
     broadcastGlobalSync();
     res.json({ ok: true });
   });
@@ -3342,6 +3760,7 @@ async function startServer() {
     store.chats.unshift(chat);
     store.messagesByChat[chat.id] = [];
     persistStore();
+    void withUserIdToken(uid, (idToken) => syncChatToFirestore(chat, idToken));
     broadcastWsEvent(chat.participantIds, { type: 'state:sync', state: null });
     broadcastGlobalSync();
     res.json({ chat });
@@ -3420,6 +3839,10 @@ async function startServer() {
     });
 
     persistStore();
+    void withUserIdToken(uid, async (idToken) => {
+      await syncChatMessageToFirestore(chatId, msg, idToken);
+      await syncChatToFirestore(chat, idToken);
+    });
     broadcastGlobalSync();
     res.json({ message: msg });
   });
@@ -4240,6 +4663,7 @@ async function startServer() {
   const PORT = 3000;
   server.listen(PORT, '0.0.0.0', () => {
     console.log(`SocialVerse server listening on http://0.0.0.0:${PORT}`);
+    void backfillStoreToFirestore();
   });
 }
 

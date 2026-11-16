@@ -1,3 +1,4 @@
+import firebaseConfig from '../../firebase-applet-config.json';
 import type {
   AppLanguage,
   AppNotification,
@@ -11,6 +12,7 @@ import type {
   PostComment,
   PostVisibility,
   ReportItem,
+  SavedLoginEntry,
   StickerItem,
   Story,
   StoryHighlight,
@@ -40,6 +42,13 @@ import {
   requiresFollowApproval,
   validateSignupEmail,
 } from './validation';
+
+const CLOUD_FUNCTIONS_BASE_URL = 'https://us-central1-socialvars.cloudfunctions.net/socialverseApi';
+const SAVED_LOGINS_STORAGE_KEY = 'sv_saved_logins';
+const STORE_KEY = 'sv_standalone_android_store_v1';
+const FB_SESSIONS_KEY = 'sv_standalone_firebase_sessions_v1';
+const FB_GUEST_KEY = 'sv_standalone_guest_session_v1';
+const USERNAME_EMAIL_MAP_KEY = 'sv_standalone_username_map_v1';
 
 const BASE_USER_PUBLIC: UserPublic = {
   uid: '',
@@ -85,8 +94,6 @@ const BASE_USER_PRIVATE: UserPrivate = {
   updatedAt: '',
 };
 
-const STORE_KEY = 'sv_standalone_android_store_v1';
-
 interface StoredAccount {
   uid: string;
   email: string;
@@ -103,7 +110,10 @@ interface StandaloneStore {
   usersPrivate: Record<string, UserPrivate>;
   tokens: Record<string, string>; // token -> uid
   otps: Record<string, { code: string; expiresAt: number }>;
-  verifications: Record<string, { email: string; purpose: string; expiresAt: number }>;
+  verifications: Record<
+    string,
+    { email: string; purpose: string; expiresAt: number; remoteToken?: string; code?: string }
+  >;
   posts: Post[];
   postLikes: Record<string, string[]>; // postId -> uid[]
   postSaves: Record<string, string[]>; // uid -> postId[]
@@ -123,6 +133,21 @@ interface StandaloneStore {
   reports: ReportItem[];
 }
 
+interface FirebaseSessionRecord {
+  uid: string;
+  email: string;
+  username: string;
+  idToken: string;
+  refreshToken: string;
+  expiresAt: number;
+}
+
+interface GuestTokenRecord {
+  idToken: string;
+  refreshToken: string;
+  expiresAt: number;
+}
+
 export interface StandaloneResponse {
   ok: boolean;
   status: number;
@@ -131,27 +156,46 @@ export interface StandaloneResponse {
 
 const memoryStorage = new Map<string, string>();
 
-function readRawStore(): string | null {
+function storageGet(key: string): string | null {
   try {
     if (typeof localStorage !== 'undefined') {
-      return localStorage.getItem(STORE_KEY);
+      return localStorage.getItem(key);
     }
   } catch {
     // ignore storage restriction
   }
-  return memoryStorage.get(STORE_KEY) ?? null;
+  return memoryStorage.get(key) ?? null;
 }
 
-function writeRawStore(raw: string): void {
+function storageSet(key: string, value: string): void {
   try {
     if (typeof localStorage !== 'undefined') {
-      localStorage.setItem(STORE_KEY, raw);
+      localStorage.setItem(key, value);
       return;
     }
   } catch {
     // ignore quota error
   }
-  memoryStorage.set(STORE_KEY, raw);
+  memoryStorage.set(key, value);
+}
+
+function storageRemove(key: string): void {
+  memoryStorage.delete(key);
+  try {
+    if (typeof localStorage !== 'undefined') {
+      localStorage.removeItem(key);
+    }
+  } catch {
+    // ignore
+  }
+}
+
+function readRawStore(): string | null {
+  return storageGet(STORE_KEY);
+}
+
+function writeRawStore(raw: string): void {
+  storageSet(STORE_KEY, raw);
 }
 
 function emptyStore(): StandaloneStore {
@@ -198,14 +242,10 @@ function saveStore(store: StandaloneStore): void {
 }
 
 export function resetStandaloneStoreForTesting(): void {
-  memoryStorage.delete(STORE_KEY);
-  try {
-    if (typeof localStorage !== 'undefined') {
-      localStorage.removeItem(STORE_KEY);
-    }
-  } catch {
-    // ignore
-  }
+  storageRemove(STORE_KEY);
+  storageRemove(FB_SESSIONS_KEY);
+  storageRemove(FB_GUEST_KEY);
+  storageRemove(USERNAME_EMAIL_MAP_KEY);
 }
 
 export function isStandaloneAndroidRuntime(): boolean {
@@ -214,7 +254,16 @@ export function isStandaloneAndroidRuntime(): boolean {
   if (w.__SOCIALVERSE_ANDROID__ || w.SocialVerseNative) return true;
   if (window.location.hostname === 'appassets.androidplatform.net') return true;
   if (typeof navigator !== 'undefined' && navigator.userAgent.includes('SocialVerseAndroid')) return true;
+  try {
+    if (new URLSearchParams(window.location.search).get('standalone') === '1') return true;
+  } catch {
+    // ignore malformed URL
+  }
   return false;
+}
+
+function isRemoteFirebaseEnabled(): boolean {
+  return typeof window !== 'undefined' && typeof fetch === 'function';
 }
 
 function genId(prefix: string): string {
@@ -231,6 +280,799 @@ function fail(
   extra: Record<string, unknown> = {}
 ): StandaloneResponse {
   return { ok: false, status, data: { error, ...extra } };
+}
+
+// Synchronous pure-TS SHA-256 helper (works identically in Android WebView, Browser, and Node)
+export function sha256Hex(message: string): string {
+  const utf8 = unescape(encodeURIComponent(message));
+  const words: number[] = [];
+  for (let i = 0; i < utf8.length; i++) {
+    words[i >> 2] |= (utf8.charCodeAt(i) & 0xff) << (24 - (i % 4) * 8);
+  }
+  const bitLen = utf8.length * 8;
+  words[bitLen >> 5] |= 0x80 << (24 - (bitLen % 32));
+  words[(((bitLen + 64) >> 9) << 4) + 15] = bitLen;
+
+  const K = [
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+  ];
+  const H = [
+    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+    0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+  ];
+  const W = new Array<number>(64);
+  const rotr = (n: number, c: number) => (n >>> c) | (n << (32 - c));
+
+  for (let i = 0; i < words.length; i += 16) {
+    let [a, b, c, d, e, f, g, h] = H;
+    for (let t = 0; t < 64; t++) {
+      if (t < 16) {
+        W[t] = words[i + t] | 0;
+      } else {
+        const s0 = rotr(W[t - 15], 7) ^ rotr(W[t - 15], 18) ^ (W[t - 15] >>> 3);
+        const s1 = rotr(W[t - 2], 17) ^ rotr(W[t - 2], 19) ^ (W[t - 2] >>> 10);
+        W[t] = (W[t - 16] + s0 + W[t - 7] + s1) | 0;
+      }
+      const S1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
+      const ch = (e & f) ^ (~e & g);
+      const temp1 = (h + S1 + ch + K[t] + W[t]) | 0;
+      const S0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
+      const maj = (a & b) ^ (a & c) ^ (b & c);
+      const temp2 = (S0 + maj) | 0;
+      h = g;
+      g = f;
+      f = e;
+      e = (d + temp1) | 0;
+      d = c;
+      c = b;
+      b = a;
+      a = (temp1 + temp2) | 0;
+    }
+    H[0] = (H[0] + a) | 0;
+    H[1] = (H[1] + b) | 0;
+    H[2] = (H[2] + c) | 0;
+    H[3] = (H[3] + d) | 0;
+    H[4] = (H[4] + e) | 0;
+    H[5] = (H[5] + f) | 0;
+    H[6] = (H[6] + g) | 0;
+    H[7] = (H[7] + h) | 0;
+  }
+
+  return H.map((x) => (x >>> 0).toString(16).padStart(8, '0')).join('');
+}
+
+// --- Firestore REST & Firebase Auth Helpers ---
+export type FirestoreRestValue =
+  | { nullValue: null }
+  | { booleanValue: boolean }
+  | { integerValue: string }
+  | { doubleValue: number }
+  | { timestampValue: string }
+  | { stringValue: string }
+  | { arrayValue: { values?: FirestoreRestValue[] } }
+  | { mapValue: { fields?: Record<string, FirestoreRestValue> } };
+
+export function toFirestoreValue(val: unknown): FirestoreRestValue {
+  if (val === null || val === undefined) return { nullValue: null };
+  if (typeof val === 'boolean') return { booleanValue: val };
+  if (typeof val === 'number') {
+    return Number.isInteger(val) ? { integerValue: String(val) } : { doubleValue: val };
+  }
+  if (typeof val === 'string') return { stringValue: val };
+  if (Array.isArray(val)) {
+    return { arrayValue: { values: val.map((item) => toFirestoreValue(item)) } };
+  }
+  if (typeof val === 'object') {
+    const fields: Record<string, FirestoreRestValue> = {};
+    for (const [k, v] of Object.entries(val as Record<string, unknown>)) {
+      if (v !== undefined) fields[k] = toFirestoreValue(v);
+    }
+    return { mapValue: { fields } };
+  }
+  return { stringValue: String(val) };
+}
+
+export function toFirestoreFields(obj: Record<string, unknown>): Record<string, FirestoreRestValue> {
+  const fields: Record<string, FirestoreRestValue> = {};
+  for (const [k, v] of Object.entries(obj)) {
+    if (v !== undefined) fields[k] = toFirestoreValue(v);
+  }
+  return fields;
+}
+
+export function fromFirestoreValue(val: FirestoreRestValue | undefined): unknown {
+  if (!val) return undefined;
+  if ('nullValue' in val) return null;
+  if ('booleanValue' in val) return val.booleanValue;
+  if ('integerValue' in val) return Number(val.integerValue);
+  if ('doubleValue' in val) return val.doubleValue;
+  if ('timestampValue' in val) return val.timestampValue;
+  if ('stringValue' in val) return val.stringValue;
+  if ('arrayValue' in val) return (val.arrayValue.values || []).map((v) => fromFirestoreValue(v));
+  if ('mapValue' in val) {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(val.mapValue.fields || {})) {
+      out[k] = fromFirestoreValue(v);
+    }
+    return out;
+  }
+  return undefined;
+}
+
+function firestoreDocPathName(docPath: string): string {
+  return `projects/${firebaseConfig.projectId}/databases/${firebaseConfig.firestoreDatabaseId}/documents/${docPath}`;
+}
+
+export function normalizeFirestorePost(
+  raw: Record<string, unknown>,
+  authorProfile?: Partial<UserPublic>
+): Post {
+  const rawMedia = Array.isArray(raw.mediaUrls)
+    ? raw.mediaUrls.filter((u): u is string => typeof u === 'string' && u.length > 0)
+    : [];
+  const rawCover = typeof raw.coverUrl === 'string' && raw.coverUrl.length > 0 ? raw.coverUrl : undefined;
+  const mediaType = (typeof raw.mediaType === 'string' ? raw.mediaType : 'text') as Post['mediaType'];
+  // Under strict live rules, large WebP/JPEG data URLs reside in coverUrl; surface in mediaUrls for identical UI rendering
+  const mediaUrls =
+    rawMedia.length > 0
+      ? rawMedia
+      : rawCover && mediaType !== 'text'
+      ? [rawCover]
+      : [];
+
+  return {
+    id: String(raw.id || ''),
+    authorId: String(raw.authorId || ''),
+    authorUsername: String(raw.authorUsername || authorProfile?.username || 'creator'),
+    authorDisplayName: String(
+      raw.authorDisplayName || authorProfile?.displayName || raw.authorUsername || 'Creator'
+    ),
+    authorAvatar: String(raw.authorAvatar || authorProfile?.photoUrl || ''),
+    caption: String(raw.caption || ''),
+    mediaUrls,
+    coverUrl: rawCover,
+    mediaType,
+    hashtags: Array.isArray(raw.hashtags)
+      ? raw.hashtags.filter((h): h is string => typeof h === 'string')
+      : [],
+    likesCount: typeof raw.likesCount === 'number' ? raw.likesCount : Number(raw.likesCount || 0),
+    commentsCount: typeof raw.commentsCount === 'number' ? raw.commentsCount : Number(raw.commentsCount || 0),
+    sharesCount: typeof raw.sharesCount === 'number' ? raw.sharesCount : Number(raw.sharesCount || 0),
+    visibility: (typeof raw.visibility === 'string' ? raw.visibility : 'public') as PostVisibility,
+    createdAt: typeof raw.createdAt === 'string' && raw.createdAt ? raw.createdAt : new Date().toISOString(),
+  };
+}
+
+function normalizeFirestoreUserPublic(raw: Record<string, unknown>): UserPublic {
+  return {
+    ...BASE_USER_PUBLIC,
+    uid: String(raw.uid || ''),
+    username: String(raw.username || ''),
+    displayName: String(raw.displayName || raw.username || 'SocialVerse User'),
+    nicknameFont: (typeof raw.nicknameFont === 'string' ? raw.nicknameFont : 'classic') as NicknameFontStyle,
+    bio: String(raw.bio || ''),
+    pronouns: String(raw.pronouns || ''),
+    website: String(raw.website || ''),
+    noteText: String(raw.noteText || ''),
+    dateOfBirth: typeof raw.dateOfBirth === 'string' ? raw.dateOfBirth : undefined,
+    photoUrl: String(raw.photoUrl || ''),
+    coverUrl: String(raw.coverUrl || ''),
+    interests: Array.isArray(raw.interests)
+      ? raw.interests.filter((x): x is string => typeof x === 'string')
+      : [],
+    isPrivate: Boolean(raw.isPrivate),
+    isDeactivated: Boolean(raw.isDeactivated),
+    deactivatedUntil: typeof raw.deactivatedUntil === 'string' ? raw.deactivatedUntil : null,
+    followersCount: Number(raw.followersCount || 0),
+    followingCount: Number(raw.followingCount || 0),
+    postsCount: Number(raw.postsCount || 0),
+    onlineStatus:
+      raw.onlineStatus === 'offline' || raw.onlineStatus === 'away' ? raw.onlineStatus : 'online',
+    lastSeenAt: typeof raw.lastSeenAt === 'string' ? raw.lastSeenAt : '',
+    lastNicknameChangedAt:
+      typeof raw.lastNicknameChangedAt === 'string' ? raw.lastNicknameChangedAt : null,
+    lastUsernameChangedAt:
+      typeof raw.lastUsernameChangedAt === 'string' ? raw.lastUsernameChangedAt : null,
+    onboardingCompleted: Boolean(raw.onboardingCompleted),
+    createdAt: typeof raw.createdAt === 'string' ? raw.createdAt : '',
+    updatedAt: typeof raw.updatedAt === 'string' ? raw.updatedAt : undefined,
+  };
+}
+
+function normalizeFirestoreUserPrivate(raw: Record<string, unknown>): UserPrivate {
+  return {
+    ...BASE_USER_PRIVATE,
+    uid: String(raw.uid || ''),
+    email: String(raw.email || ''),
+    language: raw.language === 'bn' ? 'bn' : 'en',
+    themeMode: raw.themeMode === 'dark' ? 'dark' : 'light',
+    biometricLockEnabled: Boolean(raw.biometricLockEnabled),
+    twoFactorEnabled: Boolean(raw.twoFactorEnabled),
+    saveLoginInfo: raw.saveLoginInfo !== undefined ? Boolean(raw.saveLoginInfo) : true,
+    whoCanMessage:
+      raw.whoCanMessage === 'followers' || raw.whoCanMessage === 'nobody'
+        ? raw.whoCanMessage
+        : 'everyone',
+    whoCanViewStories:
+      raw.whoCanViewStories === 'followers' || raw.whoCanViewStories === 'close_friends'
+        ? raw.whoCanViewStories
+        : 'everyone',
+    whoCanFollow: raw.whoCanFollow === 'approval' ? 'approval' : 'everyone',
+    notificationPrefs: {
+      ...DEFAULT_NOTIFICATION_PREFS,
+      ...((raw.notificationPrefs as Record<string, boolean> | undefined) || {}),
+    },
+    blockedUserIds: Array.isArray(raw.blockedUserIds)
+      ? raw.blockedUserIds.filter((x): x is string => typeof x === 'string')
+      : [],
+    mutedStoryUserIds: Array.isArray(raw.mutedStoryUserIds)
+      ? raw.mutedStoryUserIds.filter((x): x is string => typeof x === 'string')
+      : [],
+    closeFriendUids: Array.isArray(raw.closeFriendUids)
+      ? raw.closeFriendUids.filter((x): x is string => typeof x === 'string')
+      : [],
+    updatedAt: typeof raw.updatedAt === 'string' ? raw.updatedAt : new Date().toISOString(),
+  };
+}
+
+function loadFirebaseSessions(): Record<string, FirebaseSessionRecord> {
+  const raw = storageGet(FB_SESSIONS_KEY);
+  if (!raw) return {};
+  try {
+    return JSON.parse(raw) as Record<string, FirebaseSessionRecord>;
+  } catch {
+    return {};
+  }
+}
+
+function saveFirebaseSessions(map: Record<string, FirebaseSessionRecord>): void {
+  storageSet(FB_SESSIONS_KEY, JSON.stringify(map));
+}
+
+function loadUsernameEmailMap(): Record<string, string> {
+  const raw = storageGet(USERNAME_EMAIL_MAP_KEY);
+  if (!raw) return {};
+  try {
+    return JSON.parse(raw) as Record<string, string>;
+  } catch {
+    return {};
+  }
+}
+
+function recordUsernameEmail(username: string, email: string): void {
+  const norm = normalizeUsername(username);
+  const clean = email.trim().toLowerCase();
+  if (!norm || !clean || !clean.includes('@')) return;
+  const map = loadUsernameEmailMap();
+  map[norm] = clean;
+  storageSet(USERNAME_EMAIL_MAP_KEY, JSON.stringify(map));
+}
+
+function findEmailInSavedLogins(usernameNorm: string): string | null {
+  const raw = storageGet(SAVED_LOGINS_STORAGE_KEY);
+  if (!raw) return null;
+  try {
+    const list = JSON.parse(raw) as SavedLoginEntry[];
+    const match = list.find((item) => normalizeUsername(item.username) === usernameNorm && item.email);
+    return match?.email?.trim().toLowerCase() || null;
+  } catch {
+    return null;
+  }
+}
+
+async function firebaseAuthPost<T>(endpoint: string, body: Record<string, unknown>): Promise<{ ok: boolean; status: number; data: T & { error?: { message?: string } } }> {
+  const res = await fetch(
+    `https://identitytoolkit.googleapis.com/v1/${endpoint}?key=${encodeURIComponent(firebaseConfig.apiKey)}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }
+  );
+  const data = (await res.json().catch(() => ({}))) as T & { error?: { message?: string } };
+  return { ok: res.ok, status: res.status, data };
+}
+
+async function refreshFirebaseToken(refreshToken: string): Promise<{ idToken: string; refreshToken: string; expiresInSec: number } | null> {
+  if (!refreshToken) return null;
+  try {
+    const res = await fetch(
+      `https://securetoken.googleapis.com/v1/token?key=${encodeURIComponent(firebaseConfig.apiKey)}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          grant_type: 'refresh_token',
+          refresh_token: refreshToken,
+        }),
+      }
+    );
+    if (!res.ok) return null;
+    const data = (await res.json()) as {
+      id_token?: string;
+      refresh_token?: string;
+      expires_in?: string;
+    };
+    if (!data.id_token) return null;
+    return {
+      idToken: data.id_token,
+      refreshToken: data.refresh_token || refreshToken,
+      expiresInSec: Number(data.expires_in || 3600),
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function ensureGuestIdToken(): Promise<string | null> {
+  if (!isRemoteFirebaseEnabled()) return null;
+  const now = Date.now();
+  const raw = storageGet(FB_GUEST_KEY);
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw) as GuestTokenRecord;
+      if (parsed.idToken && parsed.expiresAt > now + 60_000) {
+        return parsed.idToken;
+      }
+      if (parsed.refreshToken) {
+        const refreshed = await refreshFirebaseToken(parsed.refreshToken);
+        if (refreshed) {
+          storageSet(
+            FB_GUEST_KEY,
+            JSON.stringify({
+              idToken: refreshed.idToken,
+              refreshToken: refreshed.refreshToken,
+              expiresAt: now + refreshed.expiresInSec * 1000,
+            })
+          );
+          return refreshed.idToken;
+        }
+      }
+    } catch {
+      // mint fresh below
+    }
+  }
+  try {
+    const res = await firebaseAuthPost<{
+      idToken?: string;
+      refreshToken?: string;
+      expiresIn?: string;
+    }>('accounts:signUp', { returnSecureToken: true });
+    if (res.ok && res.data.idToken) {
+      const expiresInSec = Number(res.data.expiresIn || 3600);
+      storageSet(
+        FB_GUEST_KEY,
+        JSON.stringify({
+          idToken: res.data.idToken,
+          refreshToken: res.data.refreshToken || '',
+          expiresAt: now + expiresInSec * 1000,
+        })
+      );
+      return res.data.idToken;
+    }
+  } catch {
+    // offline
+  }
+  return null;
+}
+
+async function ensureSessionIdToken(sessionToken: string | null | undefined): Promise<{
+  uid: string | null;
+  idToken: string | null;
+  session?: FirebaseSessionRecord;
+}> {
+  if (!sessionToken || !isRemoteFirebaseEnabled()) {
+    return { uid: null, idToken: null };
+  }
+  const sessions = loadFirebaseSessions();
+  const rec = sessions[sessionToken];
+  if (!rec) return { uid: null, idToken: null };
+
+  const now = Date.now();
+  if (rec.idToken && rec.expiresAt > now + 60_000) {
+    return { uid: rec.uid, idToken: rec.idToken, session: rec };
+  }
+  if (rec.refreshToken) {
+    const refreshed = await refreshFirebaseToken(rec.refreshToken);
+    if (refreshed) {
+      rec.idToken = refreshed.idToken;
+      rec.refreshToken = refreshed.refreshToken;
+      rec.expiresAt = now + refreshed.expiresInSec * 1000;
+      sessions[sessionToken] = rec;
+      saveFirebaseSessions(sessions);
+      return { uid: rec.uid, idToken: rec.idToken, session: rec };
+    }
+  }
+  return { uid: rec.uid, idToken: rec.idToken || null, session: rec };
+}
+
+async function firestoreGetDoc(
+  docPath: string,
+  idToken?: string | null
+): Promise<Record<string, unknown> | null> {
+  if (!isRemoteFirebaseEnabled()) return null;
+  try {
+    const url = `https://firestore.googleapis.com/v1/${firestoreDocPathName(docPath)}?key=${encodeURIComponent(firebaseConfig.apiKey)}`;
+    const headers: Record<string, string> = {};
+    if (idToken) headers.Authorization = `Bearer ${idToken}`;
+    const res = await fetch(url, { headers });
+    if (!res.ok) return null;
+    const raw = (await res.json()) as { fields?: Record<string, FirestoreRestValue> };
+    if (!raw.fields) return null;
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(raw.fields)) {
+      out[k] = fromFirestoreValue(v);
+    }
+    return out;
+  } catch {
+    return null;
+  }
+}
+
+async function firestoreRunQuery(
+  collectionId: string,
+  filters: Array<{ field: string; op: 'EQUAL' | 'ARRAY_CONTAINS' | 'GREATER_THAN'; value: FirestoreRestValue }>,
+  idToken?: string | null,
+  parentDocPath?: string
+): Promise<{ ok: boolean; status: number; rows: Array<{ id: string; data: Record<string, unknown> }> }> {
+  if (!isRemoteFirebaseEnabled()) return { ok: false, status: 0, rows: [] };
+  try {
+    const base = parentDocPath
+      ? `https://firestore.googleapis.com/v1/${firestoreDocPathName(parentDocPath)}:runQuery?key=${encodeURIComponent(firebaseConfig.apiKey)}`
+      : `https://firestore.googleapis.com/v1/projects/${firebaseConfig.projectId}/databases/${firebaseConfig.firestoreDatabaseId}/documents:runQuery?key=${encodeURIComponent(firebaseConfig.apiKey)}`;
+    const structuredQuery: Record<string, unknown> = {
+      from: [{ collectionId }],
+    };
+    if (filters.length === 1) {
+      structuredQuery.where = {
+        fieldFilter: {
+          field: { fieldPath: filters[0].field },
+          op: filters[0].op,
+          value: filters[0].value,
+        },
+      };
+    } else if (filters.length > 1) {
+      structuredQuery.where = {
+        compositeFilter: {
+          op: 'AND',
+          filters: filters.map((f) => ({
+            fieldFilter: {
+              field: { fieldPath: f.field },
+              op: f.op,
+              value: f.value,
+            },
+          })),
+        },
+      };
+    }
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (idToken) headers.Authorization = `Bearer ${idToken}`;
+    const res = await fetch(base, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ structuredQuery }),
+    });
+    if (!res.ok) return { ok: false, status: res.status, rows: [] };
+    const rows = (await res.json()) as Array<{
+      document?: { name?: string; fields?: Record<string, FirestoreRestValue> };
+    }>;
+    const out: Array<{ id: string; data: Record<string, unknown> }> = [];
+    for (const row of rows) {
+      if (!row.document?.fields || !row.document.name) continue;
+      const id = row.document.name.split('/').pop() || '';
+      const data: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(row.document.fields)) {
+        data[k] = fromFirestoreValue(v);
+      }
+      out.push({ id, data });
+    }
+    return { ok: true, status: res.status, rows: out };
+  } catch {
+    return { ok: false, status: 0, rows: [] };
+  }
+}
+
+async function firestoreCommitWrites(
+  writes: Array<Record<string, unknown>>,
+  idToken: string | null | undefined
+): Promise<{ ok: boolean; status?: number }> {
+  if (!writes.length || !idToken || !isRemoteFirebaseEnabled()) return { ok: false };
+  try {
+    const url = `https://firestore.googleapis.com/v1/projects/${firebaseConfig.projectId}/databases/${firebaseConfig.firestoreDatabaseId}/documents:commit?key=${encodeURIComponent(firebaseConfig.apiKey)}`;
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${idToken}`,
+      },
+      body: JSON.stringify({ writes }),
+    });
+    return { ok: res.ok, status: res.status };
+  } catch {
+    return { ok: false };
+  }
+}
+
+async function callCloudFunction<T>(
+  path: string,
+  body: Record<string, unknown>,
+  bearerToken?: string | null,
+  timeoutMs = 6000
+): Promise<{ ok: boolean; status: number; networkError?: boolean; data: T & { error?: string; code?: string } }> {
+  if (!isRemoteFirebaseEnabled()) {
+    return { ok: false, status: 0, networkError: true, data: {} as T & { error?: string; code?: string } };
+  }
+  const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+  const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
+  try {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (bearerToken) headers.Authorization = `Bearer ${bearerToken}`;
+    const res = await fetch(`${CLOUD_FUNCTIONS_BASE_URL}${path}`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body),
+      signal: controller?.signal,
+    });
+    const data = (await res.json().catch(() => ({}))) as T & { error?: string; code?: string };
+    return { ok: res.ok, status: res.status, data };
+  } catch {
+    return { ok: false, status: 0, networkError: true, data: {} as T & { error?: string; code?: string } };
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+function buildPublicFieldsForFirestore(userPublic: UserPublic): Record<string, unknown> {
+  const safePhotoUrl = userPublic.photoUrl.length <= 200000 ? userPublic.photoUrl : '';
+  const safeCoverUrl = userPublic.coverUrl.length <= 200000 ? userPublic.coverUrl : '';
+  return {
+    uid: userPublic.uid,
+    username: userPublic.username,
+    displayName: userPublic.displayName,
+    nicknameFont: userPublic.nicknameFont || 'classic',
+    bio: userPublic.bio,
+    pronouns: userPublic.pronouns || '',
+    website: userPublic.website || '',
+    noteText: userPublic.noteText || '',
+    ...(userPublic.dateOfBirth ? { dateOfBirth: userPublic.dateOfBirth } : {}),
+    photoUrl: safePhotoUrl,
+    coverUrl: safeCoverUrl,
+    interests: userPublic.interests || [],
+    isPrivate: userPublic.isPrivate,
+    isDeactivated: Boolean(userPublic.isDeactivated),
+    deactivatedUntil: userPublic.deactivatedUntil ?? null,
+    followersCount: Math.max(0, Math.floor(userPublic.followersCount || 0)),
+    followingCount: Math.max(0, Math.floor(userPublic.followingCount || 0)),
+    postsCount: Math.max(0, Math.floor(userPublic.postsCount || 0)),
+    onlineStatus: userPublic.onlineStatus || 'online',
+    lastSeenAt: userPublic.lastSeenAt ?? null,
+    lastNicknameChangedAt: userPublic.lastNicknameChangedAt ?? null,
+    lastUsernameChangedAt: userPublic.lastUsernameChangedAt ?? null,
+    onboardingCompleted: true,
+  };
+}
+
+function buildPrivateFieldsForFirestore(userPrivate: UserPrivate): Record<string, unknown> {
+  return {
+    uid: userPrivate.uid,
+    email: userPrivate.email,
+    language: userPrivate.language,
+    themeMode: userPrivate.themeMode,
+    biometricLockEnabled: userPrivate.biometricLockEnabled,
+    twoFactorEnabled: userPrivate.twoFactorEnabled,
+    saveLoginInfo: userPrivate.saveLoginInfo,
+    whoCanMessage: userPrivate.whoCanMessage,
+    whoCanViewStories: userPrivate.whoCanViewStories,
+    whoCanFollow: userPrivate.whoCanFollow || 'everyone',
+    notificationPrefs: userPrivate.notificationPrefs,
+    blockedUserIds: userPrivate.blockedUserIds,
+    mutedStoryUserIds: userPrivate.mutedStoryUserIds,
+    closeFriendUids: userPrivate.closeFriendUids || [],
+  };
+}
+
+function buildPostFieldsForFirestore(post: Post, forceCoverFallback = false): Record<string, unknown> {
+  const safeAvatar = post.authorAvatar && post.authorAvatar.length <= 200000 ? post.authorAvatar : '';
+  const rawMedia = Array.isArray(post.mediaUrls) ? post.mediaUrls.slice(0, 10) : [];
+  const hasOversizedMedia = rawMedia.some((u) => u.length > 128);
+  let finalMediaUrls = rawMedia;
+  let finalCoverUrl = post.coverUrl && post.coverUrl.length <= 200000 ? post.coverUrl : undefined;
+
+  if (forceCoverFallback || hasOversizedMedia) {
+    if (!finalCoverUrl && rawMedia[0] && rawMedia[0].length <= 200000) {
+      finalCoverUrl = rawMedia[0];
+    }
+    finalMediaUrls = rawMedia.filter((u) => u.length <= 128);
+  }
+
+  return {
+    id: post.id,
+    authorId: post.authorId,
+    authorUsername: post.authorUsername,
+    authorDisplayName: post.authorDisplayName,
+    authorAvatar: safeAvatar,
+    caption: post.caption.slice(0, 2200),
+    mediaUrls: finalMediaUrls,
+    ...(finalCoverUrl ? { coverUrl: finalCoverUrl } : {}),
+    mediaType: post.mediaType,
+    hashtags: (post.hashtags || []).slice(0, 20).map((h) => h.slice(0, 128)),
+    likesCount: Math.max(0, Math.floor(post.likesCount || 0)),
+    commentsCount: Math.max(0, Math.floor(post.commentsCount || 0)),
+    sharesCount: Math.max(0, Math.floor(post.sharesCount || 0)),
+    visibility: post.visibility || 'public',
+  };
+}
+
+async function createFirebaseUserSessionAndProfile(params: {
+  store: StandaloneStore;
+  uid: string;
+  email: string;
+  idToken: string;
+  refreshToken: string;
+  expiresInSec: number;
+  displayNameSeed?: string;
+  usernameSeed?: string;
+  photoUrlSeed?: string;
+  dateOfBirth?: string;
+  nicknameFont?: NicknameFontStyle;
+  language?: AppLanguage;
+}): Promise<{ token: string; userPublic: UserPublic; userPrivate: UserPrivate }> {
+  const {
+    store,
+    uid,
+    email,
+    idToken,
+    refreshToken,
+    expiresInSec,
+    displayNameSeed,
+    usernameSeed,
+    photoUrlSeed,
+    dateOfBirth,
+    nicknameFont,
+    language = 'en',
+  } = params;
+
+  const cleanEmail = email.trim().toLowerCase();
+  const canonical = canonicalizeEmail(cleanEmail);
+  const now = new Date().toISOString();
+
+  const [remotePubRaw, remotePrivRaw] = await Promise.all([
+    firestoreGetDoc(`users/${uid}`, idToken),
+    firestoreGetDoc(`users/${uid}/private/info`, idToken),
+  ]);
+
+  let userPublic = remotePubRaw
+    ? normalizeFirestoreUserPublic(remotePubRaw)
+    : store.usersPublic[uid];
+
+  let userPrivate = remotePrivRaw
+    ? normalizeFirestoreUserPrivate(remotePrivRaw)
+    : store.usersPrivate[uid];
+
+  const needCreatePub = !remotePubRaw;
+  const needCreatePriv = !remotePrivRaw;
+
+  if (!userPublic) {
+    const username = usernameSeed
+      ? normalizeUsername(usernameSeed)
+      : buildUniqueUsername(store, displayNameSeed || cleanEmail.split('@')[0] || 'member');
+    userPublic = {
+      ...BASE_USER_PUBLIC,
+      uid,
+      username,
+      displayName: (displayNameSeed || username).slice(0, 50),
+      nicknameFont: nicknameFont || 'classic',
+      dateOfBirth,
+      photoUrl: photoUrlSeed || '',
+      onboardingCompleted: true,
+      createdAt: now,
+      lastSeenAt: now,
+    };
+  }
+
+  if (!userPrivate) {
+    userPrivate = {
+      ...BASE_USER_PRIVATE,
+      uid,
+      email: cleanEmail,
+      language,
+      updatedAt: now,
+    };
+  } else if (!userPrivate.email) {
+    userPrivate.email = cleanEmail;
+  }
+
+  if (needCreatePub || needCreatePriv) {
+    const emailHash = sha256Hex(canonical);
+    const writes: Array<Record<string, unknown>> = [];
+    if (needCreatePub) {
+      writes.push({
+        update: {
+          name: firestoreDocPathName(`users/${uid}`),
+          fields: toFirestoreFields(buildPublicFieldsForFirestore(userPublic)),
+        },
+        updateTransforms: [
+          { fieldPath: 'createdAt', setToServerValue: 'REQUEST_TIME' },
+          { fieldPath: 'updatedAt', setToServerValue: 'REQUEST_TIME' },
+        ],
+      });
+    }
+    if (needCreatePriv) {
+      writes.push({
+        update: {
+          name: firestoreDocPathName(`users/${uid}/private/info`),
+          fields: toFirestoreFields(buildPrivateFieldsForFirestore(userPrivate)),
+        },
+        updateTransforms: [{ fieldPath: 'updatedAt', setToServerValue: 'REQUEST_TIME' }],
+      });
+    }
+    const existingU = await firestoreGetDoc(`usernames/${userPublic.username}`, idToken);
+    if (!existingU) {
+      writes.push({
+        update: {
+          name: firestoreDocPathName(`usernames/${userPublic.username}`),
+          fields: toFirestoreFields({
+            uid,
+            username: userPublic.username,
+          }),
+        },
+        updateTransforms: [{ fieldPath: 'createdAt', setToServerValue: 'REQUEST_TIME' }],
+      });
+    }
+    const existingClaim = await firestoreGetDoc(`email_claims/${emailHash}`, idToken);
+    if (!existingClaim) {
+      writes.push({
+        update: {
+          name: firestoreDocPathName(`email_claims/${emailHash}`),
+          fields: toFirestoreFields({
+            uid,
+            emailHash,
+          }),
+        },
+        updateTransforms: [{ fieldPath: 'createdAt', setToServerValue: 'REQUEST_TIME' }],
+      });
+    }
+    await firestoreCommitWrites(writes, idToken);
+  }
+
+  const sessionToken = genId('svfb');
+  const sessions = loadFirebaseSessions();
+  sessions[sessionToken] = {
+    uid,
+    email: cleanEmail,
+    username: userPublic.username,
+    idToken,
+    refreshToken,
+    expiresAt: Date.now() + expiresInSec * 1000,
+  };
+  saveFirebaseSessions(sessions);
+  recordUsernameEmail(userPublic.username, cleanEmail);
+
+  store.accounts[uid] = {
+    uid,
+    email: cleanEmail,
+    canonicalEmail: canonical,
+    username: userPublic.username,
+    password: store.accounts[uid]?.password || '',
+    createdAt: userPublic.createdAt || now,
+  };
+  store.usersPublic[uid] = userPublic;
+  store.usersPrivate[uid] = userPrivate;
+  store.tokens[sessionToken] = uid;
+  try {
+    saveStore(store);
+  } catch {
+    // ignore storage quota errors on large media
+  }
+
+  return { token: sessionToken, userPublic, userPrivate };
 }
 
 function activeUsersPublic(store: StandaloneStore): UserPublic[] {
@@ -260,12 +1102,14 @@ function hydrateStateForUid(store: StandaloneStore, uid: string | null) {
       if (p.visibility === 'followers') return followingIds.includes(p.authorId);
       return false;
     })
+    .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
     .map((p) => {
       const likes = store.postLikes[p.id] || [];
+      const commentsLen = (store.commentsByPost[p.id] || []).length;
       return {
         ...p,
-        likesCount: likes.length,
-        commentsCount: (store.commentsByPost[p.id] || []).length,
+        likesCount: Math.max(p.likesCount || 0, likes.length),
+        commentsCount: Math.max(p.commentsCount || 0, commentsLen),
         likedByMe: uid ? likes.includes(uid) : false,
         savedByMe: savedSet.has(p.id),
       };
@@ -357,9 +1201,9 @@ function pushNotification(
   type: AppNotification['type'],
   summary: string,
   targetId?: string
-): void {
-  if (!recipientUid || recipientUid === actor.uid) return;
-  store.notifications.unshift({
+): AppNotification | null {
+  if (!recipientUid || recipientUid === actor.uid) return null;
+  const notif: AppNotification = {
     id: genId('notif'),
     recipientUid,
     actorUid: actor.uid,
@@ -370,7 +1214,9 @@ function pushNotification(
     targetId,
     read: false,
     createdAt: new Date().toISOString(),
-  });
+  };
+  store.notifications.unshift(notif);
+  return notif;
 }
 
 function aiSuggestions(
@@ -455,6 +1301,338 @@ function aiSuggestions(
   };
 }
 
+async function hydrateFromCloudFirestore(
+  store: StandaloneStore,
+  uid: string | null,
+  idToken: string | null
+): Promise<void> {
+  if (!isRemoteFirebaseEnabled()) return;
+  const readToken = idToken || (await ensureGuestIdToken());
+  if (!readToken) return;
+
+  const [usersRes, publicPostsRes, publicStoriesRes] = await Promise.all([
+    firestoreRunQuery(
+      'users',
+      [{ field: 'onboardingCompleted', op: 'EQUAL', value: { booleanValue: true } }],
+      readToken
+    ),
+    firestoreRunQuery(
+      'posts',
+      [{ field: 'visibility', op: 'EQUAL', value: { stringValue: 'public' } }],
+      readToken
+    ),
+    firestoreRunQuery(
+      'stories',
+      [{ field: 'privacy', op: 'EQUAL', value: { stringValue: 'everyone' } }],
+      readToken
+    ),
+  ]);
+
+  const creatorMap = new Map<string, UserPublic>();
+  if (usersRes.ok) {
+    for (const row of usersRes.rows) {
+      const u = normalizeFirestoreUserPublic(row.data);
+      if (!u.uid) continue;
+      creatorMap.set(u.uid, u);
+      store.usersPublic[u.uid] = u;
+      if (!store.accounts[u.uid]) {
+        store.accounts[u.uid] = {
+          uid: u.uid,
+          email: '',
+          canonicalEmail: '',
+          username: u.username,
+          password: '',
+          createdAt: u.createdAt || new Date().toISOString(),
+        };
+      }
+    }
+  }
+
+  let rawPostRows = publicPostsRes.ok ? [...publicPostsRes.rows] : [];
+  let rawStoryRows = publicStoriesRes.ok ? [...publicStoriesRes.rows] : [];
+
+  if (uid && idToken) {
+    const [
+      ownPub,
+      ownPriv,
+      ownPostsRes,
+      ownStoriesRes,
+      followingRes,
+      followersRes,
+      frToRes,
+      frFromRes,
+      chatsRes,
+      savedRes,
+      notifsRes,
+    ] = await Promise.all([
+      firestoreGetDoc(`users/${uid}`, idToken),
+      firestoreGetDoc(`users/${uid}/private/info`, idToken),
+      firestoreRunQuery('posts', [{ field: 'authorId', op: 'EQUAL', value: { stringValue: uid } }], idToken),
+      firestoreRunQuery('stories', [{ field: 'authorId', op: 'EQUAL', value: { stringValue: uid } }], idToken),
+      firestoreRunQuery('followers', [{ field: 'followerUid', op: 'EQUAL', value: { stringValue: uid } }], idToken),
+      firestoreRunQuery('followers', [{ field: 'targetUid', op: 'EQUAL', value: { stringValue: uid } }], idToken),
+      firestoreRunQuery('friend_requests', [{ field: 'toUid', op: 'EQUAL', value: { stringValue: uid } }], idToken),
+      firestoreRunQuery('friend_requests', [{ field: 'fromUid', op: 'EQUAL', value: { stringValue: uid } }], idToken),
+      firestoreRunQuery('chats', [{ field: 'participantIds', op: 'ARRAY_CONTAINS', value: { stringValue: uid } }], idToken),
+      firestoreRunQuery('saved_posts', [{ field: 'uid', op: 'EQUAL', value: { stringValue: uid } }], idToken),
+      firestoreRunQuery('notifications', [{ field: 'recipientUid', op: 'EQUAL', value: { stringValue: uid } }], idToken),
+    ]);
+
+    if (ownPub) {
+      const normalizedOwn = normalizeFirestoreUserPublic(ownPub);
+      creatorMap.set(uid, normalizedOwn);
+      store.usersPublic[uid] = normalizedOwn;
+    }
+    if (ownPriv) {
+      store.usersPrivate[uid] = normalizeFirestoreUserPrivate(ownPriv);
+    }
+    if (ownPostsRes.ok) rawPostRows = [...rawPostRows, ...ownPostsRes.rows];
+    if (ownStoriesRes.ok) rawStoryRows = [...rawStoryRows, ...ownStoriesRes.rows];
+
+    if (followingRes.ok) {
+      store.followingByUid[uid] = Array.from(
+        new Set(
+          followingRes.rows
+            .map((r) => String(r.data.targetUid || ''))
+            .filter(Boolean)
+        )
+      );
+      if (store.usersPublic[uid]) {
+        store.usersPublic[uid].followingCount = store.followingByUid[uid].length;
+      }
+    }
+    if (followersRes.ok) {
+      store.followersByUid[uid] = Array.from(
+        new Set(
+          followersRes.rows
+            .map((r) => String(r.data.followerUid || ''))
+            .filter(Boolean)
+        )
+      );
+      if (store.usersPublic[uid]) {
+        store.usersPublic[uid].followersCount = store.followersByUid[uid].length;
+      }
+    }
+
+    if (frToRes.ok || frFromRes.ok) {
+      const frMap = new Map<string, FriendRequest>();
+      for (const row of [...frToRes.rows, ...frFromRes.rows]) {
+        const fromUid = String(row.data.fromUid || '');
+        const sender = creatorMap.get(fromUid) || store.usersPublic[fromUid];
+        frMap.set(row.id, {
+          id: String(row.data.id || row.id),
+          fromUid,
+          fromUsername: sender?.username || 'member',
+          fromDisplayName: sender?.displayName || 'Member',
+          fromAvatar: sender?.photoUrl || '',
+          toUid: String(row.data.toUid || ''),
+          status: (row.data.status as FriendRequest['status']) || 'pending',
+          mutualCount: 0,
+          createdAt: String(row.data.createdAt || new Date().toISOString()),
+        });
+      }
+      store.friendRequests = Array.from(frMap.values());
+    }
+
+    if (savedRes.ok) {
+      store.postSaves[uid] = Array.from(
+        new Set(savedRes.rows.map((r) => String(r.data.postId || '')).filter(Boolean))
+      );
+    }
+
+    if (notifsRes.ok) {
+      const remoteNotifs: AppNotification[] = notifsRes.rows.map((row) => {
+        const actorUid = String(row.data.actorUid || '');
+        const actor = creatorMap.get(actorUid) || store.usersPublic[actorUid];
+        return {
+          id: String(row.data.id || row.id),
+          recipientUid: String(row.data.recipientUid || uid),
+          actorUid,
+          actorUsername: actor?.username || 'member',
+          actorAvatar: actor?.photoUrl || '',
+          type: (row.data.type as AppNotification['type']) || 'follow',
+          summary: String(row.data.summary || row.data.type || 'interacted with you'),
+          targetId: typeof row.data.targetId === 'string' ? row.data.targetId : undefined,
+          read: Boolean(row.data.read),
+          createdAt: String(row.data.createdAt || new Date().toISOString()),
+        };
+      });
+      if (remoteNotifs.length > 0) {
+        remoteNotifs.sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
+        store.notifications = remoteNotifs;
+      }
+    }
+
+    if (chatsRes.ok) {
+      const hydratedChats: Chat[] = [];
+      await Promise.all(
+        chatsRes.rows.map(async (row) => {
+          const pIds = Array.isArray(row.data.participantIds)
+            ? row.data.participantIds.filter((x): x is string => typeof x === 'string')
+            : [];
+          const pNames: Record<string, string> = {};
+          const pAvatars: Record<string, string> = {};
+          pIds.forEach((pId) => {
+            const pUser = creatorMap.get(pId) || store.usersPublic[pId];
+            if (pUser) {
+              pNames[pId] = pUser.displayName;
+              pAvatars[pId] = pUser.photoUrl;
+            }
+          });
+          const chat: Chat = {
+            id: String(row.data.id || row.id),
+            type: row.data.type === 'group' ? 'group' : 'direct',
+            title: String(row.data.title || ''),
+            participantIds: pIds,
+            participantNames: pNames,
+            participantAvatars: pAvatars,
+            ownerUid: typeof row.data.ownerUid === 'string' ? row.data.ownerUid : undefined,
+            adminUids: Array.isArray(row.data.adminUids)
+              ? row.data.adminUids.filter((x): x is string => typeof x === 'string')
+              : undefined,
+            requireAddApproval: Boolean(row.data.requireAddApproval),
+            pendingMemberIds: Array.isArray(row.data.pendingMemberIds)
+              ? row.data.pendingMemberIds.filter((x): x is string => typeof x === 'string')
+              : undefined,
+            maxMembers: typeof row.data.maxMembers === 'number' ? row.data.maxMembers : MAX_GROUP_MEMBERS,
+            lastMessageText: String(row.data.lastMessageText || ''),
+            lastMessageAt: String(row.data.lastMessageAt || row.data.createdAt || new Date().toISOString()),
+            unreadCount: 0,
+            createdBy: String(row.data.createdBy || ''),
+            createdAt: String(row.data.createdAt || new Date().toISOString()),
+          };
+          hydratedChats.push(chat);
+
+          const msgsRes = await firestoreRunQuery(
+            'messages',
+            [{ field: 'chatId', op: 'EQUAL', value: { stringValue: chat.id } }],
+            idToken,
+            `chats/${chat.id}`
+          );
+          if (msgsRes.ok) {
+            store.messagesByChat[chat.id] = msgsRes.rows
+              .map((mr) => {
+                const senderId = String(mr.data.senderId || '');
+                const sender = creatorMap.get(senderId) || store.usersPublic[senderId];
+                return {
+                  id: String(mr.data.id || mr.id),
+                  chatId: chat.id,
+                  senderId,
+                  senderName: sender?.displayName || 'Member',
+                  type: (mr.data.type as ChatMessage['type']) || 'text',
+                  text: typeof mr.data.text === 'string' ? mr.data.text : undefined,
+                  mediaUrl: typeof mr.data.mediaUrl === 'string' ? mr.data.mediaUrl : undefined,
+                  stickerUrl: typeof mr.data.stickerUrl === 'string' ? mr.data.stickerUrl : undefined,
+                  sharedPostId: typeof mr.data.sharedPostId === 'string' ? mr.data.sharedPostId : undefined,
+                  durationMs: typeof mr.data.durationMs === 'number' ? mr.data.durationMs : undefined,
+                  replyToId: typeof mr.data.replyToId === 'string' ? mr.data.replyToId : undefined,
+                  status: (mr.data.status as ChatMessage['status']) || 'sent',
+                  reactions: (mr.data.reactions as Record<string, string[]>) || {},
+                  createdAt: String(mr.data.createdAt || new Date().toISOString()),
+                } satisfies ChatMessage;
+              })
+              .sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt));
+          }
+        })
+      );
+      if (hydratedChats.length > 0) {
+        hydratedChats.sort((a, b) => Date.parse(b.lastMessageAt) - Date.parse(a.lastMessageAt));
+        store.chats = hydratedChats;
+      }
+    }
+  }
+
+  if (publicPostsRes.ok || rawPostRows.length > 0) {
+    const postMap = new Map<string, Post>();
+    for (const row of rawPostRows) {
+      const authorId = String(row.data.authorId || '');
+      const author = creatorMap.get(authorId) || store.usersPublic[authorId];
+      const normalized = normalizeFirestorePost({ ...row.data, id: String(row.data.id || row.id) }, author);
+      if (normalized.id) {
+        postMap.set(normalized.id, normalized);
+      }
+    }
+    const remotePosts = Array.from(postMap.values()).sort(
+      (a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt)
+    );
+    store.posts = remotePosts;
+
+    // Hydrate comments for top posts in parallel
+    await Promise.all(
+      remotePosts.slice(0, 25).map(async (p) => {
+        const cmRes = await firestoreRunQuery(
+          'comments',
+          [{ field: 'postId', op: 'EQUAL', value: { stringValue: p.id } }],
+          readToken,
+          `posts/${p.id}`
+        );
+        if (cmRes.ok) {
+          store.commentsByPost[p.id] = cmRes.rows
+            .map((cr) => {
+              const cAuthorId = String(cr.data.authorId || '');
+              const cAuthor = creatorMap.get(cAuthorId) || store.usersPublic[cAuthorId];
+              return {
+                id: String(cr.data.id || cr.id),
+                postId: p.id,
+                authorId: cAuthorId,
+                authorUsername: String(cr.data.authorUsername || cAuthor?.username || 'member'),
+                authorAvatar: cAuthor?.photoUrl || '',
+                text: String(cr.data.text || ''),
+                stickerUrl: typeof cr.data.stickerUrl === 'string' ? cr.data.stickerUrl : undefined,
+                gifUrl: typeof cr.data.gifUrl === 'string' ? cr.data.gifUrl : undefined,
+                parentCommentId:
+                  typeof cr.data.parentCommentId === 'string' ? cr.data.parentCommentId : undefined,
+                createdAt: String(cr.data.createdAt || new Date().toISOString()),
+              } satisfies PostComment;
+            })
+            .sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt));
+        }
+      })
+    );
+
+    // Sync per-author post counts cleanly
+    const countsByAuthor: Record<string, number> = {};
+    for (const p of remotePosts) {
+      countsByAuthor[p.authorId] = (countsByAuthor[p.authorId] || 0) + 1;
+    }
+    for (const u of Object.values(store.usersPublic)) {
+      u.postsCount = Math.max(u.postsCount || 0, countsByAuthor[u.uid] || 0);
+    }
+  }
+
+  if (publicStoriesRes.ok || rawStoryRows.length > 0) {
+    const storyMap = new Map<string, Story>();
+    for (const row of rawStoryRows) {
+      const sAuthorId = String(row.data.authorId || '');
+      const sAuthor = creatorMap.get(sAuthorId) || store.usersPublic[sAuthorId];
+      const story: Story = {
+        id: String(row.data.id || row.id),
+        authorId: sAuthorId,
+        authorUsername: String(row.data.authorUsername || sAuthor?.username || 'member'),
+        authorDisplayName: sAuthor?.displayName || String(row.data.authorUsername || 'Member'),
+        authorAvatar: sAuthor?.photoUrl || '',
+        mediaType: (row.data.mediaType as Story['mediaType']) || 'text',
+        mediaUrl: typeof row.data.mediaUrl === 'string' ? row.data.mediaUrl : undefined,
+        textContent: typeof row.data.textContent === 'string' ? row.data.textContent : undefined,
+        privacy: (row.data.privacy as Story['privacy']) || 'everyone',
+        viewersCount: Number(row.data.viewersCount || 0),
+        viewerUsernames: [],
+        reactions: [],
+        createdAt: String(row.data.createdAt || new Date().toISOString()),
+        expiresAt: String(row.data.expiresAt || new Date(Date.now() + 86400000).toISOString()),
+      };
+      storyMap.set(story.id, story);
+    }
+    store.stories = Array.from(storyMap.values());
+  }
+
+  try {
+    saveStore(store);
+  } catch {
+    // ignore storage quota errors on large base64 payloads
+  }
+}
+
 export async function handleStandaloneApi(
   rawUrl: string,
   options: RequestInit = {},
@@ -473,11 +1651,17 @@ export async function handleStandaloneApi(
   }
 
   const store = loadStore();
-  const uid = token ? store.tokens[token] || null : null;
-  const currentUser = uid ? store.usersPublic[uid] || null : null;
+  const useRemote = isRemoteFirebaseEnabled();
+  const remoteSession = useRemote ? await ensureSessionIdToken(token) : { uid: null, idToken: null };
+  const uid = remoteSession.uid || (token ? store.tokens[token] || null : null);
+  const userIdToken = remoteSession.idToken;
+  let currentUser = uid ? store.usersPublic[uid] || null : null;
 
-  // 1. State Hydration
+  // 1. State Hydration (live Cloud Firestore -> local cache fallback)
   if (method === 'GET' && pathname === '/api/state') {
+    if (useRemote) {
+      await hydrateFromCloudFirestore(store, uid, userIdToken);
+    }
     return ok(hydrateStateForUid(store, uid));
   }
 
@@ -493,9 +1677,15 @@ export async function handleStandaloneApi(
         reason: 'Use 3–24 lowercase letters, numbers, or underscores.',
       });
     }
-    const taken = Object.values(store.accounts).some(
+    let taken = Object.values(store.accounts).some(
       (a) => !a.deleted && a.uid !== excludeUid && a.username === normalized
     );
+    if (!taken && useRemote) {
+      const claimDoc = await firestoreGetDoc(`usernames/${normalized}`);
+      if (claimDoc && claimDoc.uid && claimDoc.uid !== excludeUid) {
+        taken = true;
+      }
+    }
     return ok({
       available: !taken,
       normalized,
@@ -512,14 +1702,71 @@ export async function handleStandaloneApi(
     if (!isValidEmailFormat(emailRaw)) {
       return fail(lang === 'bn' ? 'সঠিক ইমেইল দিন' : 'Please enter a valid email address.', 400);
     }
+
+    let cleanEmail = emailRaw;
+    let canonical = canonicalizeEmail(cleanEmail);
     if (purpose === 'signup') {
-      const check = validateSignupEmail(emailRaw);
+      const check = validateSignupEmail(emailRaw, lang);
       if (!check.valid) {
         return fail(check.reason || 'Invalid signup email', 400);
       }
-      const canonical = canonicalizeEmail(emailRaw);
+      cleanEmail = check.cleanEmail;
+      canonical = check.canonicalEmail;
+    }
+
+    if (useRemote) {
+      const emailHash = sha256Hex(canonical);
+      const [remoteClaim, authUri] = await Promise.all([
+        firestoreGetDoc(`email_claims/${emailHash}`),
+        firebaseAuthPost<{ registered?: boolean }>('accounts:createAuthUri', {
+          identifier: cleanEmail,
+          continueUri: 'https://appassets.androidplatform.net',
+        }).catch(() => ({ ok: false, status: 0, data: {} as { registered?: boolean } })),
+      ]);
+
+      const remoteExists = Boolean((remoteClaim && remoteClaim.uid) || authUri.data?.registered);
+      if (purpose === 'signup' && remoteExists) {
+        return fail(
+          lang === 'bn'
+            ? 'এই ইমেইলটি ইতিমধ্যেই ভেরিফাই করা এবং এটি দিয়ে একটি অ্যাকাউন্ট খোলা আছে — অনুগ্রহ করে সাইন ইন করুন অথবা নতুন ইমেইল ব্যবহার করুন।'
+            : 'This email is already verified and registered to an account — please sign in or use a different email.',
+          409,
+          { code: 'EMAIL_ALREADY_EXISTS', alreadyVerified: true, existingEmail: cleanEmail }
+        );
+      }
+
+      // Attempt real Gmail SMTP delivery via deployed Cloud Functions
+      const fnRes = await callCloudFunction<{ ok?: boolean; sentViaSmtp?: boolean }>(
+        '/auth/send-otp',
+        { email: cleanEmail, purpose, language: lang }
+      );
+      if (fnRes.ok && fnRes.data.sentViaSmtp) {
+        return ok({ ok: true, sentViaSmtp: true });
+      }
+      if (!fnRes.networkError && fnRes.status >= 400 && fnRes.status < 500 && fnRes.status !== 404) {
+        return fail(
+          fnRes.data.error || 'Could not send verification code.',
+          fnRes.status,
+          fnRes.data.code ? { code: fnRes.data.code } : {}
+        );
+      }
+
+      if (purpose === 'reset' && !remoteExists) {
+        const localExists = Object.values(store.accounts).some(
+          (a) => !a.deleted && (a.email === cleanEmail || a.canonicalEmail === canonical)
+        );
+        if (!localExists) {
+          return fail(
+            lang === 'bn'
+              ? 'এই ইমেইলে কোনো অ্যাকাউন্ট পাওয়া যায়নি।'
+              : 'No account found with that email address.',
+            404
+          );
+        }
+      }
+    } else if (purpose === 'signup') {
       const exists = Object.values(store.accounts).some(
-        (a) => !a.deleted && (a.email === emailRaw || a.canonicalEmail === canonical)
+        (a) => !a.deleted && (a.email === cleanEmail || a.canonicalEmail === canonical)
       );
       if (exists) {
         return fail(
@@ -527,17 +1774,18 @@ export async function handleStandaloneApi(
             ? 'এই ইমেইলে ইতিমধ্যে অ্যাকাউন্ট আছে'
             : 'An account already exists with this email.',
           409,
-          { code: 'EMAIL_EXISTS', existingEmail: emailRaw }
+          { code: 'EMAIL_EXISTS', existingEmail: cleanEmail }
         );
       }
     }
+
     const code = String(Math.floor(100000 + Math.random() * 900000));
-    store.otps[`${purpose}:${emailRaw}`] = {
+    store.otps[`${purpose}:${cleanEmail}`] = {
       code,
       expiresAt: Date.now() + 10 * 60 * 1000,
     };
     saveStore(store);
-    return ok({ sentViaSmtp: false, devOtpCode: code });
+    return ok({ ok: true, sentViaSmtp: false, devOtpCode: code });
   }
 
   // 4. Verify OTP
@@ -546,18 +1794,45 @@ export async function handleStandaloneApi(
     const code = String(body.code || '').trim();
     const purpose = String(body.purpose || 'signup');
     const rec = store.otps[`${purpose}:${emailRaw}`];
-    if (!rec || rec.expiresAt < Date.now() || rec.code !== code) {
-      return fail('Invalid or expired verification code.', 400);
+
+    if (rec) {
+      if (rec.expiresAt < Date.now() || rec.code !== code) {
+        return fail('Invalid or expired verification code.', 400);
+      }
+      delete store.otps[`${purpose}:${emailRaw}`];
+      const verificationToken = genId('vtok');
+      store.verifications[verificationToken] = {
+        email: emailRaw,
+        purpose,
+        expiresAt: Date.now() + 20 * 60 * 1000,
+      };
+      saveStore(store);
+      return ok({ ok: true, verificationToken });
     }
-    delete store.otps[`${purpose}:${emailRaw}`];
-    const verificationToken = genId('vtok');
-    store.verifications[verificationToken] = {
-      email: emailRaw,
-      purpose,
-      expiresAt: Date.now() + 15 * 60 * 1000,
-    };
-    saveStore(store);
-    return ok({ verificationToken });
+
+    if (useRemote) {
+      const fnRes = await callCloudFunction<{ verificationToken?: string }>(
+        '/auth/verify-otp',
+        { email: emailRaw, code, purpose }
+      );
+      if (fnRes.ok && fnRes.data.verificationToken) {
+        const verificationToken = fnRes.data.verificationToken;
+        store.verifications[verificationToken] = {
+          email: emailRaw,
+          purpose,
+          expiresAt: Date.now() + 20 * 60 * 1000,
+          remoteToken: verificationToken,
+          code,
+        };
+        saveStore(store);
+        return ok({ ok: true, verificationToken });
+      }
+      if (!fnRes.networkError && fnRes.data.error) {
+        return fail(fnRes.data.error, fnRes.status || 400);
+      }
+    }
+
+    return fail('Invalid or expired verification code.', 400);
   }
 
   // 5. Complete Sign Up Registration
@@ -591,6 +1866,57 @@ export async function handleStandaloneApi(
     if (!isValidDateOfBirth(dateOfBirth).valid) {
       return fail('You must be at least 13 years old with a valid date of birth.', 400);
     }
+
+    if (useRemote) {
+      const existingUsername = await firestoreGetDoc(`usernames/${username}`);
+      if (existingUsername && existingUsername.uid) {
+        return fail('Username is already taken.', 409);
+      }
+
+      const signUpRes = await firebaseAuthPost<{
+        localId?: string;
+        idToken?: string;
+        refreshToken?: string;
+        expiresIn?: string;
+      }>('accounts:signUp', {
+        email,
+        password,
+        returnSecureToken: true,
+      });
+
+      if (!signUpRes.ok || !signUpRes.data.localId || !signUpRes.data.idToken) {
+        const msg = signUpRes.data.error?.message || '';
+        if (msg.includes('EMAIL_EXISTS')) {
+          return fail(
+            language === 'bn'
+              ? 'এই ইমেইলে ইতিমধ্যে অ্যাকাউন্ট খোলা আছে — অনুগ্রহ করে সাইন ইন করুন।'
+              : 'An account already exists with this email — please sign in.',
+            409
+          );
+        }
+        return fail('Could not create Firebase account. Please verify your details.', 400);
+      }
+
+      delete store.verifications[verificationToken];
+      const session = await createFirebaseUserSessionAndProfile({
+        store,
+        uid: signUpRes.data.localId,
+        email,
+        idToken: signUpRes.data.idToken,
+        refreshToken: signUpRes.data.refreshToken || '',
+        expiresInSec: Number(signUpRes.data.expiresIn || 3600),
+        displayNameSeed: displayName,
+        usernameSeed: username,
+        photoUrlSeed: photoUrl,
+        dateOfBirth,
+        nicknameFont,
+        language,
+      });
+
+      return ok({ token: session.token, user: session.userPublic, userPrivate: session.userPrivate }, 201);
+    }
+
+    // Offline unit test fallback
     const usernameTaken = Object.values(store.accounts).some(
       (a) => !a.deleted && a.username === username
     );
@@ -637,16 +1963,112 @@ export async function handleStandaloneApi(
     return ok({ token: sessionTok, user: userPublic, userPrivate: userPriv }, 201);
   }
 
-  // 6. Login with identifier + password
+  // 6. Login with identifier (email OR @username) + password
   if (method === 'POST' && pathname === '/api/auth/login') {
-    const identifier = String(body.identifier || '').trim().toLowerCase();
+    const rawIdentifier = String(body.identifier || '').trim().toLowerCase();
     const password = String(body.password || '');
-    const normUser = normalizeUsername(identifier);
+
+    if (useRemote) {
+      let targetEmail: string | null = null;
+      const isEmailLogin = rawIdentifier.includes('@') && !rawIdentifier.startsWith('@');
+      if (isEmailLogin) {
+        targetEmail = rawIdentifier;
+      } else {
+        const normUser = normalizeUsername(rawIdentifier);
+        const usernameMap = loadUsernameEmailMap();
+        const localAcct = Object.values(store.accounts).find(
+          (a) => !a.deleted && a.username === normUser && a.email
+        );
+        targetEmail =
+          usernameMap[normUser] ||
+          findEmailInSavedLogins(normUser) ||
+          localAcct?.email ||
+          null;
+
+        if (!targetEmail) {
+          const fnRes = await callCloudFunction<{ email?: string }>(
+            '/auth/resolve-login',
+            { identifier: normUser },
+            null,
+            4000
+          );
+          if (fnRes.ok && fnRes.data.email) {
+            targetEmail = fnRes.data.email.trim().toLowerCase();
+          }
+        }
+
+        if (!targetEmail) {
+          const claimDoc = await firestoreGetDoc(`usernames/${normUser}`);
+          if (claimDoc && claimDoc.uid) {
+            return fail(
+              `Account @${normUser} found! Please sign in with your registered email address once on this device (after that, @${normUser} login will work automatically).`,
+              400
+            );
+          }
+        }
+      }
+
+      if (!targetEmail) {
+        return fail('Invalid email/username or password.', 401);
+      }
+
+      const signInRes = await firebaseAuthPost<{
+        localId?: string;
+        idToken?: string;
+        refreshToken?: string;
+        expiresIn?: string;
+        email?: string;
+      }>('accounts:signInWithPassword', {
+        email: targetEmail,
+        password,
+        returnSecureToken: true,
+      });
+
+      if (!signInRes.ok || !signInRes.data.localId || !signInRes.data.idToken) {
+        return fail('Invalid email/username or password.', 401);
+      }
+
+      const session = await createFirebaseUserSessionAndProfile({
+        store,
+        uid: signInRes.data.localId,
+        email: signInRes.data.email || targetEmail,
+        idToken: signInRes.data.idToken,
+        refreshToken: signInRes.data.refreshToken || '',
+        expiresInSec: Number(signInRes.data.expiresIn || 3600),
+      });
+
+      if (session.userPublic.isDeactivated) {
+        session.userPublic.isDeactivated = false;
+        session.userPublic.deactivatedUntil = null;
+        const fields = buildPublicFieldsForFirestore(session.userPublic);
+        delete fields.followersCount;
+        delete fields.followingCount;
+        delete fields.postsCount;
+        await firestoreCommitWrites(
+          [
+            {
+              update: {
+                name: firestoreDocPathName(`users/${session.userPublic.uid}`),
+                fields: toFirestoreFields(fields),
+              },
+              updateMask: { fieldPaths: ['isDeactivated', 'deactivatedUntil'] },
+              updateTransforms: [{ fieldPath: 'updatedAt', setToServerValue: 'REQUEST_TIME' }],
+            },
+          ],
+          signInRes.data.idToken
+        );
+      }
+
+      return ok({ token: session.token, user: session.userPublic, userPrivate: session.userPrivate });
+    }
+
+    // Offline unit test login
+    const normUser = normalizeUsername(rawIdentifier);
     const acc = Object.values(store.accounts).find(
       (a) =>
         !a.deleted &&
-        (a.email === identifier ||
-          a.canonicalEmail === canonicalizeEmail(identifier) ||
+        (a.email === rawIdentifier ||
+          a.canonicalEmail === canonicalizeEmail(rawIdentifier) ||
           a.username === normUser)
     );
     if (!acc || acc.password !== password) {
@@ -665,9 +2087,28 @@ export async function handleStandaloneApi(
     return ok({ token: sessionTok, user, userPrivate: priv });
   }
 
-  // 7. Login with saved session token
+  // 7. Login with saved session token (refreshes Firebase refreshToken cleanly!)
   if (method === 'POST' && pathname === '/api/auth/login-token') {
     const savedTok = String(body.token || '');
+    if (useRemote) {
+      const refreshedSession = await ensureSessionIdToken(savedTok);
+      if (refreshedSession.uid && refreshedSession.idToken && refreshedSession.session) {
+        const [pubRaw, privRaw] = await Promise.all([
+          firestoreGetDoc(`users/${refreshedSession.uid}`, refreshedSession.idToken),
+          firestoreGetDoc(`users/${refreshedSession.uid}/private/info`, refreshedSession.idToken),
+        ]);
+        const user = pubRaw ? normalizeFirestoreUserPublic(pubRaw) : store.usersPublic[refreshedSession.uid];
+        const priv = privRaw ? normalizeFirestoreUserPrivate(privRaw) : store.usersPrivate[refreshedSession.uid];
+        if (user && priv) {
+          store.usersPublic[refreshedSession.uid] = user;
+          store.usersPrivate[refreshedSession.uid] = priv;
+          saveStore(store);
+          return ok({ token: savedTok, user, userPrivate: priv });
+        }
+      }
+      return fail('Saved session expired. Please sign in with your password.', 401);
+    }
+
     const targetUid = store.tokens[savedTok];
     if (!targetUid || store.accounts[targetUid]?.deleted) {
       return fail('Saved session expired. Please sign in with your password.', 401);
@@ -678,7 +2119,28 @@ export async function handleStandaloneApi(
     return ok({ token: savedTok, user, userPrivate: priv });
   }
 
-  // 8. Firebase ID Token Exchange
+  // 7b. Verify 2FA Login
+  if (method === 'POST' && pathname === '/api/auth/verify-2fa') {
+    const email = String(body.email || '').trim().toLowerCase();
+    const code = String(body.code || '').trim();
+    const rec = store.otps[`2fa:${email}`];
+    if (!rec || rec.expiresAt < Date.now() || rec.code !== code) {
+      return fail('Invalid or expired 2FA verification code.', 400);
+    }
+    delete store.otps[`2fa:${email}`];
+    const acc = Object.values(store.accounts).find((a) => !a.deleted && a.email === email);
+    if (!acc) return fail('Account not found.', 404);
+    const sessionTok = genId('svtok');
+    store.tokens[sessionTok] = acc.uid;
+    saveStore(store);
+    return ok({
+      token: sessionTok,
+      user: store.usersPublic[acc.uid],
+      userPrivate: store.usersPrivate[acc.uid],
+    });
+  }
+
+  // 8. Firebase ID Token Exchange (Google Sign-In / native Firebase Auth session)
   if (method === 'POST' && pathname === '/api/auth/firebase') {
     const idToken = String(body.idToken || '').trim();
     const lang = (body.language === 'bn' ? 'bn' : 'en') as AppLanguage;
@@ -687,6 +2149,35 @@ export async function handleStandaloneApi(
       return fail('Invalid Firebase ID token.', 401);
     }
     const fbEmail = (decoded.email || `${decoded.sub}@firebase.local`).toLowerCase();
+
+    if (useRemote) {
+      // Lookup full account metadata from Identity Toolkit accounts:lookup
+      const lookupRes = await firebaseAuthPost<{
+        users?: Array<{ localId?: string; email?: string; displayName?: string; photoUrl?: string }>;
+      }>('accounts:lookup', { idToken }).catch(() => null);
+      const fbUserInfo = lookupRes?.ok ? lookupRes.data.users?.[0] : undefined;
+      const targetUid = fbUserInfo?.localId || decoded.sub;
+      const resolvedEmail = (fbUserInfo?.email || fbEmail).toLowerCase();
+
+      const session = await createFirebaseUserSessionAndProfile({
+        store,
+        uid: targetUid,
+        email: resolvedEmail,
+        idToken,
+        refreshToken: '',
+        expiresInSec: 3500,
+        displayNameSeed: fbUserInfo?.displayName || decoded.name || resolvedEmail.split('@')[0],
+        photoUrlSeed: fbUserInfo?.photoUrl || decoded.picture || '',
+        language: lang,
+      });
+
+      return ok({
+        token: session.token,
+        user: session.userPublic,
+        userPrivate: session.userPrivate,
+      });
+    }
+
     const canonical = canonicalizeEmail(fbEmail);
     let acc = Object.values(store.accounts).find(
       (a) => !a.deleted && (a.uid === decoded.sub || a.canonicalEmail === canonical)
@@ -742,6 +2233,35 @@ export async function handleStandaloneApi(
       return fail('Verification token expired.', 400);
     }
     if (newPassword.length < 6) return fail('Password must be at least 6 characters.', 400);
+
+    if (useRemote) {
+      if (ver.remoteToken) {
+        const fnRes = await callCloudFunction<{ ok?: boolean; method?: string; message?: string }>(
+          '/auth/reset-password',
+          { verificationToken: ver.remoteToken, email, newPassword }
+        );
+        if (fnRes.ok) {
+          delete store.verifications[verificationToken];
+          saveStore(store);
+          return ok({ ok: true, method: fnRes.data.method || 'direct', message: fnRes.data.message });
+        }
+      }
+      const oob = await firebaseAuthPost<{ email?: string }>('accounts:sendOobCode', {
+        requestType: 'PASSWORD_RESET',
+        email,
+      });
+      if (oob.ok) {
+        delete store.verifications[verificationToken];
+        saveStore(store);
+        return ok({
+          ok: true,
+          method: 'email_link',
+          message: `Password reset link sent to ${email}. Check your inbox to complete resetting your password.`,
+        });
+      }
+      return fail('Could not reset password for this email right now.', 400);
+    }
+
     const acc = Object.values(store.accounts).find((a) => !a.deleted && a.email === email);
     if (!acc) return fail('Account not found.', 404);
     acc.password = newPassword;
@@ -751,19 +2271,61 @@ export async function handleStandaloneApi(
   }
 
   // Require auth for mutating user actions below
-  if (!uid || !currentUser) {
+  if (!uid) {
     return fail('Authentication required.', 401);
+  }
+  if (!currentUser && useRemote && userIdToken) {
+    const pubRaw = await firestoreGetDoc(`users/${uid}`, userIdToken);
+    if (pubRaw) {
+      currentUser = normalizeFirestoreUserPublic(pubRaw);
+      store.usersPublic[uid] = currentUser;
+    }
+  }
+  if (!currentUser) {
+    return fail('Authentication required.', 401);
+  }
+  if (!store.usersPrivate[uid]) {
+    store.usersPrivate[uid] = { ...BASE_USER_PRIVATE, uid, updatedAt: new Date().toISOString() };
   }
   const currentPrivate = store.usersPrivate[uid];
 
   if (method === 'POST' && pathname === '/api/auth/change-password') {
     const currentPassword = String(body.currentPassword || '');
     const newPassword = String(body.newPassword || '');
+    if (newPassword.length < 6) return fail('New password must be at least 6 characters.', 400);
+
+    if (useRemote && remoteSession.session?.email) {
+      const verifyRes = await firebaseAuthPost<{ idToken?: string }>('accounts:signInWithPassword', {
+        email: remoteSession.session.email,
+        password: currentPassword,
+        returnSecureToken: true,
+      });
+      if (!verifyRes.ok || !verifyRes.data.idToken) {
+        return fail('Current password is incorrect.', 400);
+      }
+      const updateRes = await firebaseAuthPost<{ idToken?: string; refreshToken?: string }>('accounts:update', {
+        idToken: verifyRes.data.idToken,
+        password: newPassword,
+        returnSecureToken: true,
+      });
+      if (!updateRes.ok) {
+        return fail('Could not update password.', 400);
+      }
+      if (token && updateRes.data.idToken) {
+        const sessions = loadFirebaseSessions();
+        if (sessions[token]) {
+          sessions[token].idToken = updateRes.data.idToken;
+          if (updateRes.data.refreshToken) sessions[token].refreshToken = updateRes.data.refreshToken;
+          saveFirebaseSessions(sessions);
+        }
+      }
+      return ok({ ok: true });
+    }
+
     const acc = store.accounts[uid];
     if (!acc || acc.password !== currentPassword) {
       return fail('Current password is incorrect.', 400);
     }
-    if (newPassword.length < 6) return fail('New password must be at least 6 characters.', 400);
     acc.password = newPassword;
     saveStore(store);
     return ok({ ok: true });
@@ -774,10 +2336,42 @@ export async function handleStandaloneApi(
     currentUser.isDeactivated = true;
     currentUser.deactivatedUntil = new Date(Date.now() + days * 86400000).toISOString();
     saveStore(store);
+    if (useRemote && userIdToken) {
+      const fields = buildPublicFieldsForFirestore(currentUser);
+      await firestoreCommitWrites(
+        [
+          {
+            update: { name: firestoreDocPathName(`users/${uid}`), fields: toFirestoreFields(fields) },
+            updateMask: { fieldPaths: ['isDeactivated', 'deactivatedUntil'] },
+            updateTransforms: [{ fieldPath: 'updatedAt', setToServerValue: 'REQUEST_TIME' }],
+          },
+        ],
+        userIdToken
+      );
+    }
     return ok({ ok: true });
   }
 
   if (method === 'DELETE' && pathname === '/api/auth/account') {
+    if (useRemote && userIdToken) {
+      const writes: Array<Record<string, unknown>> = [
+        { delete: firestoreDocPathName(`users/${uid}/private/info`) },
+        { delete: firestoreDocPathName(`users/${uid}`) },
+      ];
+      if (isValidUsername(currentUser.username)) {
+        writes.push({ delete: firestoreDocPathName(`usernames/${currentUser.username}`) });
+      }
+      if (currentPrivate.email) {
+        writes.push({ delete: firestoreDocPathName(`email_claims/${sha256Hex(canonicalizeEmail(currentPrivate.email))}`) });
+      }
+      await firestoreCommitWrites(writes, userIdToken);
+      await firebaseAuthPost('accounts:delete', { idToken: userIdToken }).catch(() => null);
+      if (token) {
+        const sessions = loadFirebaseSessions();
+        delete sessions[token];
+        saveFirebaseSessions(sessions);
+      }
+    }
     if (store.accounts[uid]) store.accounts[uid].deleted = true;
     Object.keys(store.tokens).forEach((t) => {
       if (store.tokens[t] === uid) delete store.tokens[t];
@@ -790,23 +2384,44 @@ export async function handleStandaloneApi(
   if (method === 'PATCH' && pathname === '/api/settings/private') {
     Object.assign(currentPrivate, body, { updatedAt: new Date().toISOString() });
     saveStore(store);
+    if (useRemote && userIdToken) {
+      const fields = buildPrivateFieldsForFirestore(currentPrivate);
+      await firestoreCommitWrites(
+        [
+          {
+            update: {
+              name: firestoreDocPathName(`users/${uid}/private/info`),
+              fields: toFirestoreFields(fields),
+            },
+            updateMask: { fieldPaths: Object.keys(fields) },
+            updateTransforms: [{ fieldPath: 'updatedAt', setToServerValue: 'REQUEST_TIME' }],
+          },
+        ],
+        userIdToken
+      );
+    }
     return ok({ userPrivate: currentPrivate });
   }
 
   if (method === 'PATCH' && pathname === '/api/profile') {
+    const previousUsername = currentUser.username;
     if (typeof body.username === 'string') {
       const nextU = normalizeUsername(body.username);
       if (nextU !== currentUser.username) {
         if (!isValidUsername(nextU)) return fail('Invalid username.', 400);
         const cd = canChangeUsername(currentUser.lastUsernameChangedAt);
         if (!cd.allowed) return fail(`Username cooldown active (${cd.remainingDays}d left).`, 400);
-        const taken = Object.values(store.accounts).some(
+        const takenLocal = Object.values(store.accounts).some(
           (a) => !a.deleted && a.uid !== uid && a.username === nextU
         );
-        if (taken) return fail('Username is already taken.', 409);
+        const takenRemote = useRemote ? await firestoreGetDoc(`usernames/${nextU}`, userIdToken) : null;
+        if (takenLocal || (takenRemote && takenRemote.uid && takenRemote.uid !== uid)) {
+          return fail('Username is already taken.', 409);
+        }
         currentUser.username = nextU;
-        store.accounts[uid].username = nextU;
+        if (store.accounts[uid]) store.accounts[uid].username = nextU;
         currentUser.lastUsernameChangedAt = new Date().toISOString();
+        if (currentPrivate.email) recordUsernameEmail(nextU, currentPrivate.email);
       }
     }
     if (typeof body.displayName === 'string' && body.displayName.trim() !== currentUser.displayName) {
@@ -828,6 +2443,32 @@ export async function handleStandaloneApi(
     });
     currentUser.updatedAt = new Date().toISOString();
     saveStore(store);
+
+    if (useRemote && userIdToken) {
+      const fields = buildPublicFieldsForFirestore(currentUser);
+      delete fields.followersCount;
+      delete fields.followingCount;
+      delete fields.postsCount;
+      const writes: Array<Record<string, unknown>> = [
+        {
+          update: { name: firestoreDocPathName(`users/${uid}`), fields: toFirestoreFields(fields) },
+          updateMask: { fieldPaths: Object.keys(fields) },
+          updateTransforms: [{ fieldPath: 'updatedAt', setToServerValue: 'REQUEST_TIME' }],
+        },
+      ];
+      if (previousUsername && previousUsername !== currentUser.username) {
+        writes.push({ delete: firestoreDocPathName(`usernames/${previousUsername}`) });
+        writes.push({
+          update: {
+            name: firestoreDocPathName(`usernames/${currentUser.username}`),
+            fields: toFirestoreFields({ uid, username: currentUser.username }),
+          },
+          updateTransforms: [{ fieldPath: 'createdAt', setToServerValue: 'REQUEST_TIME' }],
+        });
+      }
+      await firestoreCommitWrites(writes, userIdToken);
+    }
+
     return ok({ user: currentUser });
   }
 
@@ -857,7 +2498,44 @@ export async function handleStandaloneApi(
     };
     store.posts.unshift(post);
     currentUser.postsCount = store.posts.filter((p) => p.authorId === uid).length;
-    saveStore(store);
+    try {
+      saveStore(store);
+    } catch {
+      // ignore storage quota errors on huge videos
+    }
+
+    if (useRemote && userIdToken) {
+      const docName = firestoreDocPathName(`posts/${post.id}`);
+      const fields = buildPostFieldsForFirestore(post, false);
+      let res = await firestoreCommitWrites(
+        [
+          {
+            update: { name: docName, fields: toFirestoreFields(fields) },
+            updateTransforms: [
+              { fieldPath: 'createdAt', setToServerValue: 'REQUEST_TIME' },
+              { fieldPath: 'updatedAt', setToServerValue: 'REQUEST_TIME' },
+            ],
+          },
+        ],
+        userIdToken
+      );
+      if (!res.ok && res.status === 403) {
+        const fallbackFields = buildPostFieldsForFirestore(post, true);
+        res = await firestoreCommitWrites(
+          [
+            {
+              update: { name: docName, fields: toFirestoreFields(fallbackFields) },
+              updateTransforms: [
+                { fieldPath: 'createdAt', setToServerValue: 'REQUEST_TIME' },
+                { fieldPath: 'updatedAt', setToServerValue: 'REQUEST_TIME' },
+              ],
+            },
+          ],
+          userIdToken
+        );
+      }
+    }
+
     return ok({ post }, 201);
   }
 
@@ -875,6 +2553,21 @@ export async function handleStandaloneApi(
       post.caption = caption;
       post.hashtags = extractHashtags(caption);
       saveStore(store);
+      if (useRemote && userIdToken) {
+        await firestoreCommitWrites(
+          [
+            {
+              update: {
+                name: firestoreDocPathName(`posts/${post.id}`),
+                fields: toFirestoreFields(buildPostFieldsForFirestore(post, true)),
+              },
+              updateMask: { fieldPaths: ['caption', 'hashtags'] },
+              updateTransforms: [{ fieldPath: 'updatedAt', setToServerValue: 'REQUEST_TIME' }],
+            },
+          ],
+          userIdToken
+        );
+      }
       return ok({ post });
     }
     if (!sub && method === 'DELETE') {
@@ -882,32 +2575,108 @@ export async function handleStandaloneApi(
       store.posts = store.posts.filter((p) => p.id !== postId);
       currentUser.postsCount = store.posts.filter((p) => p.authorId === uid).length;
       saveStore(store);
+      if (useRemote && userIdToken) {
+        await firestoreCommitWrites(
+          [{ delete: firestoreDocPathName(`posts/${postId}`) }],
+          userIdToken
+        );
+      }
       return ok({ ok: true });
     }
     if (sub === 'like' && method === 'POST') {
       const list = store.postLikes[postId] || [];
       const idx = list.indexOf(uid);
-      if (idx >= 0) list.splice(idx, 1);
-      else {
+      if (idx >= 0) {
+        list.splice(idx, 1);
+        post.likesCount = Math.max(0, (post.likesCount || 1) - 1, list.length);
+      } else {
         list.push(uid);
-        pushNotification(store, post.authorId, currentUser, 'like', 'liked your post', postId);
+        post.likesCount = Math.max((post.likesCount || 0) + 1, list.length);
+        const n = pushNotification(store, post.authorId, currentUser, 'like', 'liked your post', postId);
+        if (useRemote && userIdToken && n) {
+          void firestoreCommitWrites(
+            [
+              {
+                update: {
+                  name: firestoreDocPathName(`notifications/${n.id}`),
+                  fields: toFirestoreFields({
+                    id: n.id,
+                    recipientUid: n.recipientUid,
+                    actorUid: n.actorUid,
+                    type: n.type,
+                    targetId: postId,
+                    read: false,
+                  }),
+                },
+                updateTransforms: [{ fieldPath: 'createdAt', setToServerValue: 'REQUEST_TIME' }],
+              },
+            ],
+            userIdToken
+          );
+        }
       }
       store.postLikes[postId] = list;
       saveStore(store);
-      return ok({ liked: idx < 0, likesCount: list.length });
+      if (useRemote && userIdToken) {
+        await firestoreCommitWrites(
+          [
+            {
+              update: {
+                name: firestoreDocPathName(`posts/${post.id}`),
+                fields: toFirestoreFields({ likesCount: post.likesCount }),
+              },
+              updateMask: { fieldPaths: ['likesCount'] },
+            },
+          ],
+          userIdToken
+        );
+      }
+      return ok({ liked: idx < 0, likesCount: post.likesCount });
     }
     if (sub === 'save' && method === 'POST') {
       const list = store.postSaves[uid] || [];
       const idx = list.indexOf(postId);
-      if (idx >= 0) list.splice(idx, 1);
+      const savedNow = idx < 0;
+      if (!savedNow) list.splice(idx, 1);
       else list.push(postId);
       store.postSaves[uid] = list;
       saveStore(store);
-      return ok({ saved: idx < 0 });
+      if (useRemote && userIdToken) {
+        const saveId = `${uid}_${postId}`.slice(0, 128);
+        await firestoreCommitWrites(
+          [
+            savedNow
+              ? {
+                  update: {
+                    name: firestoreDocPathName(`saved_posts/${saveId}`),
+                    fields: toFirestoreFields({ uid, postId }),
+                  },
+                  updateTransforms: [{ fieldPath: 'createdAt', setToServerValue: 'REQUEST_TIME' }],
+                }
+              : { delete: firestoreDocPathName(`saved_posts/${saveId}`) },
+          ],
+          userIdToken
+        );
+      }
+      return ok({ saved: savedNow });
     }
     if (sub === 'share' && method === 'POST') {
       post.sharesCount += 1;
       saveStore(store);
+      if (useRemote && userIdToken) {
+        await firestoreCommitWrites(
+          [
+            {
+              update: {
+                name: firestoreDocPathName(`posts/${post.id}`),
+                fields: toFirestoreFields({ sharesCount: post.sharesCount }),
+              },
+              updateMask: { fieldPaths: ['sharesCount'] },
+            },
+          ],
+          userIdToken
+        );
+      }
       return ok({ sharesCount: post.sharesCount });
     }
     if (sub === 'comments' && method === 'POST') {
@@ -921,15 +2690,48 @@ export async function handleStandaloneApi(
         authorId: uid,
         authorUsername: currentUser.username,
         authorAvatar: currentUser.photoUrl,
-        text: text.trim(),
+        text: text.trim() || (body.stickerUrl ? 'Sticker' : 'GIF'),
         stickerUrl: typeof body.stickerUrl === 'string' ? body.stickerUrl : undefined,
         gifUrl: typeof body.gifUrl === 'string' ? body.gifUrl : undefined,
         parentCommentId: typeof body.parentCommentId === 'string' ? body.parentCommentId : undefined,
         createdAt: new Date().toISOString(),
       };
       store.commentsByPost[postId] = [...(store.commentsByPost[postId] || []), comment];
+      post.commentsCount = Math.max((post.commentsCount || 0) + 1, store.commentsByPost[postId].length);
       pushNotification(store, post.authorId, currentUser, 'comment', 'commented on your post', postId);
       saveStore(store);
+
+      if (useRemote && userIdToken) {
+        const cFields: Record<string, unknown> = {
+          id: comment.id,
+          postId,
+          authorId: uid,
+          authorUsername: currentUser.username,
+          text: comment.text.slice(0, 1000),
+          ...(comment.stickerUrl && comment.stickerUrl.length <= 200000 ? { stickerUrl: comment.stickerUrl } : {}),
+          ...(comment.gifUrl && comment.gifUrl.length <= 200000 ? { gifUrl: comment.gifUrl } : {}),
+          ...(comment.parentCommentId ? { parentCommentId: comment.parentCommentId.slice(0, 128) } : {}),
+        };
+        await firestoreCommitWrites(
+          [
+            {
+              update: {
+                name: firestoreDocPathName(`posts/${postId}/comments/${comment.id}`),
+                fields: toFirestoreFields(cFields),
+              },
+              updateTransforms: [{ fieldPath: 'createdAt', setToServerValue: 'REQUEST_TIME' }],
+            },
+            {
+              update: {
+                name: firestoreDocPathName(`posts/${post.id}`),
+                fields: toFirestoreFields({ commentsCount: post.commentsCount }),
+              },
+              updateMask: { fieldPaths: ['commentsCount'] },
+            },
+          ],
+          userIdToken
+        );
+      }
       return ok({ comment }, 201);
     }
   }
@@ -957,6 +2759,35 @@ export async function handleStandaloneApi(
     };
     store.stories.unshift(story);
     saveStore(store);
+
+    if (useRemote && userIdToken) {
+      const sFields: Record<string, unknown> = {
+        id: story.id,
+        authorId: story.authorId,
+        authorUsername: story.authorUsername,
+        mediaType: story.mediaType,
+        ...(story.mediaUrl && story.mediaUrl.length <= 200000 ? { mediaUrl: story.mediaUrl } : {}),
+        ...(story.textContent ? { textContent: story.textContent.slice(0, 500) } : {}),
+        privacy: story.privacy,
+        viewersCount: 0,
+      };
+      await firestoreCommitWrites(
+        [
+          {
+            update: {
+              name: firestoreDocPathName(`stories/${story.id}`),
+              fields: {
+                ...toFirestoreFields(sFields),
+                expiresAt: { timestampValue: story.expiresAt },
+              },
+            },
+            updateTransforms: [{ fieldPath: 'createdAt', setToServerValue: 'REQUEST_TIME' }],
+          },
+        ],
+        userIdToken
+      );
+    }
+
     return ok({ story }, 201);
   }
 
@@ -980,6 +2811,12 @@ export async function handleStandaloneApi(
       if (story.authorId !== uid) return fail('Forbidden.', 403);
       store.stories = store.stories.filter((s) => s.id !== storyId);
       saveStore(store);
+      if (useRemote && userIdToken) {
+        await firestoreCommitWrites(
+          [{ delete: firestoreDocPathName(`stories/${storyId}`) }],
+          userIdToken
+        );
+      }
       return ok({ ok: true });
     }
   }
@@ -987,7 +2824,7 @@ export async function handleStandaloneApi(
   // Story Highlights
   if (method === 'POST' && pathname === '/api/highlights') {
     const title = String(body.title || '').trim();
-    if (!isValidHighlightTitle(title)) return fail('Highlight title must be 1–40 chars.', 400);
+    if (!isValidHighlightTitle(title)) return fail('Highlight title must be 1–36 chars.', 400);
     const hl: StoryHighlight = {
       id: genId('hl'),
       ownerUid: uid,
@@ -1028,21 +2865,29 @@ export async function handleStandaloneApi(
     if (!targetUser) return fail('User not found.', 404);
 
     if (action === 'connections' && method === 'GET') {
+      const fIds = store.followersByUid[targetUid] || [];
+      const flgIds = store.followingByUid[targetUid] || [];
       return ok({
-        followers: (store.followersByUid[targetUid] || []).map((id) => store.usersPublic[id]).filter(Boolean),
-        following: (store.followingByUid[targetUid] || []).map((id) => store.usersPublic[id]).filter(Boolean),
+        followerIds: fIds,
+        followingIds: flgIds,
+        followers: fIds.map((id) => store.usersPublic[id]).filter(Boolean),
+        following: flgIds.map((id) => store.usersPublic[id]).filter(Boolean),
       });
     }
     if (action === 'follow' && method === 'POST') {
       const myFollowing = store.followingByUid[uid] || [];
       const targetFollowers = store.followersByUid[targetUid] || [];
+      const edgeId = `${uid}_${targetUid}`.slice(0, 128);
       if (myFollowing.includes(targetUid)) {
         store.followingByUid[uid] = myFollowing.filter((x) => x !== targetUid);
         store.followersByUid[targetUid] = targetFollowers.filter((x) => x !== uid);
         currentUser.followingCount = store.followingByUid[uid].length;
         targetUser.followersCount = store.followersByUid[targetUid].length;
         saveStore(store);
-        return ok({ status: 'unfollowed' });
+        if (useRemote && userIdToken) {
+          await firestoreCommitWrites([{ delete: firestoreDocPathName(`followers/${edgeId}`) }], userIdToken);
+        }
+        return ok({ status: 'unfollowed', followerIds: store.followersByUid[uid], followingIds: store.followingByUid[uid] });
       }
       const targetPriv = store.usersPrivate[targetUid];
       if (requiresFollowApproval(targetUser, targetPriv)) {
@@ -1060,7 +2905,26 @@ export async function handleStandaloneApi(
         store.friendRequests.unshift(req);
         pushNotification(store, targetUid, currentUser, 'friend_request', 'requested to follow you', req.id);
         saveStore(store);
-        return ok({ status: 'requested' });
+        if (useRemote && userIdToken) {
+          await firestoreCommitWrites(
+            [
+              {
+                update: {
+                  name: firestoreDocPathName(`friend_requests/${req.id}`),
+                  fields: toFirestoreFields({
+                    id: req.id,
+                    fromUid: uid,
+                    toUid: targetUid,
+                    status: 'pending',
+                  }),
+                },
+                updateTransforms: [{ fieldPath: 'createdAt', setToServerValue: 'REQUEST_TIME' }],
+              },
+            ],
+            userIdToken
+          );
+        }
+        return ok({ status: 'requested', followingIds: store.followingByUid[uid] || [] });
       }
       store.followingByUid[uid] = [...myFollowing, targetUid];
       store.followersByUid[targetUid] = [...targetFollowers, uid];
@@ -1068,7 +2932,21 @@ export async function handleStandaloneApi(
       targetUser.followersCount = store.followersByUid[targetUid].length;
       pushNotification(store, targetUid, currentUser, 'follow', 'started following you', uid);
       saveStore(store);
-      return ok({ status: 'following' });
+      if (useRemote && userIdToken) {
+        await firestoreCommitWrites(
+          [
+            {
+              update: {
+                name: firestoreDocPathName(`followers/${edgeId}`),
+                fields: toFirestoreFields({ followerUid: uid, targetUid }),
+              },
+              updateTransforms: [{ fieldPath: 'createdAt', setToServerValue: 'REQUEST_TIME' }],
+            },
+          ],
+          userIdToken
+        );
+      }
+      return ok({ status: 'following', followingIds: store.followingByUid[uid] });
     }
     if (action === 'block') {
       if (method === 'POST') {
@@ -1101,7 +2979,7 @@ export async function handleStandaloneApi(
       }
     }
     saveStore(store);
-    return ok({ ok: true });
+    return ok({ ok: true, followerIds: store.followersByUid[uid] || [], followingIds: store.followingByUid[uid] || [] });
   }
 
   const removeFollowerMatch = pathname.match(/^\/api\/followers\/([^/]+)$/);
@@ -1112,6 +2990,10 @@ export async function handleStandaloneApi(
     currentUser.followersCount = store.followersByUid[uid].length;
     if (store.usersPublic[fUid]) store.usersPublic[fUid].followingCount = store.followingByUid[fUid].length;
     saveStore(store);
+    if (useRemote && userIdToken) {
+      const edgeId = `${fUid}_${uid}`.slice(0, 128);
+      await firestoreCommitWrites([{ delete: firestoreDocPathName(`followers/${edgeId}`) }], userIdToken);
+    }
     return ok({ ok: true });
   }
 
@@ -1211,6 +3093,33 @@ export async function handleStandaloneApi(
     store.chats.unshift(chat);
     store.messagesByChat[chat.id] = [];
     saveStore(store);
+
+    if (useRemote && userIdToken && participants.length >= 2) {
+      const cFields: Record<string, unknown> = {
+        id: chat.id,
+        type: chat.type,
+        title: (chat.title || '').slice(0, 80),
+        participantIds: chat.participantIds,
+        ...(chat.ownerUid ? { ownerUid: chat.ownerUid } : {}),
+        ...(chat.adminUids ? { adminUids: chat.adminUids } : {}),
+        maxMembers: chat.maxMembers || MAX_GROUP_MEMBERS,
+        lastMessageText: '',
+        createdBy: uid,
+      };
+      await firestoreCommitWrites(
+        [
+          {
+            update: { name: firestoreDocPathName(`chats/${chat.id}`), fields: toFirestoreFields(cFields) },
+            updateTransforms: [
+              { fieldPath: 'createdAt', setToServerValue: 'REQUEST_TIME' },
+              { fieldPath: 'lastMessageAt', setToServerValue: 'REQUEST_TIME' },
+            ],
+          },
+        ],
+        userIdToken
+      );
+    }
+
     return ok({ chat }, 201);
   }
 
@@ -1235,9 +3144,47 @@ export async function handleStandaloneApi(
       createdAt: new Date().toISOString(),
     };
     store.messagesByChat[chat.id] = [...(store.messagesByChat[chat.id] || []), msg];
-    chat.lastMessageText = msg.text || `[${msg.type}]`;
+    chat.lastMessageText = (msg.text || `[${msg.type}]`).slice(0, 300);
     chat.lastMessageAt = msg.createdAt;
     saveStore(store);
+
+    if (useRemote && userIdToken) {
+      const mFields: Record<string, unknown> = {
+        id: msg.id,
+        chatId: chat.id,
+        senderId: uid,
+        type: msg.type,
+        ...(msg.text ? { text: msg.text.slice(0, 2000) } : {}),
+        ...(msg.mediaUrl && msg.mediaUrl.length <= 200000 ? { mediaUrl: msg.mediaUrl } : {}),
+        ...(msg.stickerUrl && msg.stickerUrl.length <= 200000 ? { stickerUrl: msg.stickerUrl } : {}),
+        ...(msg.sharedPostId ? { sharedPostId: msg.sharedPostId.slice(0, 128) } : {}),
+        ...(msg.durationMs !== undefined ? { durationMs: Math.min(600000, Math.max(0, Math.round(msg.durationMs))) } : {}),
+        ...(msg.replyToId ? { replyToId: msg.replyToId.slice(0, 128) } : {}),
+        status: 'sent',
+        reactions: {},
+      };
+      await firestoreCommitWrites(
+        [
+          {
+            update: {
+              name: firestoreDocPathName(`chats/${chat.id}/messages/${msg.id}`),
+              fields: toFirestoreFields(mFields),
+            },
+            updateTransforms: [{ fieldPath: 'createdAt', setToServerValue: 'REQUEST_TIME' }],
+          },
+          {
+            update: {
+              name: firestoreDocPathName(`chats/${chat.id}`),
+              fields: toFirestoreFields({ lastMessageText: chat.lastMessageText }),
+            },
+            updateMask: { fieldPaths: ['lastMessageText'] },
+            updateTransforms: [{ fieldPath: 'lastMessageAt', setToServerValue: 'REQUEST_TIME' }],
+          },
+        ],
+        userIdToken
+      );
+    }
+
     return ok({ message: msg }, 201);
   }
 
@@ -1252,12 +3199,18 @@ export async function handleStandaloneApi(
       msg.text = String(body.text || '');
       msg.editedAt = new Date().toISOString();
       saveStore(store);
-      return ok({ ok: true });
+      return ok({ message: msg, ok: true });
     }
     if (!sub && method === 'DELETE') {
       if (msg.senderId !== uid) return fail('Forbidden.', 403);
       store.messagesByChat[chatId] = msgs.filter((m) => m.id !== msgId);
       saveStore(store);
+      if (useRemote && userIdToken) {
+        await firestoreCommitWrites(
+          [{ delete: firestoreDocPathName(`chats/${chatId}/messages/${msgId}`) }],
+          userIdToken
+        );
+      }
       return ok({ ok: true });
     }
     if (sub === 'react' && method === 'POST') {
@@ -1267,13 +3220,13 @@ export async function handleStandaloneApi(
         ? existingList.filter((x) => x !== uid)
         : [...existingList, uid];
       saveStore(store);
-      return ok({ ok: true });
+      return ok({ reactions: msg.reactions, ok: true });
     }
     if (sub === 'star' && method === 'POST') {
       const starred = msg.starredByUids || [];
       msg.starredByUids = starred.includes(uid) ? starred.filter((x) => x !== uid) : [...starred, uid];
       saveStore(store);
-      return ok({ ok: true });
+      return ok({ starredByUids: msg.starredByUids, ok: true });
     }
     if (sub === 'forward' && method === 'POST') {
       const targetChatId = String(body.targetChatId || '');
@@ -1339,7 +3292,7 @@ export async function handleStandaloneApi(
       const nickname = String(body.nickname || '').trim();
       chat.chatNicknames = { ...(chat.chatNicknames || {}), [targetUid]: nickname };
       saveStore(store);
-      return ok({ chat });
+      return ok({ chatNicknames: chat.chatNicknames, chat });
     }
     if (sub === 'settings' && method === 'PATCH') {
       if (typeof body.title === 'string') chat.title = body.title.slice(0, 80);
@@ -1412,10 +3365,23 @@ export async function handleStandaloneApi(
 
   // Notifications & Reports & AI
   if (method === 'POST' && pathname === '/api/notifications/read-all') {
-    store.notifications.forEach((n) => {
-      if (n.recipientUid === uid) n.read = true;
+    const myUnread = store.notifications.filter((n) => n.recipientUid === uid && !n.read);
+    myUnread.forEach((n) => {
+      n.read = true;
     });
     saveStore(store);
+    if (useRemote && userIdToken && myUnread.length > 0) {
+      await firestoreCommitWrites(
+        myUnread.slice(0, 50).map((n) => ({
+          update: {
+            name: firestoreDocPathName(`notifications/${n.id}`),
+            fields: toFirestoreFields({ read: true }),
+          },
+          updateMask: { fieldPaths: ['read'] },
+        })),
+        userIdToken
+      );
+    }
     return ok({ ok: true });
   }
 
@@ -1431,6 +3397,20 @@ export async function handleStandaloneApi(
     };
     store.reports.unshift(report);
     saveStore(store);
+    if (useRemote && userIdToken) {
+      await firestoreCommitWrites(
+        [
+          {
+            update: {
+              name: firestoreDocPathName(`reports/${report.id}`),
+              fields: toFirestoreFields(report as unknown as Record<string, unknown>),
+            },
+            updateTransforms: [{ fieldPath: 'createdAt', setToServerValue: 'REQUEST_TIME' }],
+          },
+        ],
+        userIdToken
+      );
+    }
     return ok({ report }, 201);
   }
 
@@ -1439,6 +3419,18 @@ export async function handleStandaloneApi(
     const contextText = String(body.contextText || '');
     const currentBio = String(body.currentBio || currentUser.bio || '');
     const lang = (body.language === 'bn' ? 'bn' : 'en') as AppLanguage;
+
+    if (useRemote && userIdToken) {
+      const fnRes = await callCloudFunction<{ suggestions?: string[]; tip?: string }>(
+        '/ai/profile-assist',
+        { task, contextText, currentBio, language: lang },
+        userIdToken,
+        8000
+      );
+      if (fnRes.ok && Array.isArray(fnRes.data.suggestions)) {
+        return ok({ suggestions: fnRes.data.suggestions, tip: fnRes.data.tip || '' });
+      }
+    }
     return ok(aiSuggestions(task, contextText, currentBio, lang));
   }
 

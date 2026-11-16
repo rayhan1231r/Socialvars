@@ -1343,7 +1343,12 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
       setFirebaseUser(fbUser);
       setAuthReady(true);
 
-      if (fbUser && !sessionTokenRef.current && !firebaseExchangeInFlightRef.current) {
+      if (
+        fbUser &&
+        !fbUser.isAnonymous &&
+        !sessionTokenRef.current &&
+        !firebaseExchangeInFlightRef.current
+      ) {
         firebaseExchangeInFlightRef.current = true;
         try {
           const idToken = await fbUser.getIdToken();

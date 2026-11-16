@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
@@ -42,7 +43,14 @@ import {
   validateSignupEmail,
 } from './validation';
 import { TRANSLATIONS } from './i18n';
-import { handleStandaloneApi, resetStandaloneStoreForTesting } from './standaloneBackend';
+import {
+  fromFirestoreValue,
+  handleStandaloneApi,
+  normalizeFirestorePost,
+  resetStandaloneStoreForTesting,
+  sha256Hex,
+  toFirestoreFields,
+} from './standaloneBackend';
 
 test('username normalization and strict validation rules', () => {
   assert.equal(normalizeUsername('  Rafi_Ahmed! '), 'rafi_ahmed');
@@ -459,6 +467,18 @@ test('standalone Android backend handles OTP signup, login, posts, likes, and bi
   assert.equal(regRes.ok, true);
   const token = String(regRes.data.token);
 
+  const loginByUsername = await handleStandaloneApi('/api/auth/login', {
+    method: 'POST',
+    body: JSON.stringify({ identifier: '@aria_rahman', password: 'password123' }),
+  });
+  assert.equal(loginByUsername.ok, true);
+
+  const savedTokenLogin = await handleStandaloneApi('/api/auth/login-token', {
+    method: 'POST',
+    body: JSON.stringify({ token }),
+  });
+  assert.equal(savedTokenLogin.ok, true);
+
   const postRes = await handleStandaloneApi(
     '/api/posts',
     {
@@ -492,5 +512,44 @@ test('standalone Android backend handles OTP signup, login, posts, likes, and bi
   assert.equal((aiBnRes.data.suggestions as string[]).length, 3);
   resetStandaloneStoreForTesting();
 });
+
+test('Firestore REST serialization and coverUrl-to-mediaUrls hydration for posts match Node crypto', () => {
+  const sampleEmail = 'rayhanahamad50@gmail.com';
+  const expectedHash = crypto.createHash('sha256').update(sampleEmail).digest('hex');
+  assert.equal(sha256Hex(sampleEmail), expectedHash);
+
+  const fields = toFirestoreFields({
+    id: 'post_1',
+    likesCount: 3,
+    visibility: 'public',
+    hashtags: ['socialverse'],
+  });
+  assert.equal(fromFirestoreValue(fields.id), 'post_1');
+  assert.equal(fromFirestoreValue(fields.likesCount), 3);
+  assert.deepEqual(fromFirestoreValue(fields.hashtags), ['socialverse']);
+
+  const hydratedPost = normalizeFirestorePost(
+    {
+      id: 'post_1794820104512_klml',
+      authorId: 'z8GLaTu6RVNpz9OKEDI32YZvNMe2',
+      authorUsername: 'r1achr',
+      caption: 'First post',
+      mediaUrls: [],
+      coverUrl: 'data:image/webp;base64,UklGRh4AAABXRUJQVlA4',
+      mediaType: 'image',
+      visibility: 'public',
+      likesCount: 0,
+      commentsCount: 0,
+      sharesCount: 0,
+    },
+    { displayName: 'Rayhan', photoUrl: '' }
+  );
+
+  assert.equal(hydratedPost.caption, 'First post');
+  assert.equal(hydratedPost.authorUsername, 'r1achr');
+  assert.equal(hydratedPost.authorDisplayName, 'Rayhan');
+  assert.deepEqual(hydratedPost.mediaUrls, ['data:image/webp;base64,UklGRh4AAABXRUJQVlA4']);
+});
+
 
 

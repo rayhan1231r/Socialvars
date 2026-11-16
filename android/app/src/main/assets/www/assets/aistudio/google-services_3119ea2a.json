@@ -1,0 +1,77 @@
+{
+  "project_info": {
+    "project_number": "884518347713",
+    "firebase_url": "https://com-aistudio-socialverse-196b8-default-rtdb.firebaseio.com",
+    "project_id": "com-aistudio-socialverse-196b8",
+    "storage_bucket": "com-aistudio-socialverse-196b8.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:884518347713:android:03bf4929c6c4f61a6c4540",
+        "android_client_info": {
+          "package_name": "Com.social.versal"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "884518347713-jcai76vofrs2q2dnpgg5pmuvf34jqumb.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCXO5IHW-XiUom_0i3uNH5quoPRd2a5H7U"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "884518347713-jcai76vofrs2q2dnpgg5pmuvf34jqumb.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:884518347713:android:521b324166bb27346c4540",
+        "android_client_info": {
+          "package_name": "com.aistudio.socialverse.kxmpzq"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "884518347713-aunond22kpct389tgeij64aqp371u04n.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.aistudio.socialverse.kxmpzq",
+            "certificate_hash": "bdf70d591fe6b6345c813a5690654489dad7d4fe"
+          }
+        },
+        {
+          "client_id": "884518347713-jcai76vofrs2q2dnpgg5pmuvf34jqumb.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCXO5IHW-XiUom_0i3uNH5quoPRd2a5H7U"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "884518347713-jcai76vofrs2q2dnpgg5pmuvf34jqumb.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
