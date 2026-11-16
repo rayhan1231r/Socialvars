@@ -1,5 +1,12 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  GoogleAuthProvider,
+  onAuthStateChanged,
+  signInWithPopup,
+  signOut as firebaseSignOut,
+  type User as FirebaseUser,
+} from 'firebase/auth';
+import {
   DEFAULT_STICKERS,
   INITIAL_BROADCASTS,
   INITIAL_CHATS,
@@ -44,8 +51,15 @@ import type {
   UserPublic,
 } from '../types/social';
 import { TRANSLATIONS, type TranslationBundle } from '../utils/i18n';
-import { DEFAULT_NOTIFICATION_PREFS, MAX_BIO_LENGTH, shouldNotifyUser } from '../utils/validation';
-import { validateFirestoreConnection } from '../firebase';
+import {
+  DEFAULT_NOTIFICATION_PREFS,
+  MAX_BIO_LENGTH,
+  mapFirebaseAuthError,
+  parseAppRouteFromLocation,
+  shouldNotifyUser,
+} from '../utils/validation';
+import { auth, validateFirestoreConnection } from '../firebase';
+import { handleStandaloneApi, isStandaloneAndroidRuntime } from '../utils/standaloneBackend';
 
 export type AuthStage = 'splash' | 'app';
 
@@ -120,6 +134,8 @@ interface BackendStateResponse {
 interface SocialVerseContextValue {
   stage: AuthStage;
   setStage: (s: AuthStage) => void;
+  authReady: boolean;
+  firebaseUser: FirebaseUser | null;
   sessionToken: string | null;
   isAuthenticated: boolean;
   authModalOpen: boolean;
@@ -134,6 +150,7 @@ interface SocialVerseContextValue {
   setPendingPhotoSetup: (v: boolean) => void;
   savedLogins: SavedLoginEntry[];
   removeSavedLogin: (uid: string) => void;
+  signInWithGoogle: () => Promise<void>;
 
   currentUser: UserPublic;
   userPrivate: UserPrivate;
@@ -163,6 +180,10 @@ interface SocialVerseContextValue {
 
   creators: UserPublic[];
   posts: Post[];
+  isFeedLoading: boolean;
+  isReelsLoading: boolean;
+  refreshFeed: () => Promise<void>;
+  refreshReels: () => Promise<void>;
   visiblePostLimit: number;
   loadMorePosts: () => void;
   commentsByPost: Record<string, PostComment[]>;
@@ -470,7 +491,21 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
     typeof window !== 'undefined' &&
     new URLSearchParams(window.location.search).get('autostart') === '1';
 
+  const initialRoute = useMemo(
+    () =>
+      typeof window !== 'undefined'
+        ? parseAppRouteFromLocation(
+            window.location.pathname,
+            window.location.hash,
+            window.location.search
+          )
+        : { tab: 'home' as const, subscreen: null },
+    []
+  );
+
   const [stage, setStage] = useState<AuthStage>(autostart ? 'app' : 'splash');
+  const [authReady, setAuthReady] = useState<boolean>(false);
+  const [firebaseUser, setFirebaseUser] = useState<FirebaseUser | null>(null);
   const [sessionToken, setSessionToken] = useState<string | null>(() => {
     try {
       return localStorage.getItem(TOKEN_STORAGE_KEY);
@@ -490,8 +525,8 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
   const [language, setLanguageState] = useState<AppLanguage>('en');
   const [theme, setThemeState] = useState<ThemeMode>('light');
 
-  const [activeTab, setActiveTabState] = useState<MainTab>('home');
-  const [subscreen, setSubscreenState] = useState<ActiveModalOrSubscreen>(null);
+  const [activeTab, setActiveTabState] = useState<MainTab>(initialRoute.tab);
+  const [subscreen, setSubscreenState] = useState<ActiveModalOrSubscreen>(initialRoute.subscreen);
   const [viewedProfileUid, setViewedProfileUid] = useState<string | null>(null);
   const [navHistory, setNavHistory] = useState<NavSnapshot[]>([]);
   const [activeStoryIndex, setActiveStoryIndex] = useState<number | null>(null);
@@ -506,6 +541,8 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
 
   const [creators, setCreators] = useState<UserPublic[]>(INITIAL_CREATORS);
   const [posts, setPosts] = useState<Post[]>(INITIAL_POSTS);
+  const [isFeedLoading, setIsFeedLoading] = useState<boolean>(true);
+  const [isReelsLoading, setIsReelsLoading] = useState<boolean>(true);
   const [visiblePostLimit, setVisiblePostLimit] = useState<number>(10);
   const [commentsByPost, setCommentsByPost] = useState<Record<string, PostComment[]>>(INITIAL_COMMENTS);
   const [stories, setStories] = useState<Story[]>(INITIAL_STORIES);
@@ -542,6 +579,9 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
   const lastTypingSentRef = useRef<Record<string, number>>({});
   const seenNotifIdsRef = useRef<Set<string>>(new Set());
   const notifsInitializedRef = useRef<boolean>(false);
+  const sessionTokenRef = useRef<string | null>(sessionToken);
+  sessionTokenRef.current = sessionToken;
+  const firebaseExchangeInFlightRef = useRef<boolean>(false);
 
   // WebRTC Call State
   const [activeCall, setActiveCall] = useState<CallState | null>(null);
@@ -655,6 +695,8 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
     const root = document.documentElement;
     if (theme === 'dark') root.classList.add('dark');
     else root.classList.remove('dark');
+    const bridge = (window as unknown as { SocialVerseNative?: { setSystemTheme?: (dark: boolean) => void } }).SocialVerseNative;
+    bridge?.setSystemTheme?.(theme === 'dark');
   }, [theme]);
 
   // Brief splash loading on initial launch -> Home
@@ -775,6 +817,25 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
   const apiFetch = useCallback(
     async <T,>(url: string, options: RequestInit = {}, overrideToken?: string): Promise<T> => {
       const tokenToUse = overrideToken ?? sessionToken;
+      if (isStandaloneAndroidRuntime()) {
+        const res = await handleStandaloneApi(url, options, tokenToUse);
+        if (!res.ok) {
+          const errBody = res.data as {
+            error?: string;
+            code?: string;
+            existingEmail?: string;
+            alreadyVerified?: boolean;
+          };
+          throw new ApiError(
+            errBody.error || `Request failed (${res.status})`,
+            res.status,
+            errBody.code,
+            errBody.existingEmail,
+            errBody.alreadyVerified
+          );
+        }
+        return res.data as T;
+      }
       const headers: Record<string, string> = {
         'Content-Type': 'application/json',
         ...((options.headers as Record<string, string>) || {}),
@@ -823,11 +884,54 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
   );
 
   useEffect(() => {
-    refreshState(sessionToken || undefined);
+    let active = true;
+    refreshState(sessionToken || undefined).finally(() => {
+      if (!active) return;
+      setIsFeedLoading(false);
+      setIsReelsLoading(false);
+    });
+    return () => {
+      active = false;
+    };
   }, [sessionToken, refreshState]);
+
+  const refreshFeed = useCallback(async () => {
+    setIsFeedLoading(true);
+    const minDelay = new Promise((r) => setTimeout(r, 340));
+    try {
+      await Promise.all([refreshState(sessionTokenRef.current || undefined), minDelay]);
+    } finally {
+      setIsFeedLoading(false);
+    }
+  }, [refreshState]);
+
+  const refreshReels = useCallback(async () => {
+    setIsReelsLoading(true);
+    const minDelay = new Promise((r) => setTimeout(r, 340));
+    try {
+      await Promise.all([refreshState(sessionTokenRef.current || undefined), minDelay]);
+    } finally {
+      setIsReelsLoading(false);
+    }
+  }, [refreshState]);
 
   useEffect(() => {
     void validateFirestoreConnection();
+  }, []);
+
+  // Browser back/forward route sync
+  useEffect(() => {
+    const onPopState = () => {
+      const next = parseAppRouteFromLocation(
+        window.location.pathname,
+        window.location.hash,
+        window.location.search
+      );
+      setActiveTabState(next.tab);
+      setSubscreenState(next.subscreen);
+    };
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
   }, []);
 
   const cleanupMediaAndPeer = useCallback(() => {
@@ -843,9 +947,33 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
     pendingOfferRef.current = null;
   }, []);
 
-  // WebSocket Real-Time Listener & Call Signaling
+  // Stable refs for WebSocket message handler to avoid tearing down WS on UI navigation
+  const chatsRef = useRef(chats);
+  chatsRef.current = chats;
+  const currentUidRef = useRef(currentUser.uid);
+  currentUidRef.current = currentUser.uid;
+  const notifPrefsRef = useRef(userPrivate.notificationPrefs);
+  notifPrefsRef.current = userPrivate.notificationPrefs;
+  const activeTabRef = useRef(activeTab);
+  activeTabRef.current = activeTab;
+  const activeChatIdRef = useRef(activeChatId);
+  activeChatIdRef.current = activeChatId;
+  const applyServerStateRef = useRef(applyServerState);
+  applyServerStateRef.current = applyServerState;
+  const refreshStateRef = useRef(refreshState);
+  refreshStateRef.current = refreshState;
+  const cleanupMediaRef = useRef(cleanupMediaAndPeer);
+  cleanupMediaRef.current = cleanupMediaAndPeer;
+  const showToastRef = useRef(showToast);
+  showToastRef.current = showToast;
+  const dispatchDeviceNotifRef = useRef(dispatchDeviceNotification);
+  dispatchDeviceNotifRef.current = dispatchDeviceNotification;
+  const languageRef = useRef(language);
+  languageRef.current = language;
+
+  // WebSocket Real-Time Listener & Call Signaling (only reconnects when sessionToken changes)
   useEffect(() => {
-    if (!sessionToken) {
+    if (!sessionToken || isStandaloneAndroidRuntime()) {
       if (wsRef.current) {
         wsRef.current.close();
         wsRef.current = null;
@@ -865,30 +993,32 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
       try {
         const msg = JSON.parse(event.data);
         if (msg.type === 'state:sync') {
-          if (msg.state) applyServerState(msg.state);
-          else refreshState(sessionToken);
+          if (msg.state) applyServerStateRef.current(msg.state);
+          else refreshStateRef.current(sessionToken);
         } else if (msg.type === 'notification:new' && msg.notification) {
           const notif = msg.notification as AppNotification;
           if (!seenNotifIdsRef.current.has(notif.id)) {
             seenNotifIdsRef.current.add(notif.id);
             setNotifications((prev) => [notif, ...prev.filter((n) => n.id !== notif.id)]);
             const matchedChat = notif.targetId
-              ? chats.find((c) => c.id === notif.targetId)
+              ? chatsRef.current.find((c) => c.id === notif.targetId)
               : undefined;
             const isMutedChat = Boolean(
-              matchedChat && matchedChat.mutedByUids?.includes(currentUser.uid)
+              matchedChat && matchedChat.mutedByUids?.includes(currentUidRef.current)
             );
-            if (shouldNotifyUser(userPrivate.notificationPrefs, notif.type, isMutedChat)) {
-              void dispatchDeviceNotification(
+            if (shouldNotifyUser(notifPrefsRef.current, notif.type, isMutedChat)) {
+              void dispatchDeviceNotifRef.current(
                 `@${notif.actorUsername}`,
                 notif.summary,
                 `sv-notif-${notif.targetId || notif.type}`,
                 notif.actorAvatar
               );
               const isInsideSameChat =
-                activeTab === 'messages' && activeChatId && activeChatId === notif.targetId;
+                activeTabRef.current === 'messages' &&
+                activeChatIdRef.current &&
+                activeChatIdRef.current === notif.targetId;
               if (!isInsideSameChat) {
-                showToast(`@${notif.actorUsername}: ${notif.summary}`);
+                showToastRef.current(`@${notif.actorUsername}: ${notif.summary}`);
               }
             }
           }
@@ -927,9 +1057,9 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
             }));
           }, 2600);
         } else if (msg.type === 'call:decline' || msg.type === 'call:end') {
-          cleanupMediaAndPeer();
+          cleanupMediaRef.current();
           setActiveCall(null);
-          showToast(msg.type === 'call:decline' ? 'Call declined' : 'Call ended');
+          showToastRef.current(msg.type === 'call:decline' ? 'Call declined' : 'Call ended');
         }
       } catch {
         // ignore invalid packets
@@ -940,19 +1070,7 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
       ws.close();
       wsRef.current = null;
     };
-  }, [
-    sessionToken,
-    applyServerState,
-    refreshState,
-    cleanupMediaAndPeer,
-    showToast,
-    chats,
-    currentUser.uid,
-    userPrivate.notificationPrefs,
-    dispatchDeviceNotification,
-    activeTab,
-    activeChatId,
-  ]);
+  }, [sessionToken]);
 
   const openAuthModal = (reason?: string, prefillIdentifier?: string) => {
     setAuthModalReason(reason || null);
@@ -974,9 +1092,7 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
 
   const setActiveTab = (tab: MainTab) => {
     setActiveTabState(tab);
-    if (tab !== 'profile') {
-      setViewedProfileUid(null);
-    }
+    setViewedProfileUid(null);
     if (subscreen === 'notifications' || isSettingsSubscreen(subscreen) || subscreen === 'profile_about') {
       setSubscreenState(null);
     }
@@ -1194,23 +1310,116 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
     );
   };
 
-  const finishLoginSession = async (
-    token: string,
-    user: UserPublic,
-    priv: UserPrivate,
-    saveLogin = true
-  ) => {
-    localStorage.setItem(TOKEN_STORAGE_KEY, token);
-    setSessionToken(token);
-    setCurrentUser(user);
-    setUserPrivate(priv);
-    setLanguageState(priv.language || 'en');
-    setThemeState(priv.themeMode === 'dark' ? 'dark' : 'light');
-    if (priv.biometricLockEnabled) setIsLocked(true);
-    upsertSavedLogin(user, priv.email, token, saveLogin);
-    setAuthModalOpen(false);
-    setAuthModalReason(null);
-    await refreshState(token);
+  const finishLoginSession = useCallback(
+    async (token: string, user: UserPublic, priv: UserPrivate, saveLogin = true) => {
+      localStorage.setItem(TOKEN_STORAGE_KEY, token);
+      setSessionToken(token);
+      setCurrentUser(user);
+      setUserPrivate(priv);
+      setLanguageState(priv.language || 'en');
+      setThemeState(priv.themeMode === 'dark' ? 'dark' : 'light');
+      if (priv.biometricLockEnabled) setIsLocked(true);
+      upsertSavedLogin(user, priv.email, token, saveLogin);
+      setAuthModalOpen(false);
+      setAuthModalReason(null);
+      await refreshState(token);
+    },
+    [refreshState, upsertSavedLogin]
+  );
+
+  // Firebase Auth listener tracking authReady and auto-syncing Google/Firebase sessions
+  useEffect(() => {
+    let resolved = false;
+    const fallbackTimer = setTimeout(() => {
+      if (!resolved) {
+        resolved = true;
+        setAuthReady(true);
+      }
+    }, 1500);
+
+    const unsubscribe = onAuthStateChanged(auth, async (fbUser) => {
+      resolved = true;
+      clearTimeout(fallbackTimer);
+      setFirebaseUser(fbUser);
+      setAuthReady(true);
+
+      if (fbUser && !sessionTokenRef.current && !firebaseExchangeInFlightRef.current) {
+        firebaseExchangeInFlightRef.current = true;
+        try {
+          const idToken = await fbUser.getIdToken();
+          if (isStandaloneAndroidRuntime()) {
+            const localRes = await handleStandaloneApi(
+              '/api/auth/firebase',
+              {
+                method: 'POST',
+                body: JSON.stringify({ idToken, language: languageRef.current }),
+              },
+              null
+            );
+            if (localRes.ok) {
+              const data = localRes.data as {
+                token?: string;
+                user?: UserPublic;
+                userPrivate?: UserPrivate;
+              };
+              if (data.token && data.user && data.userPrivate) {
+                await finishLoginSession(data.token, data.user, data.userPrivate, true);
+              }
+            }
+          } else {
+            const res = await fetch('/api/auth/firebase', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ idToken, language: languageRef.current }),
+            });
+            if (res.ok) {
+              const data = (await res.json()) as {
+                token?: string;
+                user?: UserPublic;
+                userPrivate?: UserPrivate;
+              };
+              if (data.token && data.user && data.userPrivate) {
+                await finishLoginSession(data.token, data.user, data.userPrivate, true);
+              }
+            }
+          }
+        } catch {
+          // Keep guest/session fallback graceful if Firebase token exchange fails offline
+        } finally {
+          firebaseExchangeInFlightRef.current = false;
+        }
+      }
+    });
+
+    return () => {
+      clearTimeout(fallbackTimer);
+      unsubscribe();
+    };
+  }, [finishLoginSession]);
+
+  const signInWithGoogle = async () => {
+    const provider = new GoogleAuthProvider();
+    provider.setCustomParameters({ prompt: 'select_account' });
+    firebaseExchangeInFlightRef.current = true;
+    try {
+      const cred = await signInWithPopup(auth, provider);
+      const idToken = await cred.user.getIdToken();
+      const res = await apiFetch<{
+        token: string;
+        user: UserPublic;
+        userPrivate: UserPrivate;
+      }>('/api/auth/firebase', {
+        method: 'POST',
+        body: JSON.stringify({ idToken, language }),
+      });
+      await finishLoginSession(res.token, res.user, res.userPrivate, true);
+      showToast(language === 'bn' ? 'গুগল দিয়ে সাইন ইন সফল হয়েছে' : 'Signed in with Google');
+    } catch (err) {
+      const friendly = mapFirebaseAuthError(err, language);
+      throw new Error(friendly);
+    } finally {
+      firebaseExchangeInFlightRef.current = false;
+    }
   };
 
   const completeSignupRegistration: SocialVerseContextValue['completeSignupRegistration'] = async (
@@ -1350,6 +1559,7 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
     setNavHistory([]);
     setActiveChatId(null);
     setActiveTabState('home');
+    await firebaseSignOut(auth).catch(() => {});
     await refreshState('');
     showToast(language === 'bn' ? 'লগ আউট সম্পন্ন হয়েছে' : 'Logged out');
   };
@@ -1366,6 +1576,7 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
     setViewedProfileUid(null);
     setNavHistory([]);
     setActiveTabState('home');
+    await firebaseSignOut(auth).catch(() => {});
     await refreshState('');
     showToast(language === 'bn' ? 'অ্যাকাউন্ট স্থায়ীভাবে মুছে ফেলা হয়েছে' : 'Account deleted permanently.');
   };
@@ -1418,48 +1629,60 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
 
       let lastOsMilestone = 0;
 
-      const data = await new Promise<T>((resolve, reject) => {
-        const xhr = new XMLHttpRequest();
-        xhr.open('POST', url, true);
-        xhr.setRequestHeader('Content-Type', 'application/json');
-        if (sessionToken) {
-          xhr.setRequestHeader('Authorization', `Bearer ${sessionToken}`);
-        }
-
-        xhr.upload.onprogress = (evt) => {
-          if (evt.lengthComputable && evt.total > 0) {
-            const rawPct = Math.round((evt.loaded / evt.total) * 88);
-            const pct = Math.max(highestPct, Math.min(88, Math.max(5, rawPct)));
-            highestPct = pct;
-            setUploadTask((prev) =>
-              prev && prev.id === taskId ? { ...prev, progress: pct } : prev
-            );
-            if (allowUploadAlert && pct - lastOsMilestone >= 35) {
-              lastOsMilestone = pct;
-              void dispatchDeviceNotification(label, `${pct}% · Uploading...`, 'sv-upload-progress');
+      const data = await (isStandaloneAndroidRuntime()
+        ? handleStandaloneApi(
+            url,
+            { method: 'POST', body: JSON.stringify(payload) },
+            sessionToken
+          ).then((res) => {
+            if (!res.ok) {
+              throw new Error((res.data?.error as string) || `Upload failed (${res.status})`);
             }
-          }
-        };
+            return res.data as T;
+          })
+        : new Promise<T>((resolve, reject) => {
+            const xhr = new XMLHttpRequest();
+            xhr.open('POST', url, true);
+            xhr.setRequestHeader('Content-Type', 'application/json');
+            if (sessionToken) {
+              xhr.setRequestHeader('Authorization', `Bearer ${sessionToken}`);
+            }
 
-        xhr.onload = () => {
-          let parsed: unknown = {};
-          try {
-            parsed = JSON.parse(xhr.responseText || '{}');
-          } catch {
-            parsed = {};
-          }
-          if (xhr.status >= 200 && xhr.status < 300) {
-            resolve(parsed as T);
-          } else {
-            const errMsg =
-              (parsed as { error?: string })?.error || `Upload failed (${xhr.status})`;
-            reject(new Error(errMsg));
-          }
-        };
+            xhr.upload.onprogress = (evt) => {
+              if (evt.lengthComputable && evt.total > 0) {
+                const rawPct = Math.round((evt.loaded / evt.total) * 88);
+                const pct = Math.max(highestPct, Math.min(88, Math.max(5, rawPct)));
+                highestPct = pct;
+                setUploadTask((prev) =>
+                  prev && prev.id === taskId ? { ...prev, progress: pct } : prev
+                );
+                if (allowUploadAlert && pct - lastOsMilestone >= 35) {
+                  lastOsMilestone = pct;
+                  void dispatchDeviceNotification(label, `${pct}% · Uploading...`, 'sv-upload-progress');
+                }
+              }
+            };
 
-        xhr.onerror = () => reject(new Error('Network error during upload.'));
-        xhr.send(JSON.stringify(payload));
-      }).catch((err) => {
+            xhr.onload = () => {
+              let parsed: unknown = {};
+              try {
+                parsed = JSON.parse(xhr.responseText || '{}');
+              } catch {
+                parsed = {};
+              }
+              if (xhr.status >= 200 && xhr.status < 300) {
+                resolve(parsed as T);
+              } else {
+                const errMsg =
+                  (parsed as { error?: string })?.error || `Upload failed (${xhr.status})`;
+                reject(new Error(errMsg));
+              }
+            };
+
+            xhr.onerror = () => reject(new Error('Network error during upload.'));
+            xhr.send(JSON.stringify(payload));
+          })
+      ).catch((err) => {
         const errMsg = err instanceof Error ? err.message : 'Upload failed';
         setUploadTask({
           id: taskId,
@@ -2769,6 +2992,8 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
       value={{
         stage,
         setStage,
+        authReady,
+        firebaseUser,
         sessionToken,
         isAuthenticated,
         authModalOpen,
@@ -2783,6 +3008,7 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
         setPendingPhotoSetup,
         savedLogins,
         removeSavedLogin,
+        signInWithGoogle,
         currentUser,
         userPrivate,
         language,
@@ -2815,6 +3041,10 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
         openReportModal,
         creators,
         posts: visiblePosts,
+        isFeedLoading,
+        isReelsLoading,
+        refreshFeed,
+        refreshReels,
         visiblePostLimit,
         loadMorePosts: () => setVisiblePostLimit((v) => v + 6),
         commentsByPost,

@@ -59,6 +59,13 @@ export interface TranslationBundle {
     guestBannerTitle: string;
     guestBannerDesc: string;
     splashLoading: string;
+    continueWithGoogle: string;
+    orDivider: string;
+    protectedRouteTitle: string;
+    protectedRouteDesc: string;
+    backToPublicFeed: string;
+    verifyingSession: string;
+    signingInGoogle: string;
   };
   feed: {
     stories: string;
@@ -79,6 +86,8 @@ export interface TranslationBundle {
     noPosts: string;
     emptyHomeDesc: string;
     swipeCreateHint: string;
+    refreshFeed: string;
+    loadingFeed: string;
   };
   create: {
     newPost: string;
@@ -360,6 +369,13 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationBundle> = {
       guestBannerTitle: 'Sign in to view your profile',
       guestBannerDesc: 'Your profile, messages, and saved items appear after you sign in.',
       splashLoading: 'Loading SocialVerse...',
+      continueWithGoogle: 'Continue with Google',
+      orDivider: 'or with email & password',
+      protectedRouteTitle: 'Sign in required',
+      protectedRouteDesc: 'Authenticate with Google or your SocialVerse account to open your inbox, profile, post creator, or settings.',
+      backToPublicFeed: 'Back to Home Feed',
+      verifyingSession: 'Verifying Firebase session...',
+      signingInGoogle: 'Connecting Google account...',
     },
     feed: {
       stories: 'Stories',
@@ -380,6 +396,8 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationBundle> = {
       noPosts: 'No posts yet. Share your first post, story, or reel.',
       emptyHomeDesc: 'New accounts and posts from you and people you connect with will appear right here.',
       swipeCreateHint: 'Swipe left or tap + to create a Post, Story, or Reel',
+      refreshFeed: 'Refresh',
+      loadingFeed: 'Loading feed...',
     },
     create: {
       newPost: 'New Post',
@@ -659,6 +677,13 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationBundle> = {
       guestBannerTitle: 'প্রোফাইল দেখতে সাইন ইন করুন',
       guestBannerDesc: 'প্রোফাইল, মেসেজ এবং সেভ করা পোস্ট দেখতে আপনার অ্যাকাউন্টে লগইন বা সাইন আপ করুন।',
       splashLoading: 'সোশ্যালভার্স লোড হচ্ছে...',
+      continueWithGoogle: 'গুগল দিয়ে চালিয়ে যান',
+      orDivider: 'অথবা ইমেইল ও পাসওয়ার্ড দিয়ে',
+      protectedRouteTitle: 'সাইন ইন প্রয়োজন',
+      protectedRouteDesc: 'ইনবক্স, প্রোফাইল, নতুন পোস্ট তৈরি ও সেটিংসের সুরক্ষিত রুট ব্যবহার করতে গুগল বা আপনার সোশ্যালভার্স অ্যাকাউন্টে সাইন ইন করুন।',
+      backToPublicFeed: 'হোম ফিডে ফিরে যান',
+      verifyingSession: 'ফায়ারবেস সেশন যাচাই হচ্ছে...',
+      signingInGoogle: 'গুগল অ্যাকাউন্ট সংযুক্ত হচ্ছে...',
     },
     feed: {
       stories: 'স্টোরিজ',
@@ -679,6 +704,8 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationBundle> = {
       noPosts: 'এখনো কোনো পোস্ট নেই। আপনার প্রথম পোস্ট, স্টোরি বা রিল শেয়ার করুন।',
       emptyHomeDesc: 'নতুন অ্যাকাউন্ট তৈরি হলে এবং পোস্ট করলে সেগুলো এখানে দেখাবে।',
       swipeCreateHint: 'বামে স্লাইড করুন বা + চাপুন পোস্ট, স্টোরি বা রিল আপলোড করতে',
+      refreshFeed: 'রিফ্রেশ',
+      loadingFeed: 'ফিড লোড হচ্ছে...',
     },
     create: {
       newPost: 'নতুন পোস্ট',

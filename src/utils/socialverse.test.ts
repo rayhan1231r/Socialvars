@@ -13,6 +13,7 @@ import {
   canSendInGroupChat,
   canViewPrivateProfileContent,
   canonicalizeEmail,
+  evaluateRouteAccess,
   extractHashtags,
   formatCalendarDate,
   formatCompactCount,
@@ -21,6 +22,7 @@ import {
   isDisposableEmail,
   isHomeStoryVisibleToUser,
   isNoteVisibleToUser,
+  isProtectedAppRoute,
   isStoryActive,
   isValidBio,
   isValidDateOfBirth,
@@ -34,11 +36,13 @@ import {
   mapFirebaseAuthError,
   normalizeUsername,
   normalizeWebsiteUrl,
+  parseAppRouteFromLocation,
   requiresFollowApproval,
   shouldNotifyUser,
   validateSignupEmail,
 } from './validation';
 import { TRANSLATIONS } from './i18n';
+import { handleStandaloneApi, resetStandaloneStoreForTesting } from './standaloneBackend';
 
 test('username normalization and strict validation rules', () => {
   assert.equal(normalizeUsername('  Rafi_Ahmed! '), 'rafi_ahmed');
@@ -234,6 +238,7 @@ test('compact number formatting and bilingual translation key parity', () => {
   assert.equal(formatCompactCount(2_000_000), '2M');
   assert.deepEqual(Object.keys(TRANSLATIONS.en), Object.keys(TRANSLATIONS.bn));
   assert.deepEqual(Object.keys(TRANSLATIONS.en.auth), Object.keys(TRANSLATIONS.bn.auth));
+  assert.deepEqual(Object.keys(TRANSLATIONS.en.feed), Object.keys(TRANSLATIONS.bn.feed));
   assert.deepEqual(Object.keys(TRANSLATIONS.en.nav), Object.keys(TRANSLATIONS.bn.nav));
   assert.deepEqual(Object.keys(TRANSLATIONS.en.messages), Object.keys(TRANSLATIONS.bn.messages));
   assert.deepEqual(Object.keys(TRANSLATIONS.en.profile), Object.keys(TRANSLATIONS.bn.profile));
@@ -342,4 +347,150 @@ test('notification gating honors pausedAll, per-type prefs, and muted chats', ()
   assert.equal(shouldNotifyUser({ uploadProgress: false }, 'upload', false), false);
   assert.equal(shouldNotifyUser({ uploadProgress: true, groupMessages: true }, 'upload', false), true);
 });
+
+test('protected route guard enforces Firebase Auth readiness and route protection rules', () => {
+  assert.equal(isProtectedAppRoute({ activeTab: 'home', subscreen: null }), false);
+  assert.equal(isProtectedAppRoute({ activeTab: 'reels', subscreen: null }), false);
+  assert.equal(isProtectedAppRoute({ activeTab: 'explore', subscreen: null }), false);
+  assert.equal(isProtectedAppRoute({ activeTab: 'messages', subscreen: null }), true);
+  assert.equal(isProtectedAppRoute({ activeTab: 'profile', subscreen: null, currentUid: '' }), true);
+  assert.equal(
+    isProtectedAppRoute({
+      activeTab: 'profile',
+      subscreen: null,
+      viewedProfileUid: 'u_creator',
+      currentUid: '',
+    }),
+    false
+  );
+  assert.equal(isProtectedAppRoute({ activeTab: 'home', subscreen: 'settings_home' }), true);
+  assert.equal(isProtectedAppRoute({ activeTab: 'home', subscreen: 'notifications' }), true);
+  assert.equal(isProtectedAppRoute({ activeTab: 'home', subscreen: 'create_sheet' }), true);
+
+  assert.deepEqual(
+    evaluateRouteAccess({
+      activeTab: 'home',
+      isAuthenticated: false,
+      authReady: false,
+    }),
+    { protectedRoute: false, decision: 'loading' }
+  );
+  assert.deepEqual(
+    evaluateRouteAccess({
+      activeTab: 'messages',
+      isAuthenticated: false,
+      authReady: true,
+    }),
+    { protectedRoute: true, decision: 'require_auth' }
+  );
+  assert.deepEqual(
+    evaluateRouteAccess({
+      activeTab: 'messages',
+      isAuthenticated: true,
+      authReady: true,
+    }),
+    { protectedRoute: true, decision: 'allow' }
+  );
+  assert.deepEqual(
+    evaluateRouteAccess({
+      activeTab: 'home',
+      isAuthenticated: false,
+      authReady: true,
+    }),
+    { protectedRoute: false, decision: 'allow' }
+  );
+});
+
+test('URL route parser maps paths, hashes, and query tabs accurately', () => {
+  assert.deepEqual(parseAppRouteFromLocation('/messages'), { tab: 'messages', subscreen: null });
+  assert.deepEqual(parseAppRouteFromLocation('/', '#/reels'), { tab: 'reels', subscreen: null });
+  assert.deepEqual(parseAppRouteFromLocation('/', '', '?tab=explore'), {
+    tab: 'explore',
+    subscreen: null,
+  });
+  assert.deepEqual(parseAppRouteFromLocation('/settings'), {
+    tab: 'home',
+    subscreen: 'settings_home',
+  });
+  assert.deepEqual(parseAppRouteFromLocation('/notifications'), {
+    tab: 'home',
+    subscreen: 'notifications',
+  });
+  assert.deepEqual(parseAppRouteFromLocation('/create'), {
+    tab: 'home',
+    subscreen: 'create_sheet',
+  });
+  assert.deepEqual(parseAppRouteFromLocation('/'), { tab: 'home', subscreen: null });
+});
+
+test('standalone Android backend handles OTP signup, login, posts, likes, and bilingual AI assist', async () => {
+  resetStandaloneStoreForTesting();
+  const initialState = await handleStandaloneApi('/api/state', {}, null);
+  assert.equal(initialState.ok, true);
+  assert.equal(initialState.data.currentUser, null);
+
+  const otpRes = await handleStandaloneApi('/api/auth/send-otp', {
+    method: 'POST',
+    body: JSON.stringify({ email: 'aria.test@gmail.com', purpose: 'signup', language: 'en' }),
+  });
+  assert.equal(otpRes.ok, true);
+  const code = String(otpRes.data.devOtpCode);
+  assert.equal(code.length, 6);
+
+  const verRes = await handleStandaloneApi('/api/auth/verify-otp', {
+    method: 'POST',
+    body: JSON.stringify({ email: 'aria.test@gmail.com', code, purpose: 'signup' }),
+  });
+  assert.equal(verRes.ok, true);
+
+  const regRes = await handleStandaloneApi('/api/auth/register', {
+    method: 'POST',
+    body: JSON.stringify({
+      verificationToken: verRes.data.verificationToken,
+      email: 'aria.test@gmail.com',
+      password: 'password123',
+      displayName: 'Aria Rahman',
+      nicknameFont: 'classic',
+      username: 'aria_rahman',
+      dateOfBirth: '2000-05-10',
+      language: 'en',
+    }),
+  });
+  assert.equal(regRes.ok, true);
+  const token = String(regRes.data.token);
+
+  const postRes = await handleStandaloneApi(
+    '/api/posts',
+    {
+      method: 'POST',
+      body: JSON.stringify({
+        caption: 'Hello #SocialVerse from Android!',
+        mediaUrls: [],
+        mediaType: 'text',
+        visibility: 'public',
+      }),
+    },
+    token
+  );
+  assert.equal(postRes.ok, true);
+  const postId = String((postRes.data.post as { id: string }).id);
+
+  const likeRes = await handleStandaloneApi(`/api/posts/${postId}/like`, { method: 'POST' }, token);
+  assert.equal(likeRes.ok, true);
+  assert.equal(likeRes.data.likesCount, 1);
+
+  const aiBnRes = await handleStandaloneApi(
+    '/api/ai/profile-assist',
+    {
+      method: 'POST',
+      body: JSON.stringify({ task: 'bio', contextText: 'photography', language: 'bn' }),
+    },
+    token
+  );
+  assert.equal(aiBnRes.ok, true);
+  assert.equal(Array.isArray(aiBnRes.data.suggestions), true);
+  assert.equal((aiBnRes.data.suggestions as string[]).length, 3);
+  resetStandaloneStoreForTesting();
+});
+
 

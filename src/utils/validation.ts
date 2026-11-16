@@ -1309,6 +1309,21 @@ export function mapFirebaseAuthError(error: unknown, lang: 'en' | 'bn' = 'en'): 
       ? 'অনেকবার চেষ্টা করা হয়েছে। কিছুক্ষণ পর আবার চেষ্টা করুন।'
       : 'Too many attempts. Please wait a moment and try again.';
   }
+  if (full.includes('auth/popup-closed-by-user') || full.includes('auth/cancelled-popup-request')) {
+    return lang === 'bn'
+      ? 'গুগল সাইন-ইন পপআপ বন্ধ করা হয়েছে। আবার চেষ্টা করুন।'
+      : 'Google sign-in popup was closed before completing. Try again.';
+  }
+  if (full.includes('auth/popup-blocked')) {
+    return lang === 'bn'
+      ? 'ব্রাউজার পপআপ ব্লক করেছে। পপআপ অনুমতি দিয়ে আবার চেষ্টা করুন।'
+      : 'Browser blocked the sign-in popup. Allow popups or use email sign-in below.';
+  }
+  if (full.includes('auth/unauthorized-domain')) {
+    return lang === 'bn'
+      ? 'এই ডোমেইনটি Firebase Auth-এ অনুমোদিত নয়। ইমেইল সাইন-ইন ব্যবহার করুন।'
+      : 'This preview domain is not authorized for OAuth popups in Firebase Console. Use email sign-in below.';
+  }
   if (full.includes('auth/network-request-failed')) {
     return lang === 'bn'
       ? 'নেটওয়ার্ক সংযোগে সমস্যা হয়েছে। ইন্টারনেট যাচাই করুন।'
@@ -1316,3 +1331,99 @@ export function mapFirebaseAuthError(error: unknown, lang: 'en' | 'bn' = 'en'): 
   }
   return msg || (lang === 'bn' ? 'সাইন ইন সম্পন্ন করা যায়নি।' : 'Authentication failed. Please try again.');
 }
+
+const PROTECTED_SUBSCREENS = new Set<string>([
+  'notifications',
+  'saved',
+  'ai_assistant',
+  'edit_profile',
+  'followers',
+  'following',
+  'friend_requests',
+  'create_sheet',
+  'broadcast_channel',
+  'report',
+  'story_creator',
+  'highlight_creator',
+  'android_project',
+  'settings_home',
+  'settings_notifications',
+  'settings_privacy',
+  'settings_security',
+  'settings_account',
+  'settings_blocked',
+  'settings_language',
+  'settings_about',
+]);
+
+export function isProtectedAppRoute(params: {
+  activeTab: string;
+  subscreen?: string | null;
+  viewedProfileUid?: string | null;
+  currentUid?: string | null;
+}): boolean {
+  const { activeTab, subscreen, viewedProfileUid, currentUid } = params;
+  if (subscreen && PROTECTED_SUBSCREENS.has(subscreen)) {
+    return true;
+  }
+  if (activeTab === 'messages') {
+    return true;
+  }
+  if (activeTab === 'profile') {
+    const viewingPublicOther = Boolean(viewedProfileUid && viewedProfileUid !== (currentUid || ''));
+    return !viewingPublicOther;
+  }
+  return false;
+}
+
+export function evaluateRouteAccess(params: {
+  activeTab: string;
+  subscreen?: string | null;
+  viewedProfileUid?: string | null;
+  currentUid?: string | null;
+  isAuthenticated: boolean;
+  authReady: boolean;
+}): {
+  protectedRoute: boolean;
+  decision: 'loading' | 'allow' | 'require_auth';
+} {
+  const protectedRoute = isProtectedAppRoute(params);
+  if (!params.authReady) {
+    return { protectedRoute, decision: 'loading' };
+  }
+  if (protectedRoute && !params.isAuthenticated) {
+    return { protectedRoute, decision: 'require_auth' };
+  }
+  return { protectedRoute, decision: 'allow' };
+}
+
+export function parseAppRouteFromLocation(
+  pathname: string,
+  hash: string = '',
+  search: string = ''
+): {
+  tab: 'home' | 'reels' | 'messages' | 'explore' | 'profile';
+  subscreen:
+    | null
+    | 'notifications'
+    | 'settings_home'
+    | 'create_sheet';
+} {
+  const params = new URLSearchParams(search || '');
+  const tabParam = (params.get('tab') || '').toLowerCase();
+  const cleanHash = (hash || '').replace(/^#\/?/, '').toLowerCase().split('?')[0];
+  const cleanPath = (pathname || '').replace(/^\/+|\/+$/g, '').toLowerCase();
+  const routeSegment = tabParam || cleanHash || cleanPath;
+
+  if (routeSegment === 'reels') return { tab: 'reels', subscreen: null };
+  if (routeSegment === 'explore') return { tab: 'explore', subscreen: null };
+  if (routeSegment === 'messages' || routeSegment === 'inbox') {
+    return { tab: 'messages', subscreen: null };
+  }
+  if (routeSegment === 'profile') return { tab: 'profile', subscreen: null };
+  if (routeSegment === 'notifications') return { tab: 'home', subscreen: 'notifications' };
+  if (routeSegment === 'settings') return { tab: 'home', subscreen: 'settings_home' };
+  if (routeSegment === 'create') return { tab: 'home', subscreen: 'create_sheet' };
+  return { tab: 'home', subscreen: null };
+}
+

@@ -825,6 +825,34 @@ interface AuthenticatedRequest extends Request {
   uid?: string;
 }
 
+async function verifyFirebaseTokenViaIdentityToolkit(idToken: string): Promise<{
+  uid: string;
+  email: string;
+  displayName: string;
+  photoUrl: string;
+} | null> {
+  try {
+    const res = await firebaseAuthPost<{
+      users?: Array<{
+        localId?: string;
+        email?: string;
+        displayName?: string;
+        photoUrl?: string;
+      }>;
+    }>('accounts:lookup', { idToken });
+    const first = res.users?.[0];
+    if (!first?.localId) return null;
+    return {
+      uid: first.localId,
+      email: (first.email || '').trim().toLowerCase(),
+      displayName: (first.displayName || '').trim(),
+      photoUrl: (first.photoUrl || '').trim(),
+    };
+  } catch {
+    return null;
+  }
+}
+
 async function resolveUidFromHeader(req: Request): Promise<string | null> {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) return null;
@@ -838,7 +866,8 @@ async function resolveUidFromHeader(req: Request): Promise<string | null> {
     const decoded = await getAuth().verifyIdToken(token);
     return decoded.uid;
   } catch {
-    return null;
+    const lookedUp = await verifyFirebaseTokenViaIdentityToolkit(token);
+    return lookedUp?.uid || null;
   }
 }
 
@@ -1922,6 +1951,222 @@ async function startServer() {
       user: pub,
       userPrivate: store.usersPrivate[uid],
     });
+  });
+
+  // Exchange Firebase Auth ID Token (Google Sign-In or Firebase Auth user) for SocialVerse session
+  app.post('/api/auth/firebase', async (req, res) => {
+    try {
+      const { idToken, language = 'en' } = req.body as {
+        idToken?: string;
+        language?: 'en' | 'bn';
+      };
+      const cleanToken = (idToken || '').trim();
+      if (!cleanToken) {
+        res.status(400).json({ error: 'Firebase ID token is required.' });
+        return;
+      }
+
+      let verified: {
+        uid: string;
+        email: string;
+        displayName: string;
+        photoUrl: string;
+      } | null = null;
+
+      try {
+        const decoded = await getAuth().verifyIdToken(cleanToken);
+        verified = {
+          uid: decoded.uid,
+          email: String(decoded.email || '').trim().toLowerCase(),
+          displayName: String(decoded.name || '').trim(),
+          photoUrl: String(decoded.picture || '').trim(),
+        };
+      } catch {
+        verified = await verifyFirebaseTokenViaIdentityToolkit(cleanToken);
+      }
+
+      if (!verified?.uid) {
+        res.status(401).json({ error: 'Invalid or expired Firebase authentication token.' });
+        return;
+      }
+
+      const cleanEmail = verified.email || `${verified.uid}@firebase.local`;
+      const canonicalEmail = canonicalizeEmail(cleanEmail);
+      const nowIso = new Date().toISOString();
+
+      let acct = store.accounts.find(
+        (a) =>
+          !a.deleted &&
+          (a.uid === verified!.uid ||
+            a.email === cleanEmail ||
+            (a.canonicalEmail || canonicalizeEmail(a.email)) === canonicalEmail)
+      );
+
+      const activeUid = acct?.uid || verified.uid;
+
+      if (!acct) {
+        const [remotePub, remotePriv] = await Promise.all([
+          firestoreGetDoc(`users/${activeUid}`, cleanToken),
+          firestoreGetDoc(`users/${activeUid}/private/info`, cleanToken),
+        ]);
+
+        const rawBase =
+          (remotePub && typeof remotePub.username === 'string' && remotePub.username) ||
+          normalizeUsername(cleanEmail.split('@')[0] || verified.displayName || 'creator');
+        const baseUsername =
+          rawBase.length >= 3 ? rawBase.slice(0, 18) : `sv_${rawBase || 'user'}`;
+
+        let candidateUsername = baseUsername;
+        let suffix = 1;
+        while (
+          !isValidUsername(candidateUsername) ||
+          store.accounts.some((a) => !a.deleted && a.username === candidateUsername)
+        ) {
+          candidateUsername = `${baseUsername.slice(0, 18)}_${suffix}`;
+          suffix += 1;
+        }
+
+        const safeDisplayName = (
+          (remotePub && typeof remotePub.displayName === 'string' && remotePub.displayName) ||
+          verified.displayName ||
+          candidateUsername
+        )
+          .trim()
+          .slice(0, 50);
+
+        const safePhotoUrl =
+          (remotePub && typeof remotePub.photoUrl === 'string' && remotePub.photoUrl) ||
+          (verified.photoUrl.length <= 200000 ? verified.photoUrl : '');
+
+        const placeholderHash = await bcrypt.hash(crypto.randomBytes(24).toString('hex'), 10);
+        acct = {
+          uid: activeUid,
+          email: cleanEmail,
+          canonicalEmail,
+          username: candidateUsername,
+          passwordHash: placeholderHash,
+          createdAt:
+            (remotePub && typeof remotePub.createdAt === 'string' && remotePub.createdAt) || nowIso,
+        };
+        store.accounts = store.accounts.filter((a) => a.uid !== activeUid);
+        store.accounts.push(acct);
+
+        if (!store.usersPublic[activeUid]) {
+          store.usersPublic[activeUid] = {
+            uid: activeUid,
+            username: candidateUsername,
+            displayName: safeDisplayName || candidateUsername,
+            nicknameFont:
+              ((remotePub && remotePub.nicknameFont) as NicknameFontStyle) || 'classic',
+            bio: (remotePub && typeof remotePub.bio === 'string' && remotePub.bio) || '',
+            pronouns:
+              (remotePub && typeof remotePub.pronouns === 'string' && remotePub.pronouns) || '',
+            website:
+              (remotePub && typeof remotePub.website === 'string' && remotePub.website) || '',
+            noteText:
+              (remotePub && typeof remotePub.noteText === 'string' && remotePub.noteText) || '',
+            dateOfBirth:
+              remotePub && typeof remotePub.dateOfBirth === 'string'
+                ? remotePub.dateOfBirth
+                : undefined,
+            photoUrl: safePhotoUrl,
+            coverUrl:
+              (remotePub && typeof remotePub.coverUrl === 'string' && remotePub.coverUrl) || '',
+            interests:
+              remotePub && Array.isArray(remotePub.interests)
+                ? (remotePub.interests as string[])
+                : [],
+            isPrivate: Boolean(remotePub?.isPrivate),
+            isDeactivated: false,
+            deactivatedUntil: null,
+            followersCount: Number(remotePub?.followersCount || 0),
+            followingCount: Number(remotePub?.followingCount || 0),
+            postsCount: Number(remotePub?.postsCount || 0),
+            onlineStatus: 'online',
+            lastSeenAt: nowIso,
+            lastNicknameChangedAt: null,
+            lastUsernameChangedAt: null,
+            onboardingCompleted: true,
+            createdAt: acct.createdAt,
+            updatedAt: nowIso,
+          };
+        }
+
+        if (!store.usersPrivate[activeUid]) {
+          store.usersPrivate[activeUid] = {
+            uid: activeUid,
+            email: cleanEmail,
+            language:
+              remotePriv?.language === 'bn'
+                ? 'bn'
+                : remotePriv?.language === 'en'
+                ? 'en'
+                : language === 'bn'
+                ? 'bn'
+                : 'en',
+            themeMode: remotePriv?.themeMode === 'dark' ? 'dark' : 'light',
+            biometricLockEnabled: Boolean(remotePriv?.biometricLockEnabled),
+            twoFactorEnabled: Boolean(remotePriv?.twoFactorEnabled),
+            saveLoginInfo: remotePriv?.saveLoginInfo !== false,
+            whoCanMessage:
+              (remotePriv?.whoCanMessage as UserPrivate['whoCanMessage']) || 'everyone',
+            whoCanViewStories:
+              (remotePriv?.whoCanViewStories as UserPrivate['whoCanViewStories']) || 'everyone',
+            whoCanFollow:
+              (remotePriv?.whoCanFollow as UserPrivate['whoCanFollow']) || 'everyone',
+            notificationPrefs: {
+              ...DEFAULT_NOTIFICATION_PREFS,
+              ...((remotePriv?.notificationPrefs as Partial<UserPrivate['notificationPrefs']>) ||
+                {}),
+            },
+            blockedUserIds: Array.isArray(remotePriv?.blockedUserIds)
+              ? (remotePriv.blockedUserIds as string[])
+              : [],
+            mutedStoryUserIds: Array.isArray(remotePriv?.mutedStoryUserIds)
+              ? (remotePriv.mutedStoryUserIds as string[])
+              : [],
+            closeFriendUids: Array.isArray(remotePriv?.closeFriendUids)
+              ? (remotePriv.closeFriendUids as string[])
+              : [],
+            updatedAt: nowIso,
+          };
+        }
+
+        createUserDocsInFirestore({
+          uid: activeUid,
+          userPublic: store.usersPublic[activeUid],
+          userPrivate: store.usersPrivate[activeUid],
+          canonicalEmail,
+          idToken: cleanToken,
+        }).catch((err) => {
+          console.warn('Firestore sync notice for Firebase Auth user:', err);
+        });
+      }
+
+      const pub = store.usersPublic[activeUid];
+      const priv = store.usersPrivate[activeUid];
+      if (!pub || !priv) {
+        res.status(500).json({ error: 'Could not initialize user profile.' });
+        return;
+      }
+
+      pub.isDeactivated = false;
+      pub.deactivatedUntil = null;
+      pub.onlineStatus = 'online';
+      pub.lastSeenAt = nowIso;
+
+      persistStoreImmediate();
+      broadcastGlobalSync();
+
+      res.json({
+        token: signSessionToken(activeUid),
+        user: pub,
+        userPrivate: priv,
+      });
+    } catch (err) {
+      console.error('Firebase token exchange error:', err);
+      res.status(500).json({ error: 'Could not complete Firebase sign-in.' });
+    }
   });
 
   app.post('/api/auth/change-password', requireAuth, async (req: AuthenticatedRequest, res) => {

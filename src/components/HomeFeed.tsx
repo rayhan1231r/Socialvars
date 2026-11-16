@@ -1,7 +1,8 @@
 import { useRef, useState } from 'react';
-import { Clapperboard, PlusSquare, Sparkles } from 'lucide-react';
+import { Clapperboard, PlusSquare, RefreshCw, Sparkles } from 'lucide-react';
 import { useSocialVerse } from '../context/SocialVerseContext';
 import { canViewPrivateProfileContent } from '../utils/validation';
+import { FeedSkeleton } from './LiquidGlassSkeletons';
 import { PostCard } from './PostCard';
 import { StoriesBar } from './StoriesBar';
 
@@ -9,6 +10,8 @@ export function HomeFeed() {
   const {
     posts,
     creators,
+    isFeedLoading,
+    refreshFeed,
     visiblePostLimit,
     loadMorePosts,
     followingIds,
@@ -20,6 +23,10 @@ export function HomeFeed() {
   } = useSocialVerse();
   const [feedMode, setFeedMode] = useState<'recommended' | 'following'>('recommended');
   const swipeStartX = useRef<number | null>(null);
+
+  if (isFeedLoading) {
+    return <FeedSkeleton label={t.feed.loadingFeed} />;
+  }
 
   const viewerUid = isAuthenticated ? currentUser.uid : null;
   const accessiblePosts = posts.filter((p) => {
@@ -60,12 +67,12 @@ export function HomeFeed() {
     >
       <StoriesBar />
 
-      <div className="flex items-center justify-between gap-2">
+      <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="inline-flex items-center gap-1 p-1 rounded-xl liquid-glass-subtle">
           <button
             type="button"
             onClick={() => setFeedMode('recommended')}
-            className={`min-h-[40px] px-4 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap ${
+            className={`min-h-[40px] px-3 sm:px-4 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap ${
               feedMode === 'recommended'
                 ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-white shadow-sm'
                 : 'text-slate-600 dark:text-slate-400'
@@ -76,7 +83,7 @@ export function HomeFeed() {
           <button
             type="button"
             onClick={() => setFeedMode('following')}
-            className={`min-h-[40px] px-4 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap ${
+            className={`min-h-[40px] px-3 sm:px-4 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap ${
               feedMode === 'following'
                 ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-white shadow-sm'
                 : 'text-slate-600 dark:text-slate-400'
@@ -86,11 +93,21 @@ export function HomeFeed() {
           </button>
         </div>
 
-        <div className="flex items-center gap-1.5">
+        <div className="flex items-center gap-1.5 shrink-0">
+          <button
+            type="button"
+            aria-label={t.feed.refreshFeed}
+            onClick={() => {
+              void refreshFeed();
+            }}
+            className="min-h-[40px] min-w-[40px] rounded-xl liquid-glass-subtle text-slate-700 dark:text-slate-200 inline-flex items-center justify-center hover:bg-white/80 dark:hover:bg-slate-800/80 transition-colors"
+          >
+            <RefreshCw className="w-4 h-4" />
+          </button>
           <button
             type="button"
             onClick={() => setSubscreen('create_sheet')}
-            className="min-h-[40px] px-3.5 rounded-xl bg-sky-600 text-white text-xs font-semibold inline-flex items-center gap-1.5 hover:bg-sky-700 transition-colors whitespace-nowrap"
+            className="min-h-[40px] px-2.5 sm:px-3.5 rounded-xl bg-sky-600 text-white text-xs font-semibold inline-flex items-center gap-1.5 hover:bg-sky-700 transition-colors whitespace-nowrap"
           >
             <PlusSquare className="w-4 h-4" />
             <span>{t.nav.create}</span>
@@ -98,7 +115,7 @@ export function HomeFeed() {
           <button
             type="button"
             onClick={() => setActiveTab('reels')}
-            className="min-h-[40px] px-3.5 rounded-xl liquid-glass-subtle text-xs font-semibold text-slate-800 dark:text-slate-200 inline-flex items-center gap-1.5 hover:bg-white/80 dark:hover:bg-slate-800/80 transition-colors whitespace-nowrap"
+            className="min-h-[40px] px-2.5 sm:px-3.5 rounded-xl liquid-glass-subtle text-xs font-semibold text-slate-800 dark:text-slate-200 inline-flex items-center gap-1.5 hover:bg-white/80 dark:hover:bg-slate-800/80 transition-colors whitespace-nowrap"
           >
             <Clapperboard className="w-4 h-4 text-sky-600" />
             <span>{t.explore.reels}</span>

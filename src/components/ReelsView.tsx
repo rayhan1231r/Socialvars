@@ -10,6 +10,7 @@ import {
   Pause,
   Play,
   PlusSquare,
+  RefreshCw,
   Send,
   Share2,
   Volume2,
@@ -20,6 +21,7 @@ import { useSocialVerse } from '../context/SocialVerseContext';
 import { canViewPrivateProfileContent, formatCompactCount } from '../utils/validation';
 import { Avatar } from './Avatar';
 import { CommentsDrawer } from './CommentsDrawer';
+import { ReelsSkeleton } from './LiquidGlassSkeletons';
 
 interface FloatingHeart {
   id: number;
@@ -31,6 +33,8 @@ export function ReelsView({ embedded = false }: { embedded?: boolean }) {
   const {
     posts,
     creators,
+    isReelsLoading,
+    refreshReels,
     currentUser,
     isAuthenticated,
     followingIds,
@@ -252,8 +256,12 @@ export function ReelsView({ embedded = false }: { embedded?: boolean }) {
     showToast(language === 'bn' ? 'রিল ডাউনলোড হচ্ছে...' : 'Downloading reel...');
   };
 
+  if (isReelsLoading) {
+    return <ReelsSkeleton embedded={embedded} label={t.feed.loadingFeed} />;
+  }
+
   const emptyContent = (
-    <div className="liquid-glass rounded-3xl p-10 text-center space-y-4">
+    <div className="liquid-glass rounded-3xl p-8 sm:p-10 text-center space-y-4">
       <div className="w-14 h-14 mx-auto rounded-2xl bg-sky-600/10 text-sky-600 flex items-center justify-center">
         <Clapperboard className="w-7 h-7" />
       </div>
@@ -261,14 +269,26 @@ export function ReelsView({ embedded = false }: { embedded?: boolean }) {
         <h2 className="text-lg font-bold text-slate-900 dark:text-white">{t.explore.reels}</h2>
         <p className="text-xs text-slate-500 dark:text-slate-400">{t.feed.noPosts}</p>
       </div>
-      <button
-        type="button"
-        onClick={() => setSubscreen('create_sheet')}
-        className="min-h-[42px] px-5 rounded-xl bg-sky-600 text-white text-xs font-semibold inline-flex items-center gap-2"
-      >
-        <PlusSquare className="w-4 h-4" />
-        <span>{t.create.newReel}</span>
-      </button>
+      <div className="flex items-center justify-center gap-2">
+        <button
+          type="button"
+          onClick={() => {
+            void refreshReels();
+          }}
+          className="min-h-[42px] px-4 rounded-xl liquid-glass-btn text-xs font-semibold text-slate-700 dark:text-slate-200 inline-flex items-center gap-1.5"
+        >
+          <RefreshCw className="w-4 h-4" />
+          <span>{t.feed.refreshFeed}</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => setSubscreen('create_sheet')}
+          className="min-h-[42px] px-5 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-xs font-semibold inline-flex items-center gap-2"
+        >
+          <PlusSquare className="w-4 h-4" />
+          <span>{t.create.newReel}</span>
+        </button>
+      </div>
     </div>
   );
 
@@ -335,7 +355,7 @@ export function ReelsView({ embedded = false }: { embedded?: boolean }) {
             playsInline
             className="w-full h-full object-cover"
           />
-        ) : (
+        ) : mediaSrc ? (
           <img
             src={mediaSrc}
             alt={currentReel.caption}
@@ -345,6 +365,13 @@ export function ReelsView({ embedded = false }: { embedded?: boolean }) {
               playing ? 'scale-105' : 'scale-100'
             }`}
           />
+        ) : (
+          <div className="w-full h-full bg-gradient-to-br from-slate-900 via-sky-950 to-cyan-950 flex flex-col items-center justify-center p-8 text-center">
+            <Clapperboard className="w-12 h-12 text-sky-400/80 mb-3" />
+            <p className="text-sm font-medium text-white/90 max-w-xs line-clamp-5">
+              {currentReel.caption}
+            </p>
+          </div>
         )}
       </div>
 
@@ -372,6 +399,16 @@ export function ReelsView({ embedded = false }: { embedded?: boolean }) {
           </span>
         </div>
         <div className="flex items-center gap-1 pointer-events-auto">
+          <button
+            type="button"
+            aria-label={t.feed.refreshFeed}
+            onClick={() => {
+              void refreshReels();
+            }}
+            className="min-h-[38px] min-w-[38px] rounded-full bg-black/45 hover:bg-black/65 text-white flex items-center justify-center"
+          >
+            <RefreshCw className="w-4 h-4" />
+          </button>
           <button
             type="button"
             aria-label="Upload reel"

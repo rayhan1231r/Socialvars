@@ -43,6 +43,7 @@ export function StoriesBar() {
       creators.find((c) => c.uid === s.authorId),
       isAuthenticated ? currentUser.uid : null,
       followingIds,
+      Date.now(),
       isAuthenticated && s.authorId === currentUser.uid
         ? userPrivate.closeFriendUids
         : undefined
