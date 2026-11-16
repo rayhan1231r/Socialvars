@@ -1,16 +1,21 @@
 import { useState } from 'react';
+import { createPortal } from 'react-dom';
 import {
   Bookmark,
   ChevronLeft,
   ChevronRight,
   Clapperboard,
+  Copy,
   Flag,
   Heart,
   MessageCircle,
   MoreHorizontal,
   Pencil,
+  Send,
   Share2,
   Trash2,
+  Users,
+  X,
 } from 'lucide-react';
 import { useSocialVerse } from '../context/SocialVerseContext';
 import type { Post } from '../types/social';
@@ -19,14 +24,18 @@ import {
   formatCompactCount,
   formatRelativeTime,
   getMaskedUserDisplay,
+  isVideoMediaUrl,
 } from '../utils/validation';
 import { Avatar } from './Avatar';
 import { CommentsDrawer } from './CommentsDrawer';
+import { MentionInput } from './MentionInput';
+import { RichMentionText } from './RichMentionText';
 
 export function PostCard({ post }: { post: Post }) {
   const {
     currentUser,
     creators,
+    chats,
     isAuthenticated,
     t,
     language,
@@ -35,6 +44,7 @@ export function PostCard({ post }: { post: Post }) {
     toggleLikePost,
     toggleSavePost,
     sharePost,
+    sharePostToInbox,
     editPost,
     deletePost,
     openUserProfile,
@@ -43,6 +53,9 @@ export function PostCard({ post }: { post: Post }) {
 
   const [mediaIdx, setMediaIdx] = useState(0);
   const [showCommentsModal, setShowCommentsModal] = useState(false);
+  const [showShareModal, setShowShareModal] = useState(false);
+  const [shareQuery, setShareQuery] = useState('');
+  const [sharingTarget, setSharingTarget] = useState<string | null>(null);
   const [showMenu, setShowMenu] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
   const [editCaption, setEditCaption] = useState(post.caption);
@@ -74,11 +87,27 @@ export function PostCard({ post }: { post: Post }) {
   const isVideoMedia =
     post.mediaType === 'video' ||
     post.mediaType === 'reel' ||
-    Boolean(currentMedia?.startsWith('data:video/'));
+    isVideoMediaUrl(currentMedia);
+
+  const normalizedQuery = shareQuery.trim().toLowerCase();
+  const activeGroupChats = chats.filter(
+    (c) =>
+      c.type === 'group' &&
+      (!normalizedQuery || c.title.toLowerCase().includes(normalizedQuery))
+  );
+  const shareableCreators = creators.filter(
+    (c) =>
+      !c.isDeactivated &&
+      c.uid !== currentUser.uid &&
+      (!normalizedQuery ||
+        c.displayName.toLowerCase().includes(normalizedQuery) ||
+        c.username.toLowerCase().includes(normalizedQuery))
+  );
 
   return (
-    <article className="liquid-glass rounded-2xl p-4 sm:p-5 space-y-3.5">
-      <div className="flex items-center justify-between gap-3">
+    <article className="liquid-glass rounded-none border-x-0 border-y border-slate-200/80 dark:border-white/10 py-3.5 sm:py-4 space-y-3">
+      {/* Top Header: Author + Date */}
+      <div className="px-3.5 sm:px-4 flex items-center justify-between gap-3">
         <button
           type="button"
           onClick={() => openUserProfile(post.authorId)}
@@ -164,12 +193,14 @@ export function PostCard({ post }: { post: Post }) {
         </div>
       </div>
 
+      {/* Caption above media for text-only posts or when editing */}
       {isEditing ? (
-        <form onSubmit={handleSaveEdit} className="space-y-2">
-          <textarea
+        <form onSubmit={handleSaveEdit} className="px-3.5 sm:px-4 space-y-2">
+          <MentionInput
+            multiline
             rows={3}
             value={editCaption}
-            onChange={(e) => setEditCaption(e.target.value)}
+            onChange={setEditCaption}
             className="w-full p-3 rounded-xl bg-white/80 dark:bg-slate-900/70 border border-slate-200 dark:border-slate-700 text-sm text-slate-900 dark:text-white"
           />
           <div className="flex justify-end gap-2">
@@ -189,37 +220,41 @@ export function PostCard({ post }: { post: Post }) {
           </div>
         </form>
       ) : (
-        <p className="text-sm sm:text-[15px] leading-relaxed text-slate-800 dark:text-slate-200 whitespace-pre-line">
-          {post.caption}
-        </p>
+        !currentMedia &&
+        post.caption && (
+          <p className="px-3.5 sm:px-4 text-sm sm:text-[15px] leading-relaxed text-slate-800 dark:text-slate-200 whitespace-pre-line">
+            <RichMentionText text={post.caption} />
+          </p>
+        )
       )}
 
+      {/* Full-Width Edge-to-Edge Media (No Side Borders / No Side Cropping) */}
       {currentMedia && (
-        <div className={`relative rounded-2xl overflow-hidden bg-slate-200 dark:bg-slate-800 ${post.mediaType === 'reel' ? 'aspect-[9/12] max-h-[460px] mx-auto' : 'aspect-[4/3]'}`}>
+        <div className="relative w-full overflow-hidden bg-slate-950/90 dark:bg-black border-y border-slate-200/40 dark:border-white/5">
           {post.mediaType === 'reel' && (
             <span className="absolute top-3 left-3 z-10 inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-black/55 text-white text-[11px] font-semibold">
               <Clapperboard className="w-3.5 h-3.5" />
               <span>Reel</span>
             </span>
           )}
-          {isVideoMedia && post.mediaUrls[mediaIdx]?.startsWith('data:video/') ? (
+          {isVideoMedia && (isVideoMediaUrl(post.mediaUrls[mediaIdx]) || post.mediaType === 'video' || post.mediaType === 'reel') ? (
             <video
               src={post.mediaUrls[mediaIdx]}
               poster={post.coverUrl}
               controls
               playsInline
-              className="w-full h-full object-cover"
+              className="w-full max-h-[560px] object-contain mx-auto block"
             />
           ) : !brokenImages[mediaIdx] ? (
             <img
               src={currentMedia}
-              alt={post.caption.slice(0, 60)}
+              alt={post.caption.slice(0, 60) || masked.displayName}
               referrerPolicy="no-referrer"
               onError={() => setBrokenImages((b) => ({ ...b, [mediaIdx]: true }))}
-              className="w-full h-full object-cover"
+              className="w-full max-h-[560px] object-contain mx-auto block"
             />
           ) : (
-            <div className="w-full h-full flex items-center justify-center bg-gradient-to-br from-sky-600/20 to-slate-800/30 text-sm text-slate-600 dark:text-slate-300 p-6 text-center">
+            <div className="w-full min-h-[220px] flex items-center justify-center bg-gradient-to-br from-sky-600/20 to-slate-800/30 text-sm text-slate-600 dark:text-slate-300 p-6 text-center">
               {masked.displayName} · {post.mediaType}
             </div>
           )}
@@ -253,7 +288,7 @@ export function PostCard({ post }: { post: Post }) {
       )}
 
       {/* Action Bar */}
-      <div className="flex items-center justify-between pt-1 border-t border-slate-200/70 dark:border-slate-800/70">
+      <div className="px-3.5 sm:px-4 flex items-center justify-between pt-0.5">
         <div className="flex items-center gap-1">
           <button
             type="button"
@@ -265,7 +300,7 @@ export function PostCard({ post }: { post: Post }) {
                 : 'text-slate-600 dark:text-slate-300 hover:bg-slate-200/50 dark:hover:bg-slate-800/50'
             }`}
           >
-            <Heart className={`w-4 h-4 ${post.likedByMe ? 'fill-current' : ''}`} />
+            <Heart className={`w-4.5 h-4.5 ${post.likedByMe ? 'fill-current' : ''}`} />
             <span className="font-mono-num">{formatCompactCount(post.likesCount)}</span>
           </button>
 
@@ -275,17 +310,17 @@ export function PostCard({ post }: { post: Post }) {
             onClick={() => setShowCommentsModal(true)}
             className="min-h-[44px] px-3 rounded-xl inline-flex items-center gap-1.5 text-xs font-semibold text-slate-600 dark:text-slate-300 hover:bg-slate-200/50 dark:hover:bg-slate-800/50"
           >
-            <MessageCircle className="w-4 h-4" />
+            <MessageCircle className="w-4.5 h-4.5" />
             <span className="font-mono-num">{formatCompactCount(post.commentsCount)}</span>
           </button>
 
           <button
             type="button"
             aria-label={`${t.feed.share} (${post.sharesCount})`}
-            onClick={() => sharePost(post.id)}
+            onClick={() => setShowShareModal(true)}
             className="min-h-[44px] px-3 rounded-xl inline-flex items-center gap-1.5 text-xs font-semibold text-slate-600 dark:text-slate-300 hover:bg-slate-200/50 dark:hover:bg-slate-800/50"
           >
-            <Share2 className="w-4 h-4" />
+            <Share2 className="w-4.5 h-4.5" />
             <span className="font-mono-num">{formatCompactCount(post.sharesCount)}</span>
           </button>
         </div>
@@ -300,12 +335,145 @@ export function PostCard({ post }: { post: Post }) {
               : 'text-slate-600 dark:text-slate-300 hover:bg-slate-200/50 dark:hover:bg-slate-800/50'
           }`}
         >
-          <Bookmark className={`w-4 h-4 ${post.savedByMe ? 'fill-current' : ''}`} />
+          <Bookmark className={`w-4.5 h-4.5 ${post.savedByMe ? 'fill-current' : ''}`} />
         </button>
       </div>
 
+      {/* Bottom Caption + Quick Comment Trigger for media posts */}
+      {!isEditing && currentMedia && post.caption && (
+        <div className="px-3.5 sm:px-4 space-y-1">
+          <p className="text-sm leading-relaxed text-slate-800 dark:text-slate-200 whitespace-pre-line">
+            <button
+              type="button"
+              onClick={() => openUserProfile(post.authorId)}
+              className="font-semibold text-slate-900 dark:text-white mr-1.5 hover:underline"
+            >
+              @{masked.username}
+            </button>
+            <RichMentionText text={post.caption} />
+          </p>
+        </div>
+      )}
+
       {showCommentsModal && (
         <CommentsDrawer post={post} onClose={() => setShowCommentsModal(false)} />
+      )}
+
+      {/* Share Sheet Modal: Copy Link & Send to Inbox */}
+      {showShareModal &&
+        createPortal(
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label={t.messages.sendToInbox}
+            className="fixed inset-0 z-[80] bg-black/55 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4"
+            onClick={(e) => {
+              if (e.target === e.currentTarget) setShowShareModal(false);
+            }}
+          >
+            <div className="bg-white/95 dark:bg-slate-900/95 backdrop-blur-2xl border border-slate-200/80 dark:border-white/15 rounded-t-3xl sm:rounded-3xl w-full sm:max-w-md p-5 space-y-4 max-h-[82vh] flex flex-col shadow-2xl">
+            <div className="flex items-center justify-between gap-2">
+              <h3 className="text-sm font-bold text-slate-900 dark:text-white">
+                {t.messages.sendToInbox}
+              </h3>
+              <button
+                type="button"
+                aria-label="Close share sheet"
+                onClick={() => setShowShareModal(false)}
+                className="min-h-[38px] min-w-[38px] rounded-xl flex items-center justify-center text-slate-500 hover:bg-slate-200/50 dark:hover:bg-white/10"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <button
+              type="button"
+              onClick={async () => {
+                await sharePost(post.id);
+                setShowShareModal(false);
+              }}
+              className="w-full min-h-[44px] px-4 rounded-2xl liquid-glass-btn text-xs font-semibold text-slate-900 dark:text-white flex items-center justify-center gap-2"
+            >
+              <Copy className="w-4 h-4 text-sky-600" />
+              <span>{language === 'bn' ? 'লিঙ্ক কপি করুন' : 'Copy link'}</span>
+            </button>
+
+            <input
+              type="search"
+              value={shareQuery}
+              onChange={(e) => setShareQuery(e.target.value)}
+              placeholder={language === 'bn' ? 'ব্যবহারকারী বা গ্রুপ খুঁজুন...' : 'Search people or groups...'}
+              className="w-full min-h-[40px] px-3.5 rounded-xl bg-white/80 dark:bg-slate-900/75 border border-slate-200 dark:border-white/10 text-xs text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-sky-500"
+            />
+
+            <div className="flex-1 overflow-y-auto space-y-1.5 pr-0.5">
+              {activeGroupChats.map((grp) => (
+                <button
+                  key={grp.id}
+                  type="button"
+                  disabled={sharingTarget === grp.id}
+                  onClick={async () => {
+                    setSharingTarget(grp.id);
+                    await sharePostToInbox(post, { chatId: grp.id });
+                    setSharingTarget(null);
+                    setShowShareModal(false);
+                  }}
+                  className="w-full flex items-center justify-between gap-2.5 p-2.5 rounded-2xl hover:bg-slate-200/50 dark:hover:bg-white/10 transition text-left"
+                >
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <div className="w-9 h-9 rounded-full bg-gradient-to-br from-sky-500 to-indigo-600 text-white flex items-center justify-center shrink-0">
+                      <Users className="w-4 h-4" />
+                    </div>
+                    <div className="min-w-0">
+                      <p className="text-xs font-semibold text-slate-900 dark:text-white truncate">
+                        {grp.title}
+                      </p>
+                      <p className="text-[11px] text-slate-500 truncate">
+                        {t.messages.group} · {grp.participantIds.length}
+                      </p>
+                    </div>
+                  </div>
+                  <span className="min-h-[32px] px-3 rounded-xl bg-sky-600 text-white text-[11px] font-semibold inline-flex items-center gap-1 shrink-0">
+                    <Send className="w-3 h-3" />
+                    <span>{t.messages.send}</span>
+                  </span>
+                </button>
+              ))}
+
+              {shareableCreators.slice(0, 12).map((peer) => (
+                <button
+                  key={peer.uid}
+                  type="button"
+                  disabled={sharingTarget === peer.uid}
+                  onClick={async () => {
+                    setSharingTarget(peer.uid);
+                    await sharePostToInbox(post, { userUid: peer.uid });
+                    setSharingTarget(null);
+                    setShowShareModal(false);
+                  }}
+                  className="w-full flex items-center justify-between gap-2.5 p-2.5 rounded-2xl hover:bg-slate-200/50 dark:hover:bg-white/10 transition text-left"
+                >
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <Avatar src={peer.photoUrl} name={peer.displayName} size="sm" />
+                    <div className="min-w-0">
+                      <p className="text-xs font-semibold text-slate-900 dark:text-white truncate">
+                        {peer.displayName}
+                      </p>
+                      <p className="text-[11px] text-slate-500 truncate">
+                        @{peer.username}
+                      </p>
+                    </div>
+                  </div>
+                  <span className="min-h-[32px] px-3 rounded-xl bg-sky-600 text-white text-[11px] font-semibold inline-flex items-center gap-1 shrink-0">
+                    <Send className="w-3 h-3" />
+                    <span>{t.messages.send}</span>
+                  </span>
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>,
+        document.body
       )}
     </article>
   );

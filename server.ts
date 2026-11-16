@@ -17,6 +17,7 @@ import type {
   BroadcastMessage,
   Chat,
   ChatMessage,
+  ChatPoll,
   ChatThemeConfig,
   FriendRequest,
   GroupRestrictions,
@@ -47,8 +48,11 @@ import {
   canRemoveGroupMember,
   canSendInGroupChat,
   DISPOSABLE_HOST_PATTERN,
+  UPLOAD_CHUNK_SIZE_BYTES,
   canonicalizeEmail,
   extractHashtags,
+  extractMentions,
+  isAllowedUploadMime,
   isDisposableEmail,
   isGroupAdmin,
   isGroupOwner,
@@ -62,7 +66,10 @@ import {
   isValidUsername,
   normalizeUsername,
   requiresFollowApproval,
+  resolveSafeUploadExtension,
   shouldNotifyUser,
+  togglePollVote,
+  validateMediaFileSize,
   validateSignupEmail,
 } from './src/utils/validation';
 
@@ -101,6 +108,21 @@ const FALLBACK_LOOKUP_AES_KEY = crypto
 
 const DATA_DIR = path.resolve(process.cwd(), '.data');
 const STORE_PATH = path.join(DATA_DIR, 'socialverse-store.json');
+const UPLOADS_DIR = path.join(DATA_DIR, 'uploads');
+const UPLOAD_TMP_DIR = path.join(DATA_DIR, 'upload_tmp');
+
+interface PendingUploadSession {
+  uploadId: string;
+  uid: string;
+  fileName: string;
+  mimeType: string;
+  totalBytes: number;
+  expectedChunks: number;
+  receivedChunks: Set<number>;
+  receivedBytes: number;
+  createdAtMs: number;
+}
+const pendingUploadSessions = new Map<string, PendingUploadSession>();
 
 interface StoredAccount {
   uid: string;
@@ -115,7 +137,7 @@ interface StoredAccount {
 
 interface OtpRecord {
   email: string;
-  purpose: 'signup' | 'reset' | '2fa';
+  purpose: 'signup' | 'reset' | '2fa' | 'change_email';
   codeHash: string;
   expiresAt: number;
 }
@@ -123,7 +145,7 @@ interface OtpRecord {
 interface VerificationGrant {
   token: string;
   email: string;
-  purpose: 'signup' | 'reset' | '2fa';
+  purpose: 'signup' | 'reset' | '2fa' | 'change_email';
   expiresAt: number;
 }
 
@@ -982,12 +1004,17 @@ async function syncChatToFirestore(chat: Chat, idToken: string): Promise<void> {
 }
 
 async function syncChatMessageToFirestore(chatId: string, msg: ChatMessage, idToken: string): Promise<void> {
+  const fsType =
+    msg.type === 'poll' ? 'text' : msg.type === 'post_share' ? 'reel_share' : msg.type;
+  const fallbackText =
+    msg.text ||
+    (msg.type === 'poll' && msg.poll ? `📊 Poll: ${msg.poll.question}` : undefined);
   const fields: Record<string, unknown> = {
     id: msg.id,
     chatId,
     senderId: msg.senderId,
-    type: msg.type,
-    ...(msg.text ? { text: msg.text.slice(0, 2000) } : {}),
+    type: fsType,
+    ...(fallbackText ? { text: fallbackText.slice(0, 2000) } : {}),
     ...(msg.mediaUrl && msg.mediaUrl.length <= 200000 ? { mediaUrl: msg.mediaUrl } : {}),
     ...(msg.stickerUrl && msg.stickerUrl.length <= 200000 ? { stickerUrl: msg.stickerUrl } : {}),
     ...(msg.sharedPostId ? { sharedPostId: msg.sharedPostId.slice(0, 128) } : {}),
@@ -1156,10 +1183,10 @@ function isValidEmail(email: string): boolean {
 async function sendOtpEmail(
   recipientEmail: string,
   code: string,
-  purpose: 'signup' | 'reset' | '2fa'
+  purpose: 'signup' | 'reset' | '2fa' | 'change_email'
 ): Promise<{ sentViaSmtp: boolean }> {
   const gmailUser = process.env.GMAIL_USER?.trim();
-  const gmailPass = process.env.GMAIL_APP_PASSWORD?.trim();
+  const gmailPass = process.env.GMAIL_APP_PASSWORD?.replace(/\s+/g, '').trim();
   if (!gmailUser || !gmailPass) {
     return { sentViaSmtp: false };
   }
@@ -1181,6 +1208,7 @@ async function sendOtpEmail(
     signup: 'SocialVerse Verification Code',
     reset: 'SocialVerse Password Reset Code',
     '2fa': 'SocialVerse Two-Factor Login Code',
+    change_email: 'SocialVerse Email Change Verification Code',
   };
 
   const mailOptions = {
@@ -1513,9 +1541,47 @@ function emitNotification(params: {
   sendWsToUser(recipientUid, { type: 'notification:new', notification: notif });
 }
 
+function emitMentionNotifications(params: {
+  actorUid: string;
+  text: string;
+  summaryPrefix: string;
+  targetId?: string;
+  skipMentions?: Set<string>;
+}) {
+  const { actorUid, text, summaryPrefix, targetId, skipMentions } = params;
+  const mentionedUsernames = extractMentions(text);
+  for (const uname of mentionedUsernames) {
+    if (skipMentions?.has(uname)) continue;
+    const target = Object.values(store.usersPublic).find(
+      (u) => !u.isDeactivated && u.username.toLowerCase() === uname
+    );
+    if (target && target.uid !== actorUid) {
+      emitNotification({
+        recipientUid: target.uid,
+        actorUid,
+        type: 'mention',
+        summary: summaryPrefix,
+        targetId,
+      });
+    }
+  }
+}
+
 async function startServer() {
+  fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+  fs.mkdirSync(UPLOAD_TMP_DIR, { recursive: true });
+
   const app = express();
-  app.use(express.json({ limit: '15mb' }));
+  app.use(express.json({ limit: '25mb' }));
+  app.use(
+    '/uploads',
+    (_req, res, next) => {
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      res.setHeader('Cache-Control', 'public, max-age=604800');
+      next();
+    },
+    express.static(UPLOADS_DIR)
+  );
 
   app.get('/api/health', (_req, res) => {
     res.json({
@@ -1524,6 +1590,149 @@ async function startServer() {
       projectId: firebaseConfig.projectId,
       smtpConfigured: Boolean(process.env.GMAIL_USER && process.env.GMAIL_APP_PASSWORD),
     });
+  });
+
+  // Chunked Binary Media Upload API (bypasses base64 bloat & proxy body size caps)
+  app.post('/api/uploads/init', requireAuth, (req: AuthenticatedRequest, res) => {
+    const uid = req.uid!;
+    const { fileName = 'media.bin', mimeType = 'application/octet-stream', totalBytes } = req.body as {
+      fileName?: string;
+      mimeType?: string;
+      totalBytes?: number;
+    };
+    const numericBytes = Number(totalBytes);
+    if (!isAllowedUploadMime(mimeType, fileName)) {
+      res.status(400).json({ error: 'Unsupported or unsafe file type.' });
+      return;
+    }
+    const sizeCheck = validateMediaFileSize(numericBytes, mimeType, 'en');
+    if (!sizeCheck.valid) {
+      res.status(413).json({ error: sizeCheck.reason || 'File exceeds maximum upload limit.' });
+      return;
+    }
+
+    // Prune expired upload sessions (> 1 hour)
+    const nowMs = Date.now();
+    for (const [id, sess] of pendingUploadSessions.entries()) {
+      if (nowMs - sess.createdAtMs > 3_600_000) {
+        pendingUploadSessions.delete(id);
+        fs.rmSync(path.join(UPLOAD_TMP_DIR, id), { recursive: true, force: true });
+      }
+    }
+
+    const uploadId = `up_${nowMs}_${crypto.randomBytes(6).toString('hex')}`;
+    const expectedChunks = Math.max(1, Math.ceil(numericBytes / UPLOAD_CHUNK_SIZE_BYTES));
+    fs.mkdirSync(path.join(UPLOAD_TMP_DIR, uploadId), { recursive: true });
+    pendingUploadSessions.set(uploadId, {
+      uploadId,
+      uid,
+      fileName: String(fileName).slice(0, 180),
+      mimeType: String(mimeType).slice(0, 120),
+      totalBytes: numericBytes,
+      expectedChunks,
+      receivedChunks: new Set(),
+      receivedBytes: 0,
+      createdAtMs: nowMs,
+    });
+    res.json({ uploadId, chunkSize: UPLOAD_CHUNK_SIZE_BYTES, expectedChunks });
+  });
+
+  app.post(
+    '/api/uploads/chunk',
+    requireAuth,
+    express.raw({ type: 'application/octet-stream', limit: '4mb' }),
+    (req: AuthenticatedRequest, res) => {
+      const uid = req.uid!;
+      const uploadId = String(req.headers['x-upload-id'] || req.query.uploadId || '').trim();
+      const indexRaw = req.headers['x-chunk-index'] ?? req.query.index;
+      const chunkIndex = Number(indexRaw);
+      if (!uploadId || !/^[a-zA-Z0-9_-]{8,80}$/.test(uploadId)) {
+        res.status(400).json({ error: 'Invalid uploadId.' });
+        return;
+      }
+      const session = pendingUploadSessions.get(uploadId);
+      if (!session || session.uid !== uid) {
+        res.status(404).json({ error: 'Upload session not found or expired.' });
+        return;
+      }
+      if (!Number.isInteger(chunkIndex) || chunkIndex < 0 || chunkIndex >= session.expectedChunks) {
+        res.status(400).json({ error: 'Invalid chunk index.' });
+        return;
+      }
+      const buf = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
+      if (buf.length === 0) {
+        res.status(400).json({ error: 'Empty chunk payload.' });
+        return;
+      }
+      if (!session.receivedChunks.has(chunkIndex)) {
+        if (session.receivedBytes + buf.length > session.totalBytes + 4096) {
+          res.status(413).json({ error: 'Uploaded data exceeded declared file size.' });
+          return;
+        }
+        session.receivedBytes += buf.length;
+      }
+      const partPath = path.join(UPLOAD_TMP_DIR, uploadId, `${chunkIndex}.part`);
+      fs.writeFileSync(partPath, buf);
+      session.receivedChunks.add(chunkIndex);
+      res.json({
+        ok: true,
+        chunkIndex,
+        receivedChunks: session.receivedChunks.size,
+        expectedChunks: session.expectedChunks,
+      });
+    }
+  );
+
+  app.post('/api/uploads/complete', requireAuth, (req: AuthenticatedRequest, res) => {
+    const uid = req.uid!;
+    const { uploadId } = req.body as { uploadId?: string };
+    const cleanId = String(uploadId || '').trim();
+    const session = pendingUploadSessions.get(cleanId);
+    if (!session || session.uid !== uid) {
+      res.status(404).json({ error: 'Upload session not found or expired.' });
+      return;
+    }
+    if (session.receivedChunks.size < session.expectedChunks) {
+      res.status(400).json({
+        error: `Upload incomplete (${session.receivedChunks.size}/${session.expectedChunks} chunks received).`,
+      });
+      return;
+    }
+
+    const ext = resolveSafeUploadExtension(session.mimeType, session.fileName);
+    const finalName = `${cleanId}.${ext}`;
+    const finalPath = path.join(UPLOADS_DIR, finalName);
+    const tmpDir = path.join(UPLOAD_TMP_DIR, cleanId);
+
+    try {
+      const fd = fs.openSync(finalPath, 'w');
+      try {
+        for (let i = 0; i < session.expectedChunks; i++) {
+          const partPath = path.join(tmpDir, `${i}.part`);
+          const chunkBuf = fs.readFileSync(partPath);
+          fs.writeSync(fd, chunkBuf);
+        }
+      } finally {
+        fs.closeSync(fd);
+      }
+      pendingUploadSessions.delete(cleanId);
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+      const stat = fs.statSync(finalPath);
+      res.json({
+        url: `/uploads/${finalName}`,
+        mimeType: session.mimeType,
+        size: stat.size,
+      });
+    } catch (err) {
+      try {
+        fs.rmSync(finalPath, { force: true });
+      } catch {
+        // ignore cleanup error
+      }
+      res.status(500).json({
+        error: err instanceof Error ? err.message : 'Failed to assemble uploaded file.',
+      });
+    }
   });
 
   // Live username availability check (local store + Cloud Firestore)
@@ -1556,14 +1765,23 @@ async function startServer() {
     try {
       const { email, purpose = 'signup', language = 'en' } = req.body as {
         email?: string;
-        purpose?: 'signup' | 'reset' | '2fa';
+        purpose?: 'signup' | 'reset' | '2fa' | 'change_email';
         language?: 'en' | 'bn';
       };
 
       let cleanEmail = (email || '').trim().toLowerCase();
       let canonicalEmail = canonicalizeEmail(cleanEmail);
 
-      if (purpose === 'signup') {
+      let requesterUid: string | null = null;
+      if (purpose === 'change_email') {
+        requesterUid = await resolveUidFromHeader(req);
+        if (!requesterUid) {
+          res.status(401).json({ error: 'Authentication required to change email.' });
+          return;
+        }
+      }
+
+      if (purpose === 'signup' || purpose === 'change_email') {
         const check = validateSignupEmail(email || '', language);
         if (!check.valid) {
           res.status(400).json({
@@ -1624,13 +1842,44 @@ async function startServer() {
       );
       const remoteClaim = !localMatch ? await firestoreGetDoc(`email_claims/${emailHash}`) : null;
       const authUriRes =
-        purpose === 'signup' && !localMatch && !(remoteClaim && remoteClaim.uid)
+        (purpose === 'signup' || purpose === 'change_email') && !localMatch && !(remoteClaim && remoteClaim.uid)
           ? await firebaseAuthPost<{ registered?: boolean }>('accounts:createAuthUri', {
               identifier: cleanEmail,
               continueUri: 'http://localhost:3000',
             }).catch(() => null)
           : null;
       const accountExists = Boolean(localMatch || (remoteClaim && remoteClaim.uid) || authUriRes?.registered);
+
+      if (purpose === 'change_email' && requesterUid) {
+        const myAcct = store.accounts.find((a) => !a.deleted && a.uid === requesterUid);
+        if (
+          myAcct &&
+          (myAcct.email === cleanEmail ||
+            (myAcct.canonicalEmail || canonicalizeEmail(myAcct.email)) === canonicalEmail)
+        ) {
+          res.status(400).json({
+            error:
+              language === 'bn'
+                ? 'নতুন ইমেইলটি আপনার বর্তমান ইমেইলের মতোই।'
+                : 'Please enter a different email address from your current one.',
+          });
+          return;
+        }
+        const ownedByOther =
+          (localMatch && localMatch.uid !== requesterUid) ||
+          (remoteClaim && typeof remoteClaim.uid === 'string' && remoteClaim.uid !== requesterUid) ||
+          Boolean(authUriRes?.registered && (!myAcct || myAcct.email !== cleanEmail));
+        if (ownedByOther) {
+          res.status(409).json({
+            error:
+              language === 'bn'
+                ? 'এই ইমেইলটি ইতিমধ্যে অন্য একটি অ্যাকাউন্টে ব্যবহৃত হচ্ছে।'
+                : 'This email address is already registered to another account.',
+            code: 'EMAIL_ALREADY_EXISTS',
+          });
+          return;
+        }
+      }
 
       if (purpose === 'signup' && accountExists) {
         const resolvedExistingEmail =
@@ -1689,7 +1938,7 @@ async function startServer() {
     const { email, code, purpose = 'signup' } = req.body as {
       email?: string;
       code?: string;
-      purpose?: 'signup' | 'reset' | '2fa';
+      purpose?: 'signup' | 'reset' | '2fa' | 'change_email';
     };
     const cleanEmail = (email || '').trim().toLowerCase();
     const cleanCode = (code || '').trim();
@@ -2027,26 +2276,40 @@ async function startServer() {
 
       const isEmailInput = rawId.indexOf('@') > 0;
       const rawCanonical = isEmailInput ? canonicalizeEmail(rawId) : '';
-      const rawUsername = normalizeUsername(rawId.startsWith('@') ? rawId.slice(1) : rawId);
+      const rawUsername = normalizeUsername(rawId.replace(/^@+/, ''));
+
+      const pubMatchUid =
+        !isEmailInput && rawUsername
+          ? Object.values(store.usersPublic).find(
+              (u) => u.username.toLowerCase() === rawUsername
+            )?.uid
+          : undefined;
 
       let acct = store.accounts.find(
         (a) =>
           !a.deleted &&
           (a.email === rawId ||
             (rawCanonical && (a.canonicalEmail || canonicalizeEmail(a.email)) === rawCanonical) ||
-            (!isEmailInput && a.username === rawUsername))
+            (!isEmailInput &&
+              (a.username.toLowerCase() === rawUsername ||
+                (pubMatchUid && a.uid === pubMatchUid))))
       );
 
       let passwordValid = acct ? await bcrypt.compare(password, acct.passwordHash) : false;
 
       // Fallback / Cross-container Recovery via Firebase Auth + Cloud Firestore
       if (!acct || !passwordValid) {
-        let candidateEmails: string[] = [];
-        let fallbackUsername = rawUsername;
+        const candidateEmails: string[] = [];
+        const fallbackUsername = rawUsername;
 
-        if (acct) {
+        if (acct?.email) {
           candidateEmails.push(acct.email);
-        } else if (isEmailInput) {
+        }
+        if (pubMatchUid) {
+          const privEmail = store.usersPrivate[pubMatchUid]?.email;
+          if (privEmail) candidateEmails.push(privEmail);
+        }
+        if (isEmailInput) {
           const claim = await firestoreGetDoc(`email_claims/${sha256Hex(rawCanonical)}`);
           if (claim && typeof claim.encEmail === 'string') {
             const dec = decryptLookupEmail(claim.encEmail);
@@ -2062,9 +2325,25 @@ async function startServer() {
             const dec = decryptLookupEmail(usernameDoc.encEmail);
             if (dec) candidateEmails.push(dec);
           }
+          const resolvedUid =
+            (usernameDoc && typeof usernameDoc.uid === 'string' && usernameDoc.uid) || pubMatchUid;
+          if (resolvedUid) {
+            const localUidAcct = store.accounts.find((a) => !a.deleted && a.uid === resolvedUid);
+            if (localUidAcct?.email) candidateEmails.push(localUidAcct.email);
+            const localPrivEmail = store.usersPrivate[resolvedUid]?.email;
+            if (localPrivEmail) candidateEmails.push(localPrivEmail);
+            try {
+              const adminUser = await getAuth().getUser(resolvedUid);
+              if (adminUser.email) candidateEmails.push(adminUser.email);
+            } catch {
+              // Admin SDK lookup optional fallback
+            }
+          }
         }
 
-        candidateEmails = Array.from(new Set(candidateEmails.filter((e) => e.includes('@'))));
+        const uniqueCandidateEmails = Array.from(
+          new Set(candidateEmails.map((e) => e.trim().toLowerCase()).filter((e) => e.includes('@')))
+        );
 
         let fbLogin: {
           localId: string;
@@ -2073,7 +2352,7 @@ async function startServer() {
           email: string;
         } | null = null;
 
-        for (const candidateEmail of candidateEmails) {
+        for (const candidateEmail of uniqueCandidateEmails) {
           try {
             fbLogin = await firebaseAuthPost<{
               localId: string;
@@ -2093,7 +2372,7 @@ async function startServer() {
 
         if (fbLogin) {
           const recoveredUid = fbLogin.localId;
-          const recoveredEmail = (fbLogin.email || candidateEmails[0]).trim().toLowerCase();
+          const recoveredEmail = (fbLogin.email || uniqueCandidateEmails[0]).trim().toLowerCase();
           const recoveredCanonical = canonicalizeEmail(recoveredEmail);
           const freshHash = await bcrypt.hash(password, 10);
 
@@ -2117,9 +2396,14 @@ async function startServer() {
           }
 
           if (acct) {
+            acct.email = recoveredEmail;
+            acct.canonicalEmail = recoveredCanonical;
             acct.passwordHash = freshHash;
             acct.firebaseRefreshToken = fbLogin.refreshToken;
             acct.username = resolvedUsername;
+            if (store.usersPrivate[recoveredUid]) {
+              store.usersPrivate[recoveredUid].email = recoveredEmail;
+            }
             passwordValid = true;
           } else {
             acct = {
@@ -2588,6 +2872,124 @@ async function startServer() {
     res.json({ ok: true });
   });
 
+  app.post('/api/auth/change-email', requireAuth, async (req: AuthenticatedRequest, res) => {
+    const uid = req.uid!;
+    const { verificationToken, newEmail, currentPassword } = req.body as {
+      verificationToken?: string;
+      newEmail?: string;
+      currentPassword?: string;
+    };
+    const acct = store.accounts.find((a) => !a.deleted && a.uid === uid);
+    const priv = store.usersPrivate[uid];
+    if (!acct || !priv) {
+      res.status(404).json({ error: 'Account not found.' });
+      return;
+    }
+    if (!currentPassword || !(await bcrypt.compare(currentPassword, acct.passwordHash))) {
+      res.status(400).json({ error: 'Current password is incorrect.' });
+      return;
+    }
+
+    const emailCheck = validateSignupEmail(newEmail || '', priv.language === 'bn' ? 'bn' : 'en');
+    if (!emailCheck.valid) {
+      res.status(400).json({ error: emailCheck.reason || 'Please use a valid permanent email address.' });
+      return;
+    }
+    const { cleanEmail, canonicalEmail } = emailCheck;
+
+    const grant = verificationToken ? verificationGrants.get(verificationToken) : undefined;
+    if (
+      !grant ||
+      grant.purpose !== 'change_email' ||
+      grant.email !== cleanEmail ||
+      grant.expiresAt < Date.now()
+    ) {
+      res.status(403).json({ error: 'Valid OTP verification required before updating your email.' });
+      return;
+    }
+
+    const duplicate = store.accounts.find(
+      (a) =>
+        !a.deleted &&
+        a.uid !== uid &&
+        (a.email === cleanEmail || (a.canonicalEmail || canonicalizeEmail(a.email)) === canonicalEmail)
+    );
+    if (duplicate) {
+      res.status(409).json({ error: 'This email is already registered to another account.' });
+      return;
+    }
+
+    const oldCanonical = acct.canonicalEmail || canonicalizeEmail(acct.email);
+    const oldHash = sha256Hex(oldCanonical);
+    const newHash = sha256Hex(canonicalEmail);
+
+    if (acct.firebaseRefreshToken) {
+      const refreshed = await refreshFirebaseIdToken(acct.firebaseRefreshToken);
+      if (refreshed) {
+        acct.firebaseRefreshToken = refreshed.refreshToken;
+        try {
+          const fbRes = await firebaseAuthPost<{ idToken?: string; refreshToken?: string }>(
+            'accounts:update',
+            {
+              idToken: refreshed.idToken,
+              email: cleanEmail,
+              returnSecureToken: true,
+            }
+          );
+          if (fbRes.refreshToken) acct.firebaseRefreshToken = fbRes.refreshToken;
+          const activeIdToken = fbRes.idToken || refreshed.idToken;
+          const encEmail = encryptLookupEmail(cleanEmail);
+          const writes: Array<Record<string, unknown>> = [
+            {
+              update: {
+                name: firestoreDocPathName(`email_claims/${newHash}`),
+                fields: toFirestoreFields({ uid, emailHash: newHash, encEmail }),
+              },
+              updateTransforms: [{ fieldPath: 'createdAt', setToServerValue: 'REQUEST_TIME' }],
+            },
+            {
+              update: {
+                name: firestoreDocPathName(`usernames/${acct.username}`),
+                fields: toFirestoreFields({ uid, username: acct.username, encEmail }),
+              },
+              updateMask: { fieldPaths: ['uid', 'username', 'encEmail'] },
+            },
+          ];
+          if (oldHash !== newHash) {
+            writes.push({ delete: firestoreDocPathName(`email_claims/${oldHash}`) });
+          }
+          await firestoreCommitWrites(writes, activeIdToken).catch(() => {});
+          await updateUserPrivateInFirestore({
+            uid,
+            userPrivate: { ...priv, email: cleanEmail },
+            idToken: activeIdToken,
+          }).catch(() => {});
+        } catch {
+          try {
+            await getAuth().updateUser(uid, { email: cleanEmail });
+          } catch {
+            // Continue with local update if Admin API unavailable
+          }
+        }
+      }
+    } else {
+      try {
+        await getAuth().updateUser(uid, { email: cleanEmail });
+      } catch {
+        // Optional Firebase Admin fallback
+      }
+    }
+
+    acct.email = cleanEmail;
+    acct.canonicalEmail = canonicalEmail;
+    priv.email = cleanEmail;
+    priv.updatedAt = new Date().toISOString();
+    verificationGrants.delete(verificationToken!);
+    persistStoreImmediate();
+    broadcastGlobalSync();
+    res.json({ ok: true, userPrivate: priv });
+  });
+
   app.post('/api/auth/reset-password', async (req, res) => {
     const { verificationToken, email, newPassword } = req.body as {
       verificationToken?: string;
@@ -2872,6 +3274,16 @@ async function startServer() {
     });
 
     persistStoreImmediate();
+    if (updates.bio !== undefined && updates.bio !== user.bio) {
+      const oldMentions = new Set(extractMentions(user.bio || ''));
+      emitMentionNotifications({
+        actorUid: uid,
+        text: updated.bio,
+        summaryPrefix: `mentioned you in their bio.`,
+        targetId: uid,
+        skipMentions: oldMentions,
+      });
+    }
     if (acct.firebaseRefreshToken) {
       refreshFirebaseIdToken(acct.firebaseRefreshToken)
         .then((refreshed) => {
@@ -3204,6 +3616,12 @@ async function startServer() {
     };
     store.posts.unshift(post);
     author.postsCount = store.posts.filter((p) => p.authorId === uid).length;
+    emitMentionNotifications({
+      actorUid: uid,
+      text: post.caption,
+      summaryPrefix: `mentioned you in a ${post.mediaType === 'reel' ? 'reel' : 'post'}.`,
+      targetId: post.id,
+    });
     persistStore();
     void withUserIdToken(uid, async (idToken) => {
       await syncPostToFirestore(post, idToken);
@@ -3221,8 +3639,16 @@ async function startServer() {
     }
     const { caption, visibility } = req.body as { caption?: string; visibility?: PostVisibility };
     if (caption !== undefined && isValidPostCaption(caption)) {
+      const oldMentions = new Set(extractMentions(post.caption || ''));
       post.caption = caption.trim();
       post.hashtags = extractHashtags(caption);
+      emitMentionNotifications({
+        actorUid: req.uid!,
+        text: post.caption,
+        summaryPrefix: `mentioned you in a ${post.mediaType === 'reel' ? 'reel' : 'post'}.`,
+        targetId: post.id,
+        skipMentions: oldMentions,
+      });
     }
     if (visibility) post.visibility = visibility;
     persistStore();
@@ -3358,6 +3784,12 @@ async function startServer() {
       actorUid: uid,
       type: parentCommentId ? 'reply' : 'comment',
       summary: `commented: "${finalText.slice(0, 60)}"`,
+      targetId: post.id,
+    });
+    emitMentionNotifications({
+      actorUid: uid,
+      text: finalText,
+      summaryPrefix: `mentioned you in a comment: "${finalText.slice(0, 50)}"`,
       targetId: post.id,
     });
     persistStore();
@@ -3782,6 +4214,29 @@ async function startServer() {
       res.status(403).json({ error: sendCheck.reason || 'Messaging is restricted in this group.' });
       return;
     }
+
+    let sanitizedPoll: ChatPoll | undefined;
+    if (payload.type === 'poll') {
+      const q = (payload.poll?.question || '').trim().slice(0, 200);
+      const opts = (payload.poll?.options || [])
+        .map((o, idx) => ({
+          id: o.id || `opt_${idx + 1}`,
+          text: (o.text || '').trim().slice(0, 100),
+          voterUids: [],
+        }))
+        .filter((o) => o.text.length > 0)
+        .slice(0, 6);
+      if (!q || opts.length < 2) {
+        res.status(400).json({ error: 'Poll requires a question and at least 2 options.' });
+        return;
+      }
+      sanitizedPoll = {
+        question: q,
+        options: opts,
+        allowMultiple: Boolean(payload.poll?.allowMultiple),
+      };
+    }
+
     const msg: ChatMessage = {
       id: `m_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
       chatId,
@@ -3795,6 +4250,8 @@ async function startServer() {
       sharedPostCaption: payload.sharedPostCaption,
       sharedPostThumb: payload.sharedPostThumb,
       sharedPostAuthor: payload.sharedPostAuthor,
+      sharedPostMediaType: payload.sharedPostMediaType,
+      poll: sanitizedPoll,
       fileName: payload.fileName,
       durationMs: payload.durationMs,
       replyToId: payload.replyToId,
@@ -3812,6 +4269,10 @@ async function startServer() {
         ? 'Sent a sticker'
         : msg.type === 'reel_share'
         ? 'Shared a reel'
+        : msg.type === 'post_share'
+        ? 'Shared a post'
+        : msg.type === 'poll'
+        ? `📊 Poll: ${msg.poll?.question || 'Poll'}`
         : msg.type === 'voice'
         ? 'Voice message'
         : msg.text || msg.fileName || 'Attachment';
@@ -3843,6 +4304,27 @@ async function startServer() {
       await syncChatMessageToFirestore(chatId, msg, idToken);
       await syncChatToFirestore(chat, idToken);
     });
+    broadcastGlobalSync();
+    res.json({ message: msg });
+  });
+
+  app.post('/api/chats/:chatId/messages/:msgId/vote', requireAuth, (req: AuthenticatedRequest, res) => {
+    const uid = req.uid!;
+    const chatId = String(req.params.chatId);
+    const msgId = String(req.params.msgId);
+    const optionId = String(req.body.optionId || '');
+    const chat = store.chats.find((c) => c.id === chatId && c.participantIds.includes(uid));
+    if (!chat) {
+      res.status(404).json({ error: 'Chat not found.' });
+      return;
+    }
+    const msg = (store.messagesByChat[chatId] || []).find((m) => m.id === msgId);
+    if (!msg || msg.type !== 'poll' || !msg.poll) {
+      res.status(404).json({ error: 'Poll message not found.' });
+      return;
+    }
+    msg.poll = togglePollVote(msg.poll, optionId, uid);
+    persistStore();
     broadcastGlobalSync();
     res.json({ message: msg });
   });
@@ -4550,6 +5032,23 @@ async function startServer() {
         error: error instanceof Error ? error.message : 'Failed to generate AI suggestions.',
       });
     }
+  });
+
+  // Structured JSON error handler for 413 PayloadTooLargeError / malformed bodies
+  app.use((err: unknown, _req: Request, res: Response, next: NextFunction) => {
+    const e = err as { type?: string; status?: number; statusCode?: number; message?: string };
+    if (e && (e.type === 'entity.too.large' || e.status === 413 || e.statusCode === 413)) {
+      res.status(413).json({
+        error:
+          'Uploaded payload exceeds the single-request size limit. Please select the file again so it uploads via chunked media streaming, or use a smaller file.',
+      });
+      return;
+    }
+    if (e && e.type === 'entity.parse.failed') {
+      res.status(400).json({ error: 'Invalid JSON request payload.' });
+      return;
+    }
+    next(err);
   });
 
   if (process.env.NODE_ENV !== 'production') {

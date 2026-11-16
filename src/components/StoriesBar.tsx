@@ -26,10 +26,12 @@ export function StoriesBar() {
     muteStoryAuthor,
     createStory,
     uploadImageDataUrl,
+    showToast,
   } = useSocialVerse();
 
   const [replyText, setReplyText] = useState('');
   const [showViewers, setShowViewers] = useState(false);
+  const [uploadingStoryMedia, setUploadingStoryMedia] = useState(false);
 
   // Story creator local state
   const [storyType, setStoryType] = useState<'text' | 'photo' | 'video'>('text');
@@ -65,11 +67,19 @@ export function StoriesBar() {
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
+    e.target.value = '';
     if (!file) return;
-    const url = await uploadImageDataUrl(file, 1080);
-    setStoryMediaUrl(url);
-    if (file.type.startsWith('video/')) setStoryType('video');
-    else setStoryType('photo');
+    setUploadingStoryMedia(true);
+    try {
+      const url = await uploadImageDataUrl(file, 1080);
+      setStoryMediaUrl(url);
+      if (file.type.startsWith('video/')) setStoryType('video');
+      else setStoryType('photo');
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Could not upload story media.');
+    } finally {
+      setUploadingStoryMedia(false);
+    }
   };
 
   const handlePublishStory = async (e: React.FormEvent) => {
@@ -455,7 +465,7 @@ export function StoriesBar() {
                 <div className="space-y-2">
                   <label className="min-h-[44px] px-4 rounded-xl border border-dashed border-sky-500/50 bg-sky-500/5 text-sky-700 dark:text-sky-300 text-xs font-semibold inline-flex items-center gap-2 cursor-pointer w-full justify-center">
                     <ImageIcon className="w-4 h-4" />
-                    <span>{t.create.mediaUrlLabel}</span>
+                    <span>{uploadingStoryMedia ? t.create.uploadingProgress : t.create.mediaUrlLabel}</span>
                     <input
                       type="file"
                       accept={storyType === 'video' ? 'video/*' : 'image/*'}

@@ -2,10 +2,11 @@ import { useState } from 'react';
 import { Clapperboard, ImagePlus, Sparkles, Star, Type as TypeIcon, Upload, Users, X } from 'lucide-react';
 import { useSocialVerse } from '../context/SocialVerseContext';
 import type { MediaType, PostVisibility } from '../types/social';
-import { extractHashtags } from '../utils/validation';
+import { extractHashtags, isVideoMediaUrl } from '../utils/validation';
+import { MentionInput } from './MentionInput';
 
 export function CreateView() {
-  const { createPost, createStory, setSubscreen, uploadImageDataUrl, userPrivate, setCloseFriendsModalOpen, t } = useSocialVerse();
+  const { createPost, createStory, setSubscreen, uploadImageDataUrl, userPrivate, setCloseFriendsModalOpen, showToast, t } = useSocialVerse();
 
   const [mode, setMode] = useState<'post' | 'story' | 'reel'>('post');
   const [mediaType, setMediaType] = useState<MediaType>('image');
@@ -16,13 +17,16 @@ export function CreateView() {
   const [visibility, setVisibility] = useState<PostVisibility>('public');
   const [storyType, setStoryType] = useState<'text' | 'photo' | 'video'>('photo');
   const [storyPrivacy, setStoryPrivacy] = useState<'everyone' | 'followers' | 'close_friends'>('everyone');
+  const [uploadingMedia, setUploadingMedia] = useState(false);
   const [submitting, setSubmitting] = useState(false);
 
   const detectedTags = extractHashtags(caption);
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
+    e.target.value = '';
     if (!file) return;
+    setUploadingMedia(true);
     try {
       const dataUrl = await uploadImageDataUrl(file, 1080);
       if (mode === 'story') {
@@ -39,19 +43,25 @@ export function CreateView() {
           setSelectedMedia((prev) => (mediaType === 'carousel' ? [...prev, dataUrl] : [dataUrl]));
         }
       }
-    } catch {
-      // ignore invalid file
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Could not upload selected media.');
+    } finally {
+      setUploadingMedia(false);
     }
   };
 
   const handleReelCoverUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
+    e.target.value = '';
     if (!file) return;
+    setUploadingMedia(true);
     try {
       const dataUrl = await uploadImageDataUrl(file, 960);
       setReelCoverUrl(dataUrl);
-    } catch {
-      // ignore
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Could not upload cover image.');
+    } finally {
+      setUploadingMedia(false);
     }
   };
 
@@ -178,13 +188,14 @@ export function CreateView() {
             <label htmlFor="create-caption" className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1.5">
               {mode === 'story' ? 'Story Text / Caption' : 'Caption'}
             </label>
-            <textarea
+            <MentionInput
               id="create-caption"
+              multiline
               rows={3}
               required={mode === 'post' && mediaType === 'text'}
               maxLength={2200}
               value={caption}
-              onChange={(e) => setCaption(e.target.value)}
+              onChange={setCaption}
               placeholder={mode === 'story' ? t.create.storyTextPlaceholder : t.create.captionPlaceholder}
               className="w-full p-3.5 rounded-2xl bg-white/80 dark:bg-slate-900/70 border border-slate-200 dark:border-slate-700 text-sm text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-sky-500"
             />
@@ -217,7 +228,7 @@ export function CreateView() {
                 <div className="grid grid-cols-2 gap-2">
                   {selectedMedia.map((url, idx) => (
                     <div key={idx} className="relative rounded-2xl overflow-hidden aspect-video bg-slate-900">
-                      {url.startsWith('data:video/') ? (
+                      {isVideoMediaUrl(url) ? (
                         <video src={url} controls className="w-full h-full object-cover" />
                       ) : (
                         <img src={url} alt="Upload preview" className="w-full h-full object-cover" />
@@ -337,10 +348,10 @@ export function CreateView() {
 
             <button
               type="submit"
-              disabled={submitting || (!caption.trim() && selectedMedia.length === 0 && !customUrl.trim())}
+              disabled={submitting || uploadingMedia || (!caption.trim() && selectedMedia.length === 0 && !customUrl.trim())}
               className="w-full min-h-[44px] px-6 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-sm font-semibold transition-colors disabled:opacity-50"
             >
-              {submitting ? t.create.uploadingProgress : t.create.publish}
+              {submitting || uploadingMedia ? t.create.uploadingProgress : t.create.publish}
             </button>
           </div>
         </form>

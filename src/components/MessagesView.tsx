@@ -1,10 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import {
   Archive,
   ArchiveRestore,
   ArrowDown,
   ArrowLeft,
   Ban,
+  BarChart3,
   Bell,
   BellOff,
   Bookmark,
@@ -32,6 +34,7 @@ import {
   MoreHorizontal,
   Palette,
   Paperclip,
+  Pause,
   Pencil,
   Phone,
   Pin,
@@ -71,8 +74,10 @@ import {
   formatRelativeTime,
   isGroupAdmin,
   isGroupOwner,
+  isVideoMediaUrl,
 } from '../utils/validation';
 import { Avatar } from './Avatar';
+import { RichMentionText } from './RichMentionText';
 
 const QUICK_REACTIONS = ['❤️', '😂', '😮', '😢', '🔥', '👏'];
 const QUICK_EMOJIS = ['😊', '😂', '❤️', '🔥', '🙌', '🥳', '🤩', '😍', '🤝', '✨', '💯', '😎'];
@@ -108,6 +113,149 @@ function getDayKey(isoDate: string): string {
   return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
 }
 
+const VOICE_WAVE_HEIGHTS = [38, 68, 92, 54, 80, 100, 62, 44, 86, 72, 95, 58, 76, 48, 84, 52];
+
+function VoiceMessagePlayer({
+  mediaUrl,
+  durationMs,
+  fileName,
+  mine,
+  speedLabel,
+}: {
+  mediaUrl?: string;
+  durationMs?: number;
+  fileName?: string;
+  mine: boolean;
+  speedLabel: string;
+}) {
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const [playing, setPlaying] = useState(false);
+  const [playbackRate, setPlaybackRate] = useState<1 | 1.5 | 2>(1);
+  const [currentSec, setCurrentSec] = useState(0);
+  const [totalSec, setTotalSec] = useState(
+    Math.max(1, Math.round((durationMs || 3000) / 1000))
+  );
+
+  useEffect(() => {
+    if (audioRef.current) {
+      audioRef.current.playbackRate = playbackRate;
+    }
+  }, [playbackRate]);
+
+  const togglePlay = () => {
+    const audio = audioRef.current;
+    if (!audio || !mediaUrl) return;
+    if (audio.paused) {
+      audio.playbackRate = playbackRate;
+      audio.play().then(() => setPlaying(true)).catch(() => setPlaying(false));
+    } else {
+      audio.pause();
+      setPlaying(false);
+    }
+  };
+
+  const cycleSpeed = () => {
+    const next: 1 | 1.5 | 2 = playbackRate === 1 ? 1.5 : playbackRate === 1.5 ? 2 : 1;
+    setPlaybackRate(next);
+  };
+
+  const displaySec = playing ? Math.floor(currentSec) : totalSec;
+  const formattedTime = `${Math.floor(displaySec / 60)}:${String(displaySec % 60).padStart(2, '0')}`;
+  const progressRatio = totalSec > 0 ? Math.min(1, currentSec / totalSec) : 0;
+
+  return (
+    <div className="flex items-center gap-2.5 py-0.5 min-w-[210px] sm:min-w-[240px]">
+      {mediaUrl && (
+        <audio
+          ref={audioRef}
+          src={mediaUrl}
+          preload="metadata"
+          onLoadedMetadata={() => {
+            if (audioRef.current && Number.isFinite(audioRef.current.duration) && audioRef.current.duration > 0) {
+              setTotalSec(Math.max(1, Math.round(audioRef.current.duration)));
+            }
+          }}
+          onTimeUpdate={() => {
+            if (audioRef.current) {
+              setCurrentSec(audioRef.current.currentTime);
+            }
+          }}
+          onEnded={() => {
+            setPlaying(false);
+            setCurrentSec(0);
+          }}
+        />
+      )}
+
+      <button
+        type="button"
+        onClick={togglePlay}
+        disabled={!mediaUrl}
+        aria-label={playing ? 'Pause voice message' : 'Play voice message'}
+        className={`w-9 h-9 rounded-full flex items-center justify-center shrink-0 transition-colors ${
+          mine
+            ? 'bg-white/25 hover:bg-white/35 text-white'
+            : 'bg-sky-600 hover:bg-sky-700 text-white'
+        } disabled:opacity-60`}
+      >
+        {playing ? <Pause className="w-4 h-4 fill-current" /> : <Play className="w-4 h-4 fill-current ml-0.5" />}
+      </button>
+
+      <div className="flex-1 flex items-center gap-[3px] h-7" aria-hidden="true">
+        {VOICE_WAVE_HEIGHTS.map((pct, i) => {
+          const activeBar = i / VOICE_WAVE_HEIGHTS.length <= progressRatio && currentSec > 0;
+          return (
+            <span
+              key={i}
+              className={`flex-1 rounded-full transition-colors ${
+                activeBar
+                  ? mine
+                    ? 'bg-white'
+                    : 'bg-sky-600'
+                  : mine
+                  ? 'bg-white/45'
+                  : 'bg-slate-400/50 dark:bg-slate-500/60'
+              }`}
+              style={{ height: `${Math.max(22, Math.round((pct / 100) * 24))}px` }}
+            />
+          );
+        })}
+      </div>
+
+      <span className="font-mono-num text-[11px] font-semibold opacity-90 shrink-0">
+        {formattedTime}
+      </span>
+
+      <button
+        type="button"
+        onClick={cycleSpeed}
+        aria-label={`${speedLabel}: ${playbackRate}x`}
+        title={speedLabel}
+        className={`px-2 py-1 rounded-lg text-[11px] font-bold font-mono-num shrink-0 transition-colors ${
+          mine
+            ? 'bg-white/20 hover:bg-white/30 text-white'
+            : 'bg-slate-200/80 dark:bg-slate-700/80 hover:bg-slate-300 dark:hover:bg-slate-600 text-slate-800 dark:text-slate-100'
+        }`}
+      >
+        {playbackRate}x
+      </button>
+
+      {mediaUrl && (
+        <a
+          href={mediaUrl}
+          download={fileName || 'voice-note.webm'}
+          aria-label="Download voice message"
+          className={`p-1.5 rounded-lg shrink-0 ${
+            mine ? 'bg-black/15 hover:bg-black/25 text-white' : 'bg-slate-200/70 dark:bg-slate-700/70 hover:bg-slate-300 dark:hover:bg-slate-600'
+          }`}
+        >
+          <Download className="w-3.5 h-3.5" />
+        </a>
+      )}
+    </div>
+  );
+}
+
 export function MessagesView() {
   const {
     chats,
@@ -136,6 +284,7 @@ export function MessagesView() {
     sendMessage,
     editMessage,
     reactToMessage,
+    voteMessagePoll,
     starMessage,
     pinMessage,
     forwardMessage,
@@ -166,6 +315,7 @@ export function MessagesView() {
     unblockUser,
     uploadImageDataUrl,
     openUserProfile,
+    openReelsAt,
     mobileThreadOpen: mobileShowThread,
     setMobileThreadOpen: setMobileShowThread,
     showToast,
@@ -215,6 +365,12 @@ export function MessagesView() {
   const [inChatQuery, setInChatQuery] = useState('');
   const [activeMatchCursor, setActiveMatchCursor] = useState(0);
   const [showScrollBottomBtn, setShowScrollBottomBtn] = useState(false);
+
+  // In-chat Poll creator modal
+  const [showPollModal, setShowPollModal] = useState(false);
+  const [pollQuestion, setPollQuestion] = useState('');
+  const [pollOptions, setPollOptions] = useState<string[]>(['', '']);
+  const [pollAllowMultiple, setPollAllowMultiple] = useState(false);
 
   // Notes Modal state
   const [showNoteComposer, setShowNoteComposer] = useState(false);
@@ -551,17 +707,21 @@ export function MessagesView() {
         };
         recorder.onstop = () => {
           const blob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
-          const reader = new FileReader();
-          reader.onload = () => {
-            const durationMs = Math.max(1200, Date.now() - recordStartRef.current);
-            sendMessage(activeChat.id, {
-              type: 'voice',
-              mediaUrl: String(reader.result || ''),
-              durationMs,
-              fileName: `voice_${Date.now()}.webm`,
+          const durationMs = Math.max(1200, Date.now() - recordStartRef.current);
+          const fileName = `voice_${Date.now()}.webm`;
+          const audioFile = new File([blob], fileName, { type: blob.type || 'audio/webm' });
+          void uploadImageDataUrl(audioFile)
+            .then((mediaUrl) =>
+              sendMessage(activeChat.id, {
+                type: 'voice',
+                mediaUrl,
+                durationMs,
+                fileName,
+              })
+            )
+            .catch((err) => {
+              showToast(err instanceof Error ? err.message : 'Could not send voice message.');
             });
-          };
-          reader.readAsDataURL(blob);
           stream.getTracks().forEach((tr) => tr.stop());
         };
         mediaRecorderRef.current = recorder;
@@ -598,13 +758,17 @@ export function MessagesView() {
       showToast(perm.reason || 'Media attachments are blocked for members');
       return;
     }
-    const dataUrl = await uploadImageDataUrl(file, 1080);
-    await sendMessage(activeChat.id, {
-      type: kind,
-      mediaUrl: dataUrl,
-      fileName: file.name,
-      text: kind === 'file' ? file.name : undefined,
-    });
+    try {
+      const dataUrl = await uploadImageDataUrl(file, 1080);
+      await sendMessage(activeChat.id, {
+        type: kind,
+        mediaUrl: dataUrl,
+        fileName: file.name,
+        text: kind === 'file' ? file.name : undefined,
+      });
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Failed to upload attachment.');
+    }
   };
 
   const handleGroupAvatarPick = async (e: React.ChangeEvent<HTMLInputElement>, isEditMode = false) => {
@@ -1359,6 +1523,23 @@ export function MessagesView() {
                 const isTyping = (typingByChat[chat.id] || []).some(
                   (uid) => uid !== currentUser.uid
                 );
+                const groupPeers =
+                  chat.type === 'group'
+                    ? chat.participantIds
+                        .filter((id) => id !== currentUser.uid)
+                        .slice(0, 2)
+                        .map((id) => ({
+                          uid: id,
+                          name:
+                            chat.participantNames?.[id] ||
+                            creators.find((c) => c.uid === id)?.displayName ||
+                            'Member',
+                          avatar:
+                            chat.participantAvatars?.[id] ||
+                            creators.find((c) => c.uid === id)?.photoUrl ||
+                            '',
+                        }))
+                    : [];
 
                 return (
                   <div key={chat.id} className="relative group">
@@ -1366,6 +1547,8 @@ export function MessagesView() {
                       className={`w-full px-4 py-3.5 flex items-center gap-3.5 transition-colors ${
                         active
                           ? 'bg-sky-500/12 dark:bg-sky-500/16'
+                          : unread
+                          ? 'bg-sky-500/[0.05] hover:bg-sky-500/10'
                           : 'hover:bg-white/60 dark:hover:bg-white/[0.04]'
                       }`}
                     >
@@ -1381,6 +1564,15 @@ export function MessagesView() {
                               alt={displayTitle}
                               className="w-13 h-13 rounded-full object-cover shrink-0 ring-1 ring-white/20"
                             />
+                          ) : groupPeers.length >= 2 ? (
+                            <div className="relative w-13 h-13 shrink-0">
+                              <div className="w-9 h-9 rounded-full overflow-hidden ring-2 ring-white dark:ring-slate-900 absolute top-0 left-0 bg-slate-200 dark:bg-slate-800">
+                                <Avatar src={groupPeers[0].avatar} name={groupPeers[0].name} size="sm" />
+                              </div>
+                              <div className="w-9 h-9 rounded-full overflow-hidden ring-2 ring-white dark:ring-slate-900 absolute bottom-0 right-0 bg-slate-200 dark:bg-slate-800">
+                                <Avatar src={groupPeers[1].avatar} name={groupPeers[1].name} size="sm" />
+                              </div>
+                            </div>
                           ) : (
                             <div className="w-13 h-13 rounded-full bg-gradient-to-br from-sky-500/25 to-cyan-500/25 text-sky-700 dark:text-sky-300 flex items-center justify-center shrink-0">
                               <Users className="w-6 h-6" />
@@ -1407,6 +1599,11 @@ export function MessagesView() {
                               >
                                 {displayTitle}
                               </p>
+                              {chat.type === 'group' && (
+                                <span className="px-1.5 py-0.5 rounded-md text-[10px] font-bold uppercase tracking-wider bg-sky-500/15 text-sky-700 dark:text-sky-300 shrink-0">
+                                  {t.messages.group}
+                                </span>
+                              )}
                               {muted && <BellOff className="w-3.5 h-3.5 text-slate-400 shrink-0" />}
                               {chat.disappearingMode && chat.disappearingMode !== 'off' && (
                                 <Clock className="w-3.5 h-3.5 text-amber-500 shrink-0" />
@@ -2039,7 +2236,11 @@ export function MessagesView() {
                               {msg.type === 'reel_share' && (
                                 <button
                                   type="button"
-                                  onClick={() => setActiveTab('reels')}
+                                  onClick={() =>
+                                    msg.sharedPostId
+                                      ? openReelsAt(msg.sharedPostId)
+                                      : setActiveTab('reels')
+                                  }
                                   className="rounded-2xl overflow-hidden bg-black/20 border border-white/15 w-56 space-y-1.5 p-2.5 text-left hover:opacity-95"
                                 >
                                   {msg.sharedPostThumb && (
@@ -2061,6 +2262,123 @@ export function MessagesView() {
                                 </button>
                               )}
 
+                              {msg.type === 'post_share' && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    const matchedAuthor = msg.sharedPostAuthor
+                                      ? creators.find(
+                                          (c) =>
+                                            c.username.toLowerCase() ===
+                                            msg.sharedPostAuthor!.toLowerCase()
+                                        )
+                                      : undefined;
+                                    if (matchedAuthor) {
+                                      openUserProfile(matchedAuthor.uid);
+                                    } else {
+                                      setActiveTab('home');
+                                    }
+                                  }}
+                                  className="rounded-2xl overflow-hidden bg-black/15 dark:bg-black/25 border border-white/15 w-56 space-y-1.5 p-2.5 text-left hover:opacity-95"
+                                >
+                                  {msg.sharedPostThumb && (
+                                    msg.sharedPostMediaType === 'video' || isVideoMediaUrl(msg.sharedPostThumb) ? (
+                                      <video
+                                        src={msg.sharedPostThumb}
+                                        muted
+                                        playsInline
+                                        className="w-full h-36 object-cover rounded-xl"
+                                      />
+                                    ) : (
+                                      <img
+                                        src={msg.sharedPostThumb}
+                                        alt={msg.sharedPostCaption || 'Shared post'}
+                                        className="w-full h-36 object-cover rounded-xl"
+                                      />
+                                    )
+                                  )}
+                                  <p className="text-xs font-semibold truncate flex items-center gap-1.5">
+                                    <ImageIcon className="w-3.5 h-3.5 shrink-0" />
+                                    <span>
+                                      {t.messages.sharedPostLabel} · @{msg.sharedPostAuthor || 'creator'}
+                                    </span>
+                                  </p>
+                                  {msg.sharedPostCaption && (
+                                    <p className="text-xs opacity-85 line-clamp-2">
+                                      {msg.sharedPostCaption}
+                                    </p>
+                                  )}
+                                </button>
+                              )}
+
+                              {msg.type === 'poll' && msg.poll && (() => {
+                                const totalVotes = msg.poll.options.reduce(
+                                  (sum, opt) => sum + (opt.voterUids?.length || 0),
+                                  0
+                                );
+                                return (
+                                  <div className="w-60 sm:w-72 space-y-2 py-0.5">
+                                    <div className="flex items-start justify-between gap-2">
+                                      <p className="text-sm font-bold leading-snug">
+                                        {msg.poll.question}
+                                      </p>
+                                      <BarChart3 className="w-4 h-4 shrink-0 opacity-80 mt-0.5" />
+                                    </div>
+                                    <div className="space-y-1.5">
+                                      {msg.poll.options.map((opt) => {
+                                        const votes = opt.voterUids?.length || 0;
+                                        const pct =
+                                          totalVotes > 0
+                                            ? Math.round((votes / totalVotes) * 100)
+                                            : 0;
+                                        const votedByMe = Boolean(
+                                          opt.voterUids?.includes(currentUser.uid)
+                                        );
+                                        return (
+                                          <button
+                                            key={opt.id}
+                                            type="button"
+                                            onClick={() =>
+                                              voteMessagePoll(activeChat.id, msg.id, opt.id)
+                                            }
+                                            className={`relative w-full overflow-hidden rounded-xl border px-3 py-2 text-left transition-all ${
+                                              mine
+                                                ? votedByMe
+                                                  ? 'border-white/75 bg-white/25'
+                                                  : 'border-white/25 bg-black/15 hover:bg-white/15'
+                                                : votedByMe
+                                                ? 'border-sky-500 bg-sky-500/12'
+                                                : 'border-slate-200/80 dark:border-white/15 bg-slate-100/70 dark:bg-white/5 hover:border-sky-400'
+                                            }`}
+                                          >
+                                            <div
+                                              className={`absolute inset-y-0 left-0 transition-all duration-300 ${
+                                                mine ? 'bg-white/20' : 'bg-sky-500/20'
+                                              }`}
+                                              style={{ width: `${pct}%` }}
+                                            />
+                                            <div className="relative flex items-center justify-between gap-2 text-xs font-semibold">
+                                              <span className="inline-flex items-center gap-1.5 min-w-0">
+                                                {votedByMe && (
+                                                  <Check className="w-3.5 h-3.5 shrink-0" />
+                                                )}
+                                                <span className="truncate">{opt.text}</span>
+                                              </span>
+                                              <span className="font-mono-num shrink-0 opacity-85">
+                                                {pct}% ({votes})
+                                              </span>
+                                            </div>
+                                          </button>
+                                        );
+                                      })}
+                                    </div>
+                                    <p className="text-[11px] opacity-75 font-medium">
+                                      {totalVotes} {t.messages.pollVotes}
+                                    </p>
+                                  </div>
+                                );
+                              })()}
+
                               {msg.type === 'image' && msg.mediaUrl && (
                                 <img
                                   src={msg.mediaUrl}
@@ -2075,36 +2393,13 @@ export function MessagesView() {
                               )}
 
                               {msg.type === 'voice' && (
-                                <div className="flex items-center gap-3 py-0.5">
-                                  {msg.mediaUrl ? (
-                                    <audio
-                                      controls
-                                      src={msg.mediaUrl}
-                                      className="h-9 max-w-[225px]"
-                                    />
-                                  ) : (
-                                    <div className="inline-flex items-center gap-2 text-sm font-medium">
-                                      <Play className="w-4 h-4 fill-current" />
-                                      <span className="font-mono-num">
-                                        0:
-                                        {String(Math.round((msg.durationMs || 3000) / 1000)).padStart(
-                                          2,
-                                          '0'
-                                        )}
-                                      </span>
-                                    </div>
-                                  )}
-                                  {msg.mediaUrl && (
-                                    <a
-                                      href={msg.mediaUrl}
-                                      download={msg.fileName || 'voice-note.webm'}
-                                      aria-label="Download voice message"
-                                      className="p-2 rounded-lg bg-black/15 hover:bg-black/25"
-                                    >
-                                      <Download className="w-4 h-4" />
-                                    </a>
-                                  )}
-                                </div>
+                                <VoiceMessagePlayer
+                                  mediaUrl={msg.mediaUrl}
+                                  durationMs={msg.durationMs}
+                                  fileName={msg.fileName}
+                                  mine={mine}
+                                  speedLabel={t.messages.voiceSpeed}
+                                />
                               )}
 
                               {msg.type === 'file' && (
@@ -2118,11 +2413,22 @@ export function MessagesView() {
                                 </a>
                               )}
 
-                              {msg.text && msg.type !== 'reel_share' && msg.type !== 'file' && (
-                                <p className="text-[15px] leading-relaxed whitespace-pre-wrap break-words">
-                                  {msg.text}
-                                </p>
-                              )}
+                              {msg.text &&
+                                msg.type !== 'reel_share' &&
+                                msg.type !== 'post_share' &&
+                                msg.type !== 'poll' &&
+                                msg.type !== 'file' && (
+                                  <p className="text-[15px] leading-relaxed whitespace-pre-wrap break-words">
+                                    <RichMentionText
+                                      text={msg.text}
+                                      mentionClassName={
+                                        mine
+                                          ? 'text-white underline font-semibold cursor-pointer'
+                                          : 'text-sky-600 dark:text-sky-400 font-semibold hover:underline cursor-pointer'
+                                      }
+                                    />
+                                  </p>
+                                )}
 
                               <div className="flex items-center justify-end gap-1.5 text-[11px] opacity-75 pt-0.5">
                                 {isPinnedMsg && <Pin className="w-3 h-3" />}
@@ -2481,14 +2787,14 @@ export function MessagesView() {
                 ) : (
                   <form
                     onSubmit={handleSendText}
-                    className="flex items-center gap-1 sm:gap-1.5 p-1.5 sm:p-2 rounded-full bg-white/95 dark:bg-[#0e1526]/95 border border-slate-200/90 dark:border-white/[0.08] shadow-sm w-full min-w-0"
+                    className="flex items-center gap-0.5 sm:gap-1.5 p-1.5 sm:p-2 rounded-full bg-white/95 dark:bg-[#0e1526]/95 border border-slate-200/90 dark:border-white/[0.08] shadow-sm w-full min-w-0"
                   >
                     {mediaPermission.allowed && (
                       <button
                         type="button"
                         aria-label={isRecording ? t.messages.stopRecording : t.messages.recordVoice}
                         onClick={handleToggleVoiceRecord}
-                        className={`min-h-[44px] min-w-[44px] shrink-0 rounded-full flex items-center justify-center transition-colors ${
+                        className={`min-h-[40px] min-w-[38px] sm:min-h-[44px] sm:min-w-[44px] shrink-0 rounded-full flex items-center justify-center transition-colors ${
                           isRecording
                             ? 'bg-rose-600 text-white'
                             : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
@@ -2505,7 +2811,7 @@ export function MessagesView() {
                         setShowQuickEmojiBar((s) => !s);
                         setShowStickerDrawer(false);
                       }}
-                      className={`min-h-[44px] min-w-[44px] shrink-0 rounded-full flex items-center justify-center ${
+                      className={`min-h-[40px] min-w-[38px] sm:min-h-[44px] sm:min-w-[44px] shrink-0 rounded-full flex items-center justify-center ${
                         showQuickEmojiBar
                           ? 'bg-sky-600 text-white'
                           : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
@@ -2520,11 +2826,25 @@ export function MessagesView() {
                       onChange={(e) => handleDraftChange(e.target.value)}
                       placeholder={t.messages.typeMessage}
                       aria-label={t.messages.typeMessage}
-                      className="flex-1 min-w-0 w-full min-h-[44px] px-2.5 bg-transparent text-[15px] text-slate-900 dark:text-white focus:outline-none"
+                      className="flex-1 min-w-0 w-full min-h-[40px] sm:min-h-[44px] px-2 bg-transparent text-[15px] text-slate-900 dark:text-white focus:outline-none"
                     />
 
                     {mediaPermission.allowed && (
                       <>
+                        <button
+                          type="button"
+                          aria-label={t.messages.createPoll}
+                          title={t.messages.createPoll}
+                          onClick={() => {
+                            setShowPollModal(true);
+                            setShowStickerDrawer(false);
+                            setShowQuickEmojiBar(false);
+                          }}
+                          className="min-h-[40px] min-w-[38px] sm:min-h-[44px] sm:min-w-[44px] shrink-0 rounded-full flex items-center justify-center text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800"
+                        >
+                          <BarChart3 className="w-5 h-5" />
+                        </button>
+
                         <button
                           type="button"
                           aria-label={t.messages.stickers}
@@ -2532,7 +2852,7 @@ export function MessagesView() {
                             setShowStickerDrawer((s) => !s);
                             setShowQuickEmojiBar(false);
                           }}
-                          className={`min-h-[44px] min-w-[44px] shrink-0 rounded-full flex items-center justify-center ${
+                          className={`min-h-[40px] min-w-[38px] sm:min-h-[44px] sm:min-w-[44px] shrink-0 rounded-full flex items-center justify-center ${
                             showStickerDrawer
                               ? 'bg-sky-600 text-white'
                               : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
@@ -2543,7 +2863,7 @@ export function MessagesView() {
 
                         <label
                           aria-label="Attach image, video, or file"
-                          className="min-h-[44px] min-w-[44px] shrink-0 rounded-full flex items-center justify-center text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
+                          className="min-h-[40px] min-w-[38px] sm:min-h-[44px] sm:min-w-[44px] shrink-0 rounded-full flex items-center justify-center text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
                         >
                           <Paperclip className="w-5 h-5" />
                           <input
@@ -4100,6 +4420,144 @@ export function MessagesView() {
             )}
           </div>
         </div>
+      )}
+
+      {/* Create In-Chat Poll Modal */}
+      {showPollModal &&
+        activeChat &&
+        createPortal(
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label={t.messages.createPoll}
+            className="fixed inset-0 z-[80] bg-slate-950/75 backdrop-blur-md flex items-center justify-center p-4"
+            onClick={() => setShowPollModal(false)}
+          >
+            <div
+              onClick={(e) => e.stopPropagation()}
+              className="w-full max-w-md rounded-3xl bg-white/95 dark:bg-slate-900/95 backdrop-blur-2xl border border-slate-200/80 dark:border-white/15 p-6 space-y-4 shadow-2xl"
+            >
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <BarChart3 className="w-5 h-5 text-sky-600" />
+                <h3 className="text-lg font-bold text-slate-900 dark:text-white">
+                  {t.messages.createPoll}
+                </h3>
+              </div>
+              <button
+                type="button"
+                aria-label="Close poll modal"
+                onClick={() => setShowPollModal(false)}
+                className="w-10 h-10 rounded-full flex items-center justify-center text-slate-500 hover:bg-slate-200/70 dark:hover:bg-slate-800"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form
+              onSubmit={async (e) => {
+                e.preventDefault();
+                const q = pollQuestion.trim();
+                const validOpts = pollOptions.map((o) => o.trim()).filter(Boolean);
+                if (!q || validOpts.length < 2) {
+                  showToast('Enter a question and at least 2 poll options.');
+                  return;
+                }
+                await sendMessage(activeChat.id, {
+                  type: 'poll',
+                  text: q,
+                  poll: {
+                    question: q,
+                    options: validOpts.map((text, idx) => ({
+                      id: `opt_${idx + 1}`,
+                      text,
+                    })),
+                    allowMultiple: pollAllowMultiple,
+                  },
+                });
+                setPollQuestion('');
+                setPollOptions(['', '']);
+                setPollAllowMultiple(false);
+                setShowPollModal(false);
+              }}
+              className="space-y-3"
+            >
+              <div>
+                <label className="text-xs font-semibold text-slate-600 dark:text-slate-300 block mb-1">
+                  {t.messages.pollQuestion}
+                </label>
+                <input
+                  type="text"
+                  value={pollQuestion}
+                  onChange={(e) => setPollQuestion(e.target.value)}
+                  placeholder={t.messages.pollQuestion}
+                  maxLength={140}
+                  className="w-full min-h-[44px] px-3.5 rounded-2xl bg-white/85 dark:bg-slate-900 border border-slate-200 dark:border-white/10 text-sm text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-sky-500"
+                />
+              </div>
+
+              <div className="space-y-2 max-h-60 overflow-y-auto pr-0.5">
+                {pollOptions.map((opt, idx) => (
+                  <div key={idx} className="flex items-center gap-2">
+                    <input
+                      type="text"
+                      value={opt}
+                      onChange={(e) =>
+                        setPollOptions((prev) =>
+                          prev.map((item, i) => (i === idx ? e.target.value : item))
+                        )
+                      }
+                      placeholder={`${t.messages.pollOption} ${idx + 1}`}
+                      maxLength={80}
+                      className="flex-1 min-h-[42px] px-3.5 rounded-xl bg-white/85 dark:bg-slate-900 border border-slate-200 dark:border-white/10 text-sm text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-sky-500"
+                    />
+                    {pollOptions.length > 2 && (
+                      <button
+                        type="button"
+                        aria-label={`Remove option ${idx + 1}`}
+                        onClick={() =>
+                          setPollOptions((prev) => prev.filter((_, i) => i !== idx))
+                        }
+                        className="w-9 h-9 rounded-full flex items-center justify-center text-slate-400 hover:text-rose-500 hover:bg-rose-500/10"
+                      >
+                        <X className="w-4 h-4" />
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
+
+              {pollOptions.length < 6 && (
+                <button
+                  type="button"
+                  onClick={() => setPollOptions((prev) => [...prev, ''])}
+                  className="w-full min-h-[40px] rounded-xl liquid-glass-btn text-xs font-semibold text-sky-600 dark:text-sky-400 inline-flex items-center justify-center gap-1.5"
+                >
+                  <Plus className="w-4 h-4" />
+                  <span>{t.messages.addPollOption}</span>
+                </button>
+              )}
+
+              <label className="flex items-center gap-2 text-xs font-medium text-slate-600 dark:text-slate-300 cursor-pointer pt-1">
+                <input
+                  type="checkbox"
+                  checked={pollAllowMultiple}
+                  onChange={(e) => setPollAllowMultiple(e.target.checked)}
+                  className="rounded border-slate-300 text-sky-600 focus:ring-sky-500"
+                />
+                <span>Allow multiple answers</span>
+              </label>
+
+              <button
+                type="submit"
+                className="w-full min-h-[46px] rounded-2xl bg-sky-600 hover:bg-sky-700 text-white text-sm font-semibold transition-colors"
+              >
+                {t.messages.createPoll}
+              </button>
+            </form>
+          </div>
+        </div>,
+        document.body
       )}
     </div>
   );

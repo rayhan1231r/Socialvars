@@ -2,6 +2,7 @@ import type {
   AppNotification,
   BroadcastChannel,
   Chat,
+  ChatPoll,
   NicknameFontStyle,
   NoteItem,
   NotificationPrefs,
@@ -982,7 +983,7 @@ export function canAddGroupMembers(
 export function canSendInGroupChat(
   chat: Pick<Chat, 'type' | 'ownerUid' | 'createdBy' | 'adminUids' | 'restrictions'>,
   uid: string,
-  messageType: 'text' | 'voice' | 'image' | 'video' | 'file' | 'sticker' | 'reel_share' = 'text'
+  messageType: 'text' | 'voice' | 'image' | 'video' | 'file' | 'sticker' | 'reel_share' | 'post_share' | 'poll' = 'text'
 ): { allowed: boolean; reason?: string } {
   if (chat.type !== 'group') return { allowed: true };
   if (isGroupAdmin(chat, uid)) return { allowed: true };
@@ -1426,4 +1427,252 @@ export function parseAppRouteFromLocation(
   if (routeSegment === 'create') return { tab: 'home', subscreen: 'create_sheet' };
   return { tab: 'home', subscreen: null };
 }
+
+export function isReelPost(post: { mediaType: string }): boolean {
+  return post.mediaType === 'reel';
+}
+
+export function isStandardPost(post: { mediaType: string }): boolean {
+  return post.mediaType !== 'reel';
+}
+
+export const MENTION_MATCH_REGEX = /(^|[^a-zA-Z0-9_])@([a-zA-Z0-9_]{3,24})\b/g;
+
+export function extractMentions(text: string): string[] {
+  const found = new Set<string>();
+  const re = new RegExp(MENTION_MATCH_REGEX.source, 'g');
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(text)) !== null) {
+    const uname = match[2].toLowerCase();
+    if (USERNAME_REGEX.test(uname)) {
+      found.add(uname);
+    }
+  }
+  return Array.from(found);
+}
+
+export interface MentionSegment {
+  type: 'text' | 'mention';
+  value: string;
+  username?: string;
+}
+
+export function splitTextWithMentions(text: string): MentionSegment[] {
+  if (!text) return [];
+  const segments: MentionSegment[] = [];
+  const re = new RegExp(MENTION_MATCH_REGEX.source, 'g');
+  let lastIdx = 0;
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(text)) !== null) {
+    const prefix = match[1] || '';
+    const mentionStart = match.index + prefix.length;
+    const username = match[2];
+    if (mentionStart > lastIdx) {
+      segments.push({ type: 'text', value: text.slice(lastIdx, mentionStart) });
+    }
+    segments.push({
+      type: 'mention',
+      value: `@${username}`,
+      username: username.toLowerCase(),
+    });
+    lastIdx = match.index + match[0].length;
+  }
+  if (lastIdx < text.length) {
+    segments.push({ type: 'text', value: text.slice(lastIdx) });
+  }
+  return segments;
+}
+
+export function togglePollVote(poll: ChatPoll, optionId: string, uid: string): ChatPoll {
+  const allowMultiple = Boolean(poll.allowMultiple);
+  const clickedOption = poll.options.find((o) => o.id === optionId);
+  if (!clickedOption) return poll;
+  const alreadyVotedClicked = clickedOption.voterUids.includes(uid);
+
+  const nextOptions = poll.options.map((opt) => {
+    if (opt.id === optionId) {
+      return {
+        ...opt,
+        voterUids: alreadyVotedClicked
+          ? opt.voterUids.filter((id) => id !== uid)
+          : [...opt.voterUids, uid],
+      };
+    }
+    if (!allowMultiple) {
+      return {
+        ...opt,
+        voterUids: opt.voterUids.filter((id) => id !== uid),
+      };
+    }
+    return opt;
+  });
+
+  return {
+    ...poll,
+    options: nextOptions,
+  };
+}
+
+export const UPLOAD_CHUNK_SIZE_BYTES = 2 * 1024 * 1024; // 2 MiB raw binary chunks (well below Cloud Run 32 MiB cap)
+export const MAX_JSON_IMAGE_DATA_URL_BYTES = 1_500_000;
+export const MAX_IMAGE_UPLOAD_BYTES = 20 * 1024 * 1024; // 20 MB
+export const MAX_VIDEO_UPLOAD_BYTES = 100 * 1024 * 1024; // 100 MB
+export const MAX_FILE_UPLOAD_BYTES = 50 * 1024 * 1024; // 50 MB
+
+const VIDEO_URL_EXT_REGEX = /\.(mp4|webm|mov|m4v|ogv|ogg)$/i;
+
+export function isVideoMediaUrl(url?: string | null): boolean {
+  if (!url || typeof url !== 'string') return false;
+  const trimmed = url.trim();
+  if (!trimmed) return false;
+  if (trimmed.startsWith('data:video/')) return true;
+  const clean = trimmed.split('?')[0].split('#')[0];
+  return VIDEO_URL_EXT_REGEX.test(clean);
+}
+
+const ALLOWED_UPLOAD_MIME_PREFIXES = ['image/', 'video/', 'audio/'];
+const ALLOWED_UPLOAD_MIME_EXACT = new Set<string>([
+  'application/pdf',
+  'application/octet-stream',
+  'text/plain',
+]);
+const BLOCKED_EXECUTABLE_EXTS = new Set<string>([
+  'html',
+  'htm',
+  'xhtml',
+  'svg',
+  'js',
+  'mjs',
+  'cjs',
+  'ts',
+  'jsx',
+  'tsx',
+  'php',
+  'sh',
+  'bat',
+  'cmd',
+  'exe',
+  'msi',
+  'dll',
+]);
+
+const MIME_TO_DEFAULT_EXT: Record<string, string> = {
+  'image/jpeg': 'jpg',
+  'image/jpg': 'jpg',
+  'image/png': 'png',
+  'image/webp': 'webp',
+  'image/gif': 'gif',
+  'image/avif': 'avif',
+  'video/mp4': 'mp4',
+  'video/webm': 'webm',
+  'video/quicktime': 'mov',
+  'video/x-m4v': 'm4v',
+  'video/ogg': 'ogv',
+  'audio/webm': 'webm',
+  'audio/mp4': 'm4a',
+  'audio/mpeg': 'mp3',
+  'audio/ogg': 'ogg',
+  'audio/wav': 'wav',
+  'audio/aac': 'aac',
+  'application/pdf': 'pdf',
+  'text/plain': 'txt',
+};
+
+export function isAllowedUploadMime(mimeType: string, fileName: string = ''): boolean {
+  const cleanMime = (mimeType || '').trim().toLowerCase().split(';')[0];
+  const extMatch = (fileName || '').trim().toLowerCase().match(/\.([a-z0-9]{1,10})$/);
+  const ext = extMatch ? extMatch[1] : '';
+  if (ext && BLOCKED_EXECUTABLE_EXTS.has(ext)) {
+    return false;
+  }
+  if (cleanMime === 'image/svg+xml') {
+    return false;
+  }
+  if (ALLOWED_UPLOAD_MIME_PREFIXES.some((prefix) => cleanMime.startsWith(prefix))) {
+    return true;
+  }
+  if (ALLOWED_UPLOAD_MIME_EXACT.has(cleanMime)) {
+    return true;
+  }
+  // Allow empty mime when a safe media extension is explicitly present
+  if (!cleanMime && ext && Object.values(MIME_TO_DEFAULT_EXT).includes(ext)) {
+    return true;
+  }
+  return false;
+}
+
+export function resolveSafeUploadExtension(mimeType: string, fileName: string = ''): string {
+  const cleanMime = (mimeType || '').trim().toLowerCase().split(';')[0];
+  if (MIME_TO_DEFAULT_EXT[cleanMime]) {
+    return MIME_TO_DEFAULT_EXT[cleanMime];
+  }
+  const extMatch = (fileName || '').trim().toLowerCase().match(/\.([a-z0-9]{1,8})$/);
+  const ext = extMatch ? extMatch[1] : '';
+  if (ext && !BLOCKED_EXECUTABLE_EXTS.has(ext) && /^[a-z0-9]+$/.test(ext)) {
+    return ext;
+  }
+  if (cleanMime.startsWith('video/')) return 'mp4';
+  if (cleanMime.startsWith('audio/')) return 'webm';
+  if (cleanMime.startsWith('image/')) return 'jpg';
+  return 'bin';
+}
+
+export interface UploadChunkPlan {
+  index: number;
+  start: number;
+  end: number;
+  size: number;
+}
+
+export function planUploadChunks(
+  totalBytes: number,
+  chunkSize: number = UPLOAD_CHUNK_SIZE_BYTES
+): UploadChunkPlan[] {
+  if (!Number.isFinite(totalBytes) || totalBytes <= 0) return [];
+  const safeChunkSize = Math.max(1024, Math.floor(chunkSize));
+  const chunks: UploadChunkPlan[] = [];
+  let offset = 0;
+  let index = 0;
+  while (offset < totalBytes) {
+    const end = Math.min(totalBytes, offset + safeChunkSize);
+    chunks.push({ index, start: offset, end, size: end - offset });
+    offset = end;
+    index += 1;
+  }
+  return chunks;
+}
+
+export function validateMediaFileSize(
+  fileSizeBytes: number,
+  mimeType: string,
+  lang: 'en' | 'bn' = 'en'
+): { valid: boolean; maxBytes: number; reason?: string } {
+  const cleanMime = (mimeType || '').trim().toLowerCase();
+  const maxBytes = cleanMime.startsWith('video/')
+    ? MAX_VIDEO_UPLOAD_BYTES
+    : cleanMime.startsWith('image/')
+    ? MAX_IMAGE_UPLOAD_BYTES
+    : MAX_FILE_UPLOAD_BYTES;
+  if (!Number.isFinite(fileSizeBytes) || fileSizeBytes <= 0) {
+    return {
+      valid: false,
+      maxBytes,
+      reason: lang === 'bn' ? 'নির্বাচিত ফাইলটি খালি।' : 'Selected file is empty.',
+    };
+  }
+  if (fileSizeBytes > maxBytes) {
+    const maxMb = Math.round(maxBytes / (1024 * 1024));
+    return {
+      valid: false,
+      maxBytes,
+      reason:
+        lang === 'bn'
+          ? `ফাইলটি অনেক বড় (সর্বোচ্চ ${maxMb} MB অনুমোদিত)।`
+          : `File is too large (maximum ${maxMb} MB allowed).`,
+    };
+  }
+  return { valid: true, maxBytes };
+}
+
+
 

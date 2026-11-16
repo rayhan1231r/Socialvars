@@ -1,9 +1,12 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { Copy, ImagePlus, Send, Smile, X } from 'lucide-react';
 import { useSocialVerse } from '../context/SocialVerseContext';
 import type { Post } from '../types/social';
 import { formatRelativeTime } from '../utils/validation';
 import { Avatar } from './Avatar';
+import { MentionInput } from './MentionInput';
+import { RichMentionText } from './RichMentionText';
 
 interface CommentsDrawerProps {
   post: Post;
@@ -30,6 +33,17 @@ export function CommentsDrawer({ post, onClose }: CommentsDrawerProps) {
   const [submitting, setSubmitting] = useState(false);
 
   const comments = commentsByPost[post.id] || [];
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        onClose();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [onClose]);
 
   const handleCommentSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -84,7 +98,7 @@ export function CommentsDrawer({ post, onClose }: CommentsDrawerProps) {
     showToast(language === 'bn' ? 'মন্তব্য কপি হয়েছে' : 'Comment copied');
   };
 
-  return (
+  return createPortal(
     <div
       role="dialog"
       aria-modal="true"
@@ -92,10 +106,13 @@ export function CommentsDrawer({ post, onClose }: CommentsDrawerProps) {
       onClick={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}
-      className="fixed inset-0 z-[60] bg-slate-950/65 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4"
+      className="fixed inset-0 z-[80] bg-slate-950/65 backdrop-blur-sm flex items-end justify-center p-0"
     >
-      <div className="liquid-glass rounded-t-3xl sm:rounded-3xl w-full max-w-lg max-h-[85vh] flex flex-col overflow-hidden shadow-2xl">
-        <div className="px-5 py-3.5 border-b border-slate-200/70 dark:border-slate-800/70 flex items-center justify-between">
+      <div className="bg-white/95 dark:bg-slate-900/95 backdrop-blur-2xl border-t border-slate-200/80 dark:border-white/15 rounded-t-3xl rounded-b-none w-full max-w-lg max-h-[86vh] flex flex-col overflow-hidden shadow-2xl">
+        <div className="pt-2.5 pb-1 flex justify-center shrink-0">
+          <div className="w-10 h-1 rounded-full bg-slate-300 dark:bg-white/25" />
+        </div>
+        <div className="px-5 py-2.5 border-b border-slate-200/70 dark:border-slate-800/70 flex items-center justify-between shrink-0">
           <h2 className="text-sm font-bold text-slate-900 dark:text-white">
             {t.feed.comment} ({comments.length})
           </h2>
@@ -143,7 +160,11 @@ export function CommentsDrawer({ post, onClose }: CommentsDrawerProps) {
                         @{c.authorUsername}
                       </button>
                       {!c.stickerUrl && !c.gifUrl && (
-                        <span className="text-slate-700 dark:text-slate-300">{c.text}</span>
+                        <RichMentionText
+                          text={c.text}
+                          className="text-slate-700 dark:text-slate-300"
+                          onMentionClick={onClose}
+                        />
                       )}
                     </p>
                     {(c.stickerUrl || c.gifUrl) && (
@@ -233,7 +254,7 @@ export function CommentsDrawer({ post, onClose }: CommentsDrawerProps) {
           </div>
         )}
 
-        <div className="p-3.5 border-t border-slate-200/70 dark:border-slate-800/70 space-y-2">
+        <div className="p-3.5 border-t border-slate-200/70 dark:border-slate-800/70 space-y-2 shrink-0">
           {replyingTo && (
             <div className="flex items-center justify-between text-xs text-sky-600 dark:text-sky-400">
               <span>Replying to @{replyingTo.username}</span>
@@ -248,7 +269,7 @@ export function CommentsDrawer({ post, onClose }: CommentsDrawerProps) {
               type="button"
               aria-label="Open stickers and GIFs"
               onClick={() => setShowStickerTray((s) => !s)}
-              className={`min-h-[42px] min-w-[42px] rounded-xl flex items-center justify-center ${
+              className={`min-h-[42px] min-w-[42px] rounded-xl flex items-center justify-center shrink-0 ${
                 showStickerTray
                   ? 'bg-sky-600 text-white'
                   : 'liquid-glass-subtle text-slate-600 dark:text-slate-300'
@@ -256,19 +277,20 @@ export function CommentsDrawer({ post, onClose }: CommentsDrawerProps) {
             >
               <Smile className="w-4 h-4" />
             </button>
-            <input
-              type="text"
-              value={commentText}
-              onChange={(e) => setCommentText(e.target.value)}
-              placeholder={t.feed.writeComment}
-              aria-label={t.feed.writeComment}
-              className="flex-1 min-h-[42px] px-3.5 rounded-xl bg-white/80 dark:bg-slate-900/70 border border-slate-200 dark:border-slate-700 text-sm text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-sky-500"
-            />
+            <div className="flex-1 min-w-0">
+              <MentionInput
+                value={commentText}
+                onChange={setCommentText}
+                placeholder={t.feed.writeComment}
+                ariaLabel={t.feed.writeComment}
+                className="w-full min-h-[42px] px-3.5 rounded-xl bg-white/80 dark:bg-slate-900/70 border border-slate-200 dark:border-slate-700 text-sm text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-sky-500"
+              />
+            </div>
             <button
               type="submit"
               disabled={submitting || !commentText.trim()}
               aria-label={t.feed.postButton}
-              className="min-h-[42px] px-4 rounded-xl bg-sky-600 hover:bg-sky-700 disabled:opacity-50 text-white text-xs font-semibold inline-flex items-center gap-1"
+              className="min-h-[42px] px-4 rounded-xl bg-sky-600 hover:bg-sky-700 disabled:opacity-50 text-white text-xs font-semibold inline-flex items-center gap-1 shrink-0"
             >
               <Send className="w-3.5 h-3.5" />
               <span>{t.feed.postButton}</span>
@@ -276,6 +298,7 @@ export function CommentsDrawer({ post, onClose }: CommentsDrawerProps) {
           </form>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }

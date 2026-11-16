@@ -29,6 +29,7 @@ import type {
   CallState,
   Chat,
   ChatMessage,
+  ChatPoll,
   ChatThemeConfig,
   FriendRequest,
   GroupRestrictions,
@@ -54,9 +55,15 @@ import { TRANSLATIONS, type TranslationBundle } from '../utils/i18n';
 import {
   DEFAULT_NOTIFICATION_PREFS,
   MAX_BIO_LENGTH,
+  MAX_JSON_IMAGE_DATA_URL_BYTES,
+  UPLOAD_CHUNK_SIZE_BYTES,
+  isReelPost,
   mapFirebaseAuthError,
   parseAppRouteFromLocation,
+  planUploadChunks,
   shouldNotifyUser,
+  togglePollVote,
+  validateMediaFileSize,
 } from '../utils/validation';
 import { auth, validateFirestoreConnection } from '../firebase';
 import { handleStandaloneApi, isStandaloneAndroidRuntime } from '../utils/standaloneBackend';
@@ -169,6 +176,9 @@ interface SocialVerseContextValue {
   goBack: () => void;
   activeStoryIndex: number | null;
   setActiveStoryIndex: (idx: number | null) => void;
+  activeReelId: string | null;
+  setActiveReelId: (id: string | null) => void;
+  openReelsAt: (postId: string) => void;
   activeHighlightId: string | null;
   setActiveHighlightId: (id: string | null) => void;
   activeChatId: string | null;
@@ -225,8 +235,8 @@ interface SocialVerseContextValue {
   toggleCallCamera: () => void;
 
   // Auth Actions (Email OTP + Username/Email Login + Saved Logins)
-  sendOtp: (email: string, purpose: 'signup' | 'reset' | '2fa') => Promise<{ sentViaSmtp: boolean; devOtpCode?: string }>;
-  verifyOtp: (email: string, code: string, purpose: 'signup' | 'reset' | '2fa') => Promise<string>;
+  sendOtp: (email: string, purpose: 'signup' | 'reset' | '2fa' | 'change_email') => Promise<{ sentViaSmtp: boolean; devOtpCode?: string }>;
+  verifyOtp: (email: string, code: string, purpose: 'signup' | 'reset' | '2fa' | 'change_email') => Promise<string>;
   checkUsernameAvailability: (username: string, excludeUid?: string) => Promise<{ available: boolean; normalized: string; reason?: string }>;
   completeSignupRegistration: (payload: {
     verificationToken: string;
@@ -247,6 +257,7 @@ interface SocialVerseContextValue {
   verifyTwoFactorLogin: (email: string, code: string, saveLogin?: boolean) => Promise<void>;
   loginWithSavedAccount: (entry: SavedLoginEntry) => Promise<void>;
   changePassword: (currentPassword: string, newPassword: string) => Promise<void>;
+  changeEmail: (verificationToken: string, newEmail: string, currentPassword: string) => Promise<void>;
   resetPasswordWithOtp: (
     verificationToken: string,
     email: string,
@@ -271,6 +282,7 @@ interface SocialVerseContextValue {
   toggleSavePost: (postId: string) => Promise<void>;
   sharePost: (postId: string) => Promise<void>;
   shareReelToInbox: (post: Post, targetUserUid: string) => Promise<void>;
+  sharePostToInbox: (post: Post, target: { userUid?: string; chatId?: string }) => Promise<void>;
   addComment: (
     postId: string,
     text: string,
@@ -322,6 +334,8 @@ interface SocialVerseContextValue {
       sharedPostCaption?: string;
       sharedPostThumb?: string;
       sharedPostAuthor?: string;
+      sharedPostMediaType?: MediaType;
+      poll?: { question: string; options: Array<{ id?: string; text: string }>; allowMultiple?: boolean };
       fileName?: string;
       durationMs?: number;
       replyToId?: string;
@@ -331,6 +345,7 @@ interface SocialVerseContextValue {
   ) => Promise<void>;
   editMessage: (chatId: string, messageId: string, text: string) => Promise<void>;
   reactToMessage: (chatId: string, messageId: string, emoji: string) => Promise<void>;
+  voteMessagePoll: (chatId: string, messageId: string, optionId: string) => Promise<void>;
   starMessage: (chatId: string, messageId: string) => Promise<void>;
   pinMessage: (chatId: string, messageId: string | null) => Promise<void>;
   forwardMessage: (chatId: string, messageId: string, targetChatId: string) => Promise<void>;
@@ -431,20 +446,34 @@ export async function compressImageToDataUrl(
         const scale = Math.min(1, maxDim / Math.max(naturalW, naturalH));
         const w = Math.max(1, Math.round(naturalW * scale));
         const h = Math.max(1, Math.round(naturalH * scale));
-        const canvas = document.createElement('canvas');
-        canvas.width = w;
-        canvas.height = h;
-        const ctx = canvas.getContext('2d');
-        if (!ctx) {
+        const encodeCanvas = (targetW: number, targetH: number, q: number): string => {
+          const canvas = document.createElement('canvas');
+          canvas.width = targetW;
+          canvas.height = targetH;
+          const ctx = canvas.getContext('2d');
+          if (!ctx) return '';
+          ctx.drawImage(img, 0, 0, targetW, targetH);
+          let out = canvas.toDataURL('image/webp', q);
+          if (!out.startsWith('data:image/webp')) {
+            out = canvas.toDataURL('image/jpeg', q);
+          }
+          return out;
+        };
+
+        let dataUrl = encodeCanvas(w, h, quality);
+        if (!dataUrl) {
           URL.revokeObjectURL(objectUrl);
           readFileAsDataUrl(file).then(resolve).catch(reject);
           return;
         }
-        ctx.drawImage(img, 0, 0, w, h);
-        // Use webp/jpeg so large PNG screenshots stay compact & fast to upload
-        let dataUrl = canvas.toDataURL('image/webp', quality);
-        if (!dataUrl.startsWith('data:image/webp')) {
-          dataUrl = canvas.toDataURL('image/jpeg', quality);
+        if (dataUrl.length > MAX_JSON_IMAGE_DATA_URL_BYTES) {
+          const reducedScale = Math.min(1, 800 / Math.max(naturalW, naturalH));
+          const rw = Math.max(1, Math.round(naturalW * reducedScale));
+          const rh = Math.max(1, Math.round(naturalH * reducedScale));
+          const smaller = encodeCanvas(rw, rh, 0.66);
+          if (smaller && smaller.length < dataUrl.length) {
+            dataUrl = smaller;
+          }
         }
         URL.revokeObjectURL(objectUrl);
         resolve(dataUrl);
@@ -530,6 +559,7 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
   const [viewedProfileUid, setViewedProfileUid] = useState<string | null>(null);
   const [navHistory, setNavHistory] = useState<NavSnapshot[]>([]);
   const [activeStoryIndex, setActiveStoryIndex] = useState<number | null>(null);
+  const [activeReelId, setActiveReelId] = useState<string | null>(null);
   const [activeHighlightId, setActiveHighlightId] = useState<string | null>(null);
   const [activeChatId, setActiveChatId] = useState<string | null>(null);
   const [mobileThreadOpen, setMobileThreadOpen] = useState<boolean>(false);
@@ -1123,6 +1153,11 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
     setSubscreenState(sub);
   };
 
+  const openReelsAt = (postId: string) => {
+    setActiveReelId(postId);
+    setSubscreenState('reels');
+  };
+
   // WebRTC Call helpers
   const setupPeerConnection = (targetUid: string, callId: string, chatId: string, stream: MediaStream | null) => {
     const pc = new RTCPeerConnection({
@@ -1287,14 +1322,18 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
   };
 
   // Auth Actions
-  const sendOtp = async (email: string, purpose: 'signup' | 'reset' | '2fa') => {
+  const sendOtp = async (email: string, purpose: 'signup' | 'reset' | '2fa' | 'change_email') => {
     return apiFetch<{ sentViaSmtp: boolean; devOtpCode?: string }>('/api/auth/send-otp', {
       method: 'POST',
       body: JSON.stringify({ email, purpose, language }),
     });
   };
 
-  const verifyOtp = async (email: string, code: string, purpose: 'signup' | 'reset' | '2fa') => {
+  const verifyOtp = async (
+    email: string,
+    code: string,
+    purpose: 'signup' | 'reset' | '2fa' | 'change_email'
+  ) => {
     const res = await apiFetch<{ verificationToken: string }>('/api/auth/verify-otp', {
       method: 'POST',
       body: JSON.stringify({ email, code, purpose }),
@@ -1517,6 +1556,27 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
     showToast(language === 'bn' ? 'পাসওয়ার্ড পরিবর্তন হয়েছে' : 'Password updated');
   };
 
+  const changeEmail = async (
+    verificationToken: string,
+    newEmail: string,
+    currentPassword: string
+  ) => {
+    const res = await apiFetch<{ ok: boolean; userPrivate?: UserPrivate }>(
+      '/api/auth/change-email',
+      {
+        method: 'POST',
+        body: JSON.stringify({ verificationToken, newEmail, currentPassword }),
+      }
+    );
+    if (res.userPrivate) {
+      setUserPrivate(res.userPrivate);
+      upsertSavedLogin(currentUser, res.userPrivate.email, sessionToken || '', true);
+    } else {
+      setUserPrivate((prev) => ({ ...prev, email: newEmail.trim().toLowerCase() }));
+    }
+    showToast(t.settings.emailUpdated);
+  };
+
   const resetPasswordWithOtp = async (
     verificationToken: string,
     email: string,
@@ -1679,7 +1739,12 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
                 resolve(parsed as T);
               } else {
                 const errMsg =
-                  (parsed as { error?: string })?.error || `Upload failed (${xhr.status})`;
+                  (parsed as { error?: string })?.error ||
+                  (xhr.status === 413
+                    ? language === 'bn'
+                      ? 'ফাইলের আকার অনেক বড় (413)। অনুগ্রহ করে ফাইলটি আবার নির্বাচন করুন অথবা ছোট ফাইল দিন।'
+                      : 'Upload payload is too large (413). Please re-select the media file or choose a smaller file.'
+                    : `Upload failed (${xhr.status})`);
                 reject(new Error(errMsg));
               }
             };
@@ -1822,36 +1887,57 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
     showToast(language === 'bn' ? 'লিংক কপি হয়েছে' : 'Link copied');
   };
 
-  const shareReelToInbox = async (post: Post, targetUserUid: string) => {
+  const sharePostToInbox = async (
+    post: Post,
+    target: { userUid?: string; chatId?: string }
+  ) => {
     if (!requireAuth()) return;
-    if (!targetUserUid || targetUserUid === currentUser.uid) {
-      showToast(
-        language === 'bn'
-          ? 'শেয়ার করতে অন্য একজন ব্যবহারকারী নির্বাচন করুন'
-          : 'Select another account to share this reel.'
+    let resolvedChatId = target.chatId || null;
+    let targetLabel = '';
+    if (!resolvedChatId && target.userUid) {
+      if (target.userUid === currentUser.uid) {
+        showToast(
+          language === 'bn'
+            ? 'শেয়ার করতে অন্য একজন ব্যবহারকারী নির্বাচন করুন'
+            : 'Select another account to share this post.'
+        );
+        return;
+      }
+      const peer = creators.find((c) => c.uid === target.userUid);
+      targetLabel = `@${peer?.username || 'user'}`;
+      resolvedChatId = await createDirectOrGroupChat(
+        peer?.displayName || 'Chat',
+        [currentUser.uid, target.userUid],
+        'direct'
       );
-      return;
+    } else if (resolvedChatId) {
+      const existingChat = chats.find((c) => c.id === resolvedChatId);
+      targetLabel = existingChat?.title || 'chat';
     }
-    const peer = creators.find((c) => c.uid === targetUserUid);
-    const chatId = await createDirectOrGroupChat(
-      peer?.displayName || 'Chat',
-      [currentUser.uid, targetUserUid],
-      'direct'
-    );
-    if (!chatId) return;
-    await sendMessage(chatId, {
-      type: 'reel_share',
+    if (!resolvedChatId) return;
+    const isReel = isReelPost(post);
+    await sendMessage(resolvedChatId, {
+      type: isReel ? 'reel_share' : 'post_share',
       text: post.caption,
       sharedPostId: post.id,
       sharedPostCaption: post.caption,
       sharedPostThumb: post.coverUrl || post.mediaUrls[0],
       sharedPostAuthor: post.authorUsername,
+      sharedPostMediaType: post.mediaType,
     });
+    await apiFetch(`/api/posts/${post.id}/share`, { method: 'POST' }).catch(() => null);
+    setPosts((prev) =>
+      prev.map((p) => (p.id === post.id ? { ...p, sharesCount: p.sharesCount + 1 } : p))
+    );
     showToast(
       language === 'bn'
-        ? `@${peer?.username || 'user'}-কে রিল পাঠানো হয়েছে`
-        : `Sent reel to @${peer?.username || 'user'}`
+        ? `${targetLabel || 'ইনবক্সে'} পাঠানো হয়েছে`
+        : `Sent to ${targetLabel || 'inbox'}`
     );
+  };
+
+  const shareReelToInbox = async (post: Post, targetUserUid: string) => {
+    await sharePostToInbox(post, { userUid: targetUserUid });
   };
 
   const addComment = async (
@@ -2027,19 +2113,32 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
     const tempId = `temp_m_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
     const nowIso = new Date().toISOString();
     const targetChat = chats.find((c) => c.id === chatId);
+    const optimisticPoll: ChatPoll | undefined = payload.poll
+      ? {
+          question: payload.poll.question,
+          allowMultiple: Boolean(payload.poll.allowMultiple),
+          options: payload.poll.options.map((o, idx) => ({
+            id: o.id || `opt_${idx + 1}`,
+            text: o.text,
+            voterUids: [],
+          })),
+        }
+      : undefined;
     const optimisticMsg: ChatMessage = {
       id: tempId,
       chatId,
       senderId: currentUser.uid,
       senderName: targetChat?.chatNicknames?.[currentUser.uid] || currentUser.displayName,
-      type: payload.type || 'text',
-      text: payload.text,
+      type: optimisticPoll ? 'poll' : payload.type || 'text',
+      text: optimisticPoll ? optimisticPoll.question : payload.text,
       mediaUrl: payload.mediaUrl,
       stickerUrl: payload.stickerUrl,
       sharedPostId: payload.sharedPostId,
       sharedPostCaption: payload.sharedPostCaption,
       sharedPostThumb: payload.sharedPostThumb,
       sharedPostAuthor: payload.sharedPostAuthor,
+      sharedPostMediaType: payload.sharedPostMediaType,
+      poll: optimisticPoll,
       fileName: payload.fileName,
       durationMs: payload.durationMs,
       replyToId: payload.replyToId,
@@ -2053,6 +2152,10 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
     const previewText =
       optimisticMsg.type === 'sticker'
         ? 'Sent a sticker'
+        : optimisticMsg.type === 'poll'
+        ? `Poll: ${optimisticMsg.poll?.question || ''}`
+        : optimisticMsg.type === 'post_share'
+        ? 'Shared a post'
         : optimisticMsg.type === 'reel_share'
         ? 'Shared a reel'
         : optimisticMsg.type === 'voice'
@@ -2154,6 +2257,37 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
           ...prev,
           [chatId]: (prev[chatId] || []).map((m) =>
             m.id === messageId ? { ...m, reactions: res.reactions } : m
+          ),
+        }));
+      }
+    } catch {
+      void refreshState();
+    }
+  };
+
+  const voteMessagePoll = async (chatId: string, messageId: string, optionId: string) => {
+    if (!requireAuth()) return;
+    setMessagesByChat((prev) => ({
+      ...prev,
+      [chatId]: (prev[chatId] || []).map((m) =>
+        m.id === messageId && m.poll
+          ? { ...m, poll: togglePollVote(m.poll, optionId, currentUser.uid) }
+          : m
+      ),
+    }));
+    try {
+      const res = await apiFetch<{ poll?: ChatPoll }>(
+        `/api/chats/${chatId}/messages/${messageId}/vote`,
+        {
+          method: 'POST',
+          body: JSON.stringify({ optionId }),
+        }
+      );
+      if (res?.poll) {
+        setMessagesByChat((prev) => ({
+          ...prev,
+          [chatId]: (prev[chatId] || []).map((m) =>
+            m.id === messageId ? { ...m, poll: res.poll } : m
           ),
         }));
       }
@@ -2849,16 +2983,169 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
     }
   };
 
+  const uploadFileInChunks = useCallback(
+    async (file: Blob, fileName: string, mimeType: string): Promise<string> => {
+      const taskId = `chunk_${Date.now()}`;
+      const label =
+        language === 'bn' ? 'মিডিয়া আপলোড হচ্ছে' : 'Uploading media';
+      const allowUploadAlert = shouldNotifyUser(userPrivate.notificationPrefs, 'upload');
+
+      setUploadTask({
+        id: taskId,
+        kind: mimeType.startsWith('video/') ? 'reel' : 'post',
+        label,
+        progress: 1,
+        status: 'uploading',
+      });
+      if (allowUploadAlert) {
+        void dispatchDeviceNotification(label, '1% · Preparing upload...', 'sv-upload-progress');
+      }
+
+      try {
+        const init = await apiFetch<{
+          uploadId: string;
+          chunkSize: number;
+          expectedChunks: number;
+        }>('/api/uploads/init', {
+          method: 'POST',
+          body: JSON.stringify({
+            fileName,
+            mimeType,
+            totalBytes: file.size,
+          }),
+        });
+
+        const chunks = planUploadChunks(file.size, init.chunkSize || UPLOAD_CHUNK_SIZE_BYTES);
+        for (const chunkPlan of chunks) {
+          const slice = file.slice(chunkPlan.start, chunkPlan.end);
+          await new Promise<void>((resolve, reject) => {
+            const xhr = new XMLHttpRequest();
+            xhr.open('POST', '/api/uploads/chunk', true);
+            xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+            xhr.setRequestHeader('x-upload-id', init.uploadId);
+            xhr.setRequestHeader('x-chunk-index', String(chunkPlan.index));
+            if (sessionToken) {
+              xhr.setRequestHeader('Authorization', `Bearer ${sessionToken}`);
+            }
+
+            xhr.upload.onprogress = (evt) => {
+              if (evt.lengthComputable && file.size > 0) {
+                const uploadedTotal = chunkPlan.start + evt.loaded;
+                const pct = Math.max(
+                  2,
+                  Math.min(94, Math.round((uploadedTotal / file.size) * 94))
+                );
+                setUploadTask((prev) =>
+                  prev && prev.id === taskId ? { ...prev, progress: pct } : prev
+                );
+              }
+            };
+
+            xhr.onload = () => {
+              let parsed: unknown = {};
+              try {
+                parsed = JSON.parse(xhr.responseText || '{}');
+              } catch {
+                parsed = {};
+              }
+              if (xhr.status >= 200 && xhr.status < 300) {
+                resolve();
+              } else {
+                const msg =
+                  (parsed as { error?: string })?.error || `Chunk upload failed (${xhr.status})`;
+                reject(new Error(msg));
+              }
+            };
+            xhr.onerror = () => reject(new Error('Network error while uploading chunk.'));
+            xhr.send(slice);
+          });
+        }
+
+        setUploadTask((prev) =>
+          prev && prev.id === taskId ? { ...prev, progress: 97 } : prev
+        );
+        const completed = await apiFetch<{ url: string }>('/api/uploads/complete', {
+          method: 'POST',
+          body: JSON.stringify({ uploadId: init.uploadId }),
+        });
+
+        setUploadTask((prev) =>
+          prev && prev.id === taskId ? { ...prev, progress: 100, status: 'done' } : prev
+        );
+        window.setTimeout(() => {
+          setUploadTask((prev) => (prev?.id === taskId ? null : prev));
+        }, 1600);
+        return completed.url;
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : 'Upload failed';
+        setUploadTask({
+          id: taskId,
+          kind: mimeType.startsWith('video/') ? 'reel' : 'post',
+          label,
+          progress: 0,
+          status: 'error',
+          error: errMsg,
+        });
+        window.setTimeout(() => {
+          setUploadTask((prev) => (prev?.id === taskId ? null : prev));
+        }, 4200);
+        throw err;
+      }
+    },
+    [apiFetch, dispatchDeviceNotification, language, sessionToken, userPrivate.notificationPrefs]
+  );
+
   const uploadImageDataUrl = async (file: File, maxDim = 960): Promise<string> => {
-    if (file.type.startsWith('video/')) {
+    const mimeType = file.type || 'application/octet-stream';
+    const sizeCheck = validateMediaFileSize(file.size, mimeType, language);
+    if (!sizeCheck.valid) {
+      throw new Error(sizeCheck.reason || 'Selected file exceeds maximum allowed size.');
+    }
+
+    const canChunkToServer = !isStandaloneAndroidRuntime() && Boolean(sessionToken);
+    const shouldStreamDirectly =
+      mimeType.startsWith('video/') ||
+      mimeType.startsWith('audio/') ||
+      !mimeType.startsWith('image/') ||
+      (mimeType === 'image/gif' && file.size > 400_000);
+
+    if (shouldStreamDirectly) {
+      if (canChunkToServer) {
+        return uploadFileInChunks(file, file.name || 'media', mimeType);
+      }
+      if (file.size > 10 * 1024 * 1024) {
+        throw new Error(
+          language === 'bn'
+            ? 'অফলাইন মোডে ১০ MB-এর বড় ফাইল আপলোড করা যায় না।'
+            : 'Files larger than 10 MB require an active server connection.'
+        );
+      }
       return readFileAsDataUrl(file);
     }
-    return compressImageToDataUrl(file, maxDim, 0.82);
+
+    const dataUrl = await compressImageToDataUrl(file, maxDim, 0.82);
+    if (dataUrl.length > MAX_JSON_IMAGE_DATA_URL_BYTES && canChunkToServer) {
+      return uploadFileInChunks(file, file.name || 'image', mimeType);
+    }
+    return dataUrl;
   };
 
   const uploadProfileImage = async (file: File, kind: 'avatar' | 'cover'): Promise<string> => {
+    const mimeType = file.type || 'image/jpeg';
+    const sizeCheck = validateMediaFileSize(file.size, mimeType, language);
+    if (!sizeCheck.valid) {
+      throw new Error(sizeCheck.reason || 'Selected image is too large.');
+    }
     const maxDim = kind === 'avatar' ? 480 : 1200;
-    return compressImageToDataUrl(file, maxDim, 0.82);
+    const dataUrl = await compressImageToDataUrl(file, maxDim, 0.82);
+    if (
+      dataUrl.length > MAX_JSON_IMAGE_DATA_URL_BYTES &&
+      !isStandaloneAndroidRuntime() &&
+      sessionToken
+    ) {
+      return uploadFileInChunks(file, file.name || `${kind}.jpg`, mimeType);
+    }
+    return dataUrl;
   };
 
   const updatePrivateSettings = async (updates: Partial<UserPrivate>) => {
@@ -3036,6 +3323,9 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
         goBack,
         activeStoryIndex,
         setActiveStoryIndex,
+        activeReelId,
+        setActiveReelId,
+        openReelsAt,
         activeHighlightId,
         setActiveHighlightId,
         activeChatId,
@@ -3095,6 +3385,7 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
         verifyTwoFactorLogin,
         loginWithSavedAccount,
         changePassword,
+        changeEmail,
         resetPasswordWithOtp,
         deactivateAccount,
         logout,
@@ -3107,6 +3398,7 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
         toggleSavePost,
         sharePost,
         shareReelToInbox,
+        sharePostToInbox,
         addComment,
         createStory,
         reactToStory,
@@ -3127,6 +3419,7 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
         sendMessage,
         editMessage,
         reactToMessage,
+        voteMessagePoll,
         starMessage,
         pinMessage,
         forwardMessage,

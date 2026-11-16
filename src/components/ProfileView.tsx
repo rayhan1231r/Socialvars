@@ -48,14 +48,19 @@ import {
   formatCompactCount,
   formatRelativeTime,
   getMaskedUserDisplay,
+  isReelPost,
+  isStandardPost,
   isValidDateOfBirth,
   isValidHighlightTitle,
   isValidUsername,
+  isVideoMediaUrl,
   normalizeUsername,
 } from '../utils/validation';
 import { AuthPanel } from './AuthFlow';
 import { Avatar } from './Avatar';
+import { MentionInput } from './MentionInput';
 import { PostCard } from './PostCard';
+import { RichMentionText } from './RichMentionText';
 
 const INTEREST_OPTIONS = [
   'Architecture',
@@ -111,6 +116,7 @@ export function ProfileView() {
     removeFollower,
     createDirectOrGroupChat,
     setActiveTab,
+    openReelsAt,
     setSubscreen,
     subscreen,
     updateProfile,
@@ -262,12 +268,8 @@ export function ProfileView() {
   );
 
   const allUserPosts = posts.filter((p) => p.authorId === profileUser.uid);
-  const userStandardPosts = allUserPosts.filter(
-    (p) => p.mediaType !== 'reel' && p.mediaType !== 'video'
-  );
-  const userReels = allUserPosts.filter(
-    (p) => p.mediaType === 'reel' || p.mediaType === 'video'
-  );
+  const userStandardPosts = allUserPosts.filter(isStandardPost);
+  const userReels = allUserPosts.filter(isReelPost);
   const savedPosts = posts.filter((p) => p.savedByMe);
   const pendingRequests = friendRequests.filter(
     (r) => r.toUid === currentUser.uid && r.status === 'pending'
@@ -864,7 +866,7 @@ export function ProfileView() {
 
             {!masked.isDeactivatedView && profileUser.bio && (
               <p className="text-sm text-slate-700 dark:text-slate-300 leading-relaxed whitespace-pre-line">
-                {profileUser.bio}
+                <RichMentionText text={profileUser.bio} />
               </p>
             )}
 
@@ -1109,16 +1111,26 @@ export function ProfileView() {
                     <button
                       key={reel.id}
                       type="button"
-                      onClick={() => setActiveTab('reels')}
+                      onClick={() => openReelsAt(reel.id)}
                       className="group relative aspect-[9/16] rounded-2xl overflow-hidden bg-slate-900 border border-white/10 text-left"
                     >
                       {thumb ? (
-                        <img
-                          src={thumb}
-                          alt={reel.caption || 'Reel thumbnail'}
-                          referrerPolicy="no-referrer"
-                          className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
-                        />
+                        isVideoMediaUrl(thumb) ? (
+                          <video
+                            src={thumb}
+                            muted
+                            playsInline
+                            preload="metadata"
+                            className="w-full h-full object-cover"
+                          />
+                        ) : (
+                          <img
+                            src={thumb}
+                            alt={reel.caption || 'Reel thumbnail'}
+                            referrerPolicy="no-referrer"
+                            className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+                          />
+                        )
                       ) : (
                         <div className="w-full h-full flex items-center justify-center bg-gradient-to-br from-sky-700 to-indigo-900 text-white/80">
                           <Clapperboard className="w-8 h-8" />
@@ -1559,12 +1571,13 @@ export function ProfileView() {
                     {editBio.length} / {MAX_BIO_LENGTH}
                   </span>
                 </div>
-                <textarea
+                <MentionInput
                   id="edit-bio"
+                  multiline
                   rows={3}
                   maxLength={MAX_BIO_LENGTH}
                   value={editBio}
-                  onChange={(e) => setEditBio(e.target.value.slice(0, MAX_BIO_LENGTH))}
+                  onChange={(val) => setEditBio(val.slice(0, MAX_BIO_LENGTH))}
                   className="w-full p-3.5 rounded-xl bg-white/80 dark:bg-slate-900/70 border border-slate-200 dark:border-slate-700 text-sm text-slate-900 dark:text-white"
                 />
               </div>

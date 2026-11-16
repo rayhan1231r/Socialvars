@@ -88,6 +88,8 @@ export interface TranslationBundle {
     swipeCreateHint: string;
     refreshFeed: string;
     loadingFeed: string;
+    reelsStripTitle: string;
+    viewAllReels: string;
   };
   create: {
     newPost: string;
@@ -200,6 +202,16 @@ export interface TranslationBundle {
     followersAudience: string;
     noteCloseFriendsHint: string;
     manageCloseFriends: string;
+    createPoll: string;
+    pollQuestion: string;
+    pollOption: string;
+    addPollOption: string;
+    pollVotes: string;
+    sendToInbox: string;
+    sharedPostLabel: string;
+    voiceSpeed: string;
+    group: string;
+    send: string;
   };
   profile: {
     posts: string;
@@ -306,6 +318,11 @@ export interface TranslationBundle {
     notifyAnnouncements: string;
     testNotification: string;
     closeFriendsList: string;
+    changeEmail: string;
+    currentVerifiedEmail: string;
+    newEmailPlaceholder: string;
+    emailUpdated: string;
+    confirmWithPassword: string;
   };
 }
 
@@ -372,7 +389,7 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationBundle> = {
       continueWithGoogle: 'Continue with Google',
       orDivider: 'or with email & password',
       protectedRouteTitle: 'Sign in required',
-      protectedRouteDesc: 'Authenticate with Google or your SocialVerse account to open your inbox, profile, post creator, or settings.',
+      protectedRouteDesc: 'Sign in with your SocialVerse email or username to open your inbox, profile, post creator, or settings.',
       backToPublicFeed: 'Back to Home Feed',
       verifyingSession: 'Verifying Firebase session...',
       signingInGoogle: 'Connecting Google account...',
@@ -398,6 +415,8 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationBundle> = {
       swipeCreateHint: 'Swipe left or tap + to create a Post, Story, or Reel',
       refreshFeed: 'Refresh',
       loadingFeed: 'Loading feed...',
+      reelsStripTitle: 'Suggested Reels',
+      viewAllReels: 'Watch Reels',
     },
     create: {
       newPost: 'New Post',
@@ -510,6 +529,16 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationBundle> = {
       followersAudience: 'Followers',
       noteCloseFriendsHint: 'Visible only to your Close Friends for 24 hours',
       manageCloseFriends: 'Edit Close Friends',
+      createPoll: 'Create Poll',
+      pollQuestion: 'Ask a question...',
+      pollOption: 'Option',
+      addPollOption: 'Add option',
+      pollVotes: 'votes',
+      sendToInbox: 'Send to Inbox',
+      sharedPostLabel: 'Post by',
+      voiceSpeed: 'Playback speed',
+      group: 'Group',
+      send: 'Send',
     },
     profile: {
       posts: 'Posts',
@@ -616,6 +645,11 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationBundle> = {
       notifyAnnouncements: 'Broadcasts & Announcements',
       testNotification: 'Test Device Notification',
       closeFriendsList: 'Close Friends List',
+      changeEmail: 'Change Verified Gmail / Email',
+      currentVerifiedEmail: 'Current verified email',
+      newEmailPlaceholder: 'Enter new permanent Gmail or email',
+      emailUpdated: 'Your verified email address has been updated.',
+      confirmWithPassword: 'Confirm current password',
     },
   },
   bn: {
@@ -680,7 +714,7 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationBundle> = {
       continueWithGoogle: 'গুগল দিয়ে চালিয়ে যান',
       orDivider: 'অথবা ইমেইল ও পাসওয়ার্ড দিয়ে',
       protectedRouteTitle: 'সাইন ইন প্রয়োজন',
-      protectedRouteDesc: 'ইনবক্স, প্রোফাইল, নতুন পোস্ট তৈরি ও সেটিংসের সুরক্ষিত রুট ব্যবহার করতে গুগল বা আপনার সোশ্যালভার্স অ্যাকাউন্টে সাইন ইন করুন।',
+      protectedRouteDesc: 'ইনবক্স, প্রোফাইল, নতুন পোস্ট তৈরি ও সেটিংসের সুরক্ষিত রুট ব্যবহার করতে আপনার সোশ্যালভার্স অ্যাকাউন্টে সাইন ইন করুন।',
       backToPublicFeed: 'হোম ফিডে ফিরে যান',
       verifyingSession: 'ফায়ারবেস সেশন যাচাই হচ্ছে...',
       signingInGoogle: 'গুগল অ্যাকাউন্ট সংযুক্ত হচ্ছে...',
@@ -706,6 +740,8 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationBundle> = {
       swipeCreateHint: 'বামে স্লাইড করুন বা + চাপুন পোস্ট, স্টোরি বা রিল আপলোড করতে',
       refreshFeed: 'রিফ্রেশ',
       loadingFeed: 'ফিড লোড হচ্ছে...',
+      reelsStripTitle: 'রিলস দেখুন',
+      viewAllReels: 'সব রিলস',
     },
     create: {
       newPost: 'নতুন পোস্ট',
@@ -818,6 +854,16 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationBundle> = {
       followersAudience: 'ফলোয়ার',
       noteCloseFriendsHint: '২৪ ঘণ্টার জন্য শুধু আপনার ক্লোজ ফ্রেন্ডস দেখতে পাবে',
       manageCloseFriends: 'ক্লোজ ফ্রেন্ডস এডিট',
+      createPoll: 'পোল তৈরি করুন',
+      pollQuestion: 'প্রশ্ন লিখুন...',
+      pollOption: 'অপশন',
+      addPollOption: 'আরও অপশন যোগ করুন',
+      pollVotes: 'ভোট',
+      sendToInbox: 'ইনবক্সে পাঠান',
+      sharedPostLabel: 'পোস্ট করেছেন',
+      voiceSpeed: 'প্লেব্যাক স্পিড',
+      group: 'গ্রুপ',
+      send: 'পাঠান',
     },
     profile: {
       posts: 'পোস্ট',
@@ -924,6 +970,11 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationBundle> = {
       notifyAnnouncements: 'ব্রডকাস্ট ও ঘোষণা',
       testNotification: 'টেস্ট নোটিফিকেশন পাঠান',
       closeFriendsList: 'ক্লোজ ফ্রেন্ডস তালিকা',
+      changeEmail: 'ভেরিফায়েড জিমেইল / ইমেইল পরিবর্তন',
+      currentVerifiedEmail: 'বর্তমান ভেরিফায়েড ইমেইল',
+      newEmailPlaceholder: 'নতুন স্থায়ী জিমেইল বা ইমেইল লিখুন',
+      emailUpdated: 'আপনার ভেরিফায়েড ইমেইল ঠিকানা সফলভাবে পরিবর্তন হয়েছে।',
+      confirmWithPassword: 'বর্তমান পাসওয়ার্ড নিশ্চিত করুন',
     },
   },
 };

@@ -12,6 +12,7 @@ import {
   KeyRound,
   Lock,
   LogOut,
+  Mail,
   Megaphone,
   Moon,
   PauseCircle,
@@ -410,6 +411,9 @@ export function SettingsPage() {
     creators,
     unblockUser,
     changePassword,
+    sendOtp,
+    verifyOtp,
+    changeEmail,
     deactivateAccount,
     logout,
     deleteAccount,
@@ -426,6 +430,13 @@ export function SettingsPage() {
   const [newPass, setNewPass] = useState('');
   const [passMsg, setPassMsg] = useState<string | null>(null);
   const [passErr, setPassErr] = useState<string | null>(null);
+  const [newEmailInput, setNewEmailInput] = useState('');
+  const [emailCurPass, setEmailCurPass] = useState('');
+  const [emailOtpCode, setEmailOtpCode] = useState('');
+  const [emailOtpSent, setEmailOtpSent] = useState(false);
+  const [emailLoading, setEmailLoading] = useState(false);
+  const [emailMsg, setEmailMsg] = useState<string | null>(null);
+  const [emailErr, setEmailErr] = useState<string | null>(null);
   const [deactivateMode, setDeactivateMode] = useState<'7' | 'custom'>('7');
   const [customDeactivateDays, setCustomDeactivateDays] = useState('14');
   const [confirmDeactivate, setConfirmDeactivate] = useState(false);
@@ -460,6 +471,57 @@ export function SettingsPage() {
       setPassMsg(language === 'bn' ? 'পাসওয়ার্ড আপডেট হয়েছে।' : 'Password changed successfully.');
     } catch (err) {
       setPassErr(err instanceof Error ? err.message : 'Could not update password.');
+    }
+  };
+
+  const handleSendChangeEmailOtp = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setEmailMsg(null);
+    setEmailErr(null);
+    const clean = newEmailInput.trim().toLowerCase();
+    if (!clean) return;
+    setEmailLoading(true);
+    try {
+      const res = await sendOtp(clean, 'change_email');
+      setEmailOtpSent(true);
+      if (!res.sentViaSmtp && res.devOtpCode) {
+        setEmailMsg(
+          language === 'bn'
+            ? `স্যান্ডবক্স কোড: ${res.devOtpCode}`
+            : `Sandbox preview OTP: ${res.devOtpCode}`
+        );
+      } else {
+        setEmailMsg(
+          language === 'bn'
+            ? `${clean}-এ ৬-ডিজিটের ওটিপি পাঠানো হয়েছে।`
+            : `6-digit verification code sent to ${clean}.`
+        );
+      }
+    } catch (err) {
+      setEmailErr(err instanceof Error ? err.message : 'Could not send verification code.');
+    } finally {
+      setEmailLoading(false);
+    }
+  };
+
+  const handleVerifyAndChangeEmail = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setEmailMsg(null);
+    setEmailErr(null);
+    const clean = newEmailInput.trim().toLowerCase();
+    setEmailLoading(true);
+    try {
+      const token = await verifyOtp(clean, emailOtpCode.trim(), 'change_email');
+      await changeEmail(token, clean, emailCurPass);
+      setNewEmailInput('');
+      setEmailCurPass('');
+      setEmailOtpCode('');
+      setEmailOtpSent(false);
+      setEmailMsg(t.settings.emailUpdated);
+    } catch (err) {
+      setEmailErr(err instanceof Error ? err.message : 'Could not update email address.');
+    } finally {
+      setEmailLoading(false);
     }
   };
 
@@ -935,40 +997,127 @@ export function SettingsPage() {
               </label>
 
               {isAuthenticated && (
-                <form
-                  onSubmit={handlePasswordSubmit}
-                  className="p-4 rounded-2xl liquid-glass-subtle space-y-3"
-                >
-                  <h3 className="text-xs font-bold text-slate-900 dark:text-white flex items-center gap-1.5">
-                    <KeyRound className="w-4 h-4 text-sky-600" />
-                    <span>{t.settings.changePassword}</span>
-                  </h3>
-                  <input
-                    type="password"
-                    required
-                    value={curPass}
-                    onChange={(e) => setCurPass(e.target.value)}
-                    placeholder={language === 'bn' ? 'বর্তমান পাসওয়ার্ড' : 'Current password'}
-                    className="w-full min-h-[42px] px-3 rounded-xl bg-white/80 dark:bg-slate-900/70 border border-slate-200 dark:border-white/10 text-sm text-slate-900 dark:text-white"
-                  />
-                  <input
-                    type="password"
-                    required
-                    minLength={6}
-                    value={newPass}
-                    onChange={(e) => setNewPass(e.target.value)}
-                    placeholder={language === 'bn' ? 'নতুন পাসওয়ার্ড (কমপক্ষে ৬ অক্ষর)' : 'New password (min 6 chars)'}
-                    className="w-full min-h-[42px] px-3 rounded-xl bg-white/80 dark:bg-slate-900/70 border border-slate-200 dark:border-white/10 text-sm text-slate-900 dark:text-white"
-                  />
-                  {passErr && <p className="text-xs text-rose-600 font-medium">{passErr}</p>}
-                  {passMsg && <p className="text-xs text-emerald-600 font-medium">{passMsg}</p>}
-                  <button
-                    type="submit"
-                    className="min-h-[40px] px-4 rounded-xl bg-sky-600 text-white text-xs font-semibold"
+                <>
+                  <div className="p-4 rounded-2xl liquid-glass-subtle space-y-3">
+                    <div className="flex items-center justify-between gap-2">
+                      <h3 className="text-xs font-bold text-slate-900 dark:text-white flex items-center gap-1.5">
+                        <Mail className="w-4 h-4 text-sky-600" />
+                        <span>{t.settings.changeEmail}</span>
+                      </h3>
+                    </div>
+                    <div className="p-3 rounded-xl bg-white/70 dark:bg-slate-900/60 border border-slate-200/70 dark:border-white/10">
+                      <p className="text-[11px] font-medium text-slate-500 dark:text-slate-400">
+                        {t.settings.currentVerifiedEmail}
+                      </p>
+                      <p className="text-sm font-semibold text-slate-900 dark:text-white truncate mt-0.5">
+                        {userPrivate.email || '—'}
+                      </p>
+                    </div>
+
+                    {!emailOtpSent ? (
+                      <form onSubmit={handleSendChangeEmailOtp} className="space-y-2.5">
+                        <input
+                          type="email"
+                          required
+                          value={newEmailInput}
+                          onChange={(e) => setNewEmailInput(e.target.value)}
+                          placeholder={t.settings.newEmailPlaceholder}
+                          aria-label={t.settings.newEmailPlaceholder}
+                          className="w-full min-h-[42px] px-3 rounded-xl bg-white/80 dark:bg-slate-900/70 border border-slate-200 dark:border-white/10 text-sm text-slate-900 dark:text-white"
+                        />
+                        {emailErr && <p className="text-xs text-rose-600 font-medium">{emailErr}</p>}
+                        {emailMsg && <p className="text-xs text-emerald-600 font-medium">{emailMsg}</p>}
+                        <button
+                          type="submit"
+                          disabled={emailLoading || !newEmailInput.trim()}
+                          className="min-h-[40px] px-4 rounded-xl bg-sky-600 hover:bg-sky-700 disabled:opacity-50 text-white text-xs font-semibold"
+                        >
+                          {emailLoading ? '...' : t.auth.sendCode}
+                        </button>
+                      </form>
+                    ) : (
+                      <form onSubmit={handleVerifyAndChangeEmail} className="space-y-2.5">
+                        <input
+                          type="text"
+                          inputMode="numeric"
+                          required
+                          maxLength={6}
+                          value={emailOtpCode}
+                          onChange={(e) => setEmailOtpCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                          placeholder={t.auth.otpPlaceholder}
+                          aria-label={t.auth.otpPlaceholder}
+                          className="w-full min-h-[42px] px-3 rounded-xl bg-white/80 dark:bg-slate-900/70 border border-slate-200 dark:border-white/10 text-sm font-mono-num tracking-widest text-slate-900 dark:text-white"
+                        />
+                        <input
+                          type="password"
+                          required
+                          value={emailCurPass}
+                          onChange={(e) => setEmailCurPass(e.target.value)}
+                          placeholder={t.settings.confirmWithPassword}
+                          aria-label={t.settings.confirmWithPassword}
+                          className="w-full min-h-[42px] px-3 rounded-xl bg-white/80 dark:bg-slate-900/70 border border-slate-200 dark:border-white/10 text-sm text-slate-900 dark:text-white"
+                        />
+                        {emailErr && <p className="text-xs text-rose-600 font-medium">{emailErr}</p>}
+                        {emailMsg && <p className="text-xs text-emerald-600 font-medium">{emailMsg}</p>}
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="submit"
+                            disabled={emailLoading || emailOtpCode.length < 6 || !emailCurPass}
+                            className="min-h-[40px] px-4 rounded-xl bg-sky-600 hover:bg-sky-700 disabled:opacity-50 text-white text-xs font-semibold"
+                          >
+                            {emailLoading ? '...' : t.auth.verifyCode}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setEmailOtpSent(false);
+                              setEmailOtpCode('');
+                              setEmailErr(null);
+                            }}
+                            className="min-h-[40px] px-3 rounded-xl liquid-glass-btn text-xs font-semibold text-slate-700 dark:text-slate-200"
+                          >
+                            {language === 'bn' ? 'বাতিল' : 'Cancel'}
+                          </button>
+                        </div>
+                      </form>
+                    )}
+                  </div>
+
+                  <form
+                    onSubmit={handlePasswordSubmit}
+                    className="p-4 rounded-2xl liquid-glass-subtle space-y-3"
                   >
-                    {t.settings.changePassword}
-                  </button>
-                </form>
+                    <h3 className="text-xs font-bold text-slate-900 dark:text-white flex items-center gap-1.5">
+                      <KeyRound className="w-4 h-4 text-sky-600" />
+                      <span>{t.settings.changePassword}</span>
+                    </h3>
+                    <input
+                      type="password"
+                      required
+                      value={curPass}
+                      onChange={(e) => setCurPass(e.target.value)}
+                      placeholder={language === 'bn' ? 'বর্তমান পাসওয়ার্ড' : 'Current password'}
+                      className="w-full min-h-[42px] px-3 rounded-xl bg-white/80 dark:bg-slate-900/70 border border-slate-200 dark:border-white/10 text-sm text-slate-900 dark:text-white"
+                    />
+                    <input
+                      type="password"
+                      required
+                      minLength={6}
+                      value={newPass}
+                      onChange={(e) => setNewPass(e.target.value)}
+                      placeholder={language === 'bn' ? 'নতুন পাসওয়ার্ড (কমপক্ষে ৬ অক্ষর)' : 'New password (min 6 chars)'}
+                      className="w-full min-h-[42px] px-3 rounded-xl bg-white/80 dark:bg-slate-900/70 border border-slate-200 dark:border-white/10 text-sm text-slate-900 dark:text-white"
+                    />
+                    {passErr && <p className="text-xs text-rose-600 font-medium">{passErr}</p>}
+                    {passMsg && <p className="text-xs text-emerald-600 font-medium">{passMsg}</p>}
+                    <button
+                      type="submit"
+                      className="min-h-[40px] px-4 rounded-xl bg-sky-600 text-white text-xs font-semibold"
+                    >
+                      {t.settings.changePassword}
+                    </button>
+                  </form>
+                </>
               )}
             </div>
           )}

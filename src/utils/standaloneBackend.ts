@@ -5,6 +5,7 @@ import type {
   BroadcastChannel,
   Chat,
   ChatMessage,
+  ChatPoll,
   FriendRequest,
   NicknameFontStyle,
   NoteItem,
@@ -29,6 +30,7 @@ import {
   canOpenBroadcastChannel,
   canonicalizeEmail,
   extractHashtags,
+  extractMentions,
   isDisposableEmail,
   isValidBio,
   isValidCommentText,
@@ -40,6 +42,7 @@ import {
   isValidUsername,
   normalizeUsername,
   requiresFollowApproval,
+  togglePollVote,
   validateSignupEmail,
 } from './validation';
 
@@ -1219,6 +1222,24 @@ function pushNotification(
   return notif;
 }
 
+function emitMentionNotificationsStandalone(
+  store: StandaloneStore,
+  actor: UserPublic,
+  text: string,
+  summaryPrefix: string,
+  targetId?: string
+): void {
+  const handles = extractMentions(text);
+  if (!handles.length) return;
+  for (const handle of handles) {
+    const targetUser = Object.values(store.usersPublic).find(
+      (u) => !u.isDeactivated && u.username.toLowerCase() === handle.toLowerCase()
+    );
+    if (!targetUser || targetUser.uid === actor.uid) continue;
+    pushNotification(store, targetUser.uid, actor, 'mention', summaryPrefix, targetId);
+  }
+}
+
 function aiSuggestions(
   task: string,
   contextText: string,
@@ -1696,22 +1717,40 @@ export async function handleStandaloneApi(
   // 3. Send OTP
   if (method === 'POST' && pathname === '/api/auth/send-otp') {
     const emailRaw = String(body.email || '').trim().toLowerCase();
-    const purpose = String(body.purpose || 'signup') as 'signup' | 'reset' | '2fa';
+    const purpose = String(body.purpose || 'signup') as 'signup' | 'reset' | '2fa' | 'change_email';
     const lang = (body.language === 'bn' ? 'bn' : 'en') as AppLanguage;
 
     if (!isValidEmailFormat(emailRaw)) {
       return fail(lang === 'bn' ? 'সঠিক ইমেইল দিন' : 'Please enter a valid email address.', 400);
     }
 
+    if (purpose === 'change_email' && !uid) {
+      return fail('Authentication required.', 401);
+    }
+
     let cleanEmail = emailRaw;
     let canonical = canonicalizeEmail(cleanEmail);
-    if (purpose === 'signup') {
+    if (purpose === 'signup' || purpose === 'change_email') {
       const check = validateSignupEmail(emailRaw, lang);
       if (!check.valid) {
-        return fail(check.reason || 'Invalid signup email', 400);
+        return fail(check.reason || 'Invalid email address.', 400);
       }
       cleanEmail = check.cleanEmail;
       canonical = check.canonicalEmail;
+    }
+
+    if (purpose === 'change_email' && uid) {
+      const currentPriv = store.usersPrivate[uid];
+      const currentAcc = store.accounts[uid];
+      const existingCurEmail = (currentPriv?.email || currentAcc?.email || '').trim().toLowerCase();
+      if (existingCurEmail && canonicalizeEmail(existingCurEmail) === canonical) {
+        return fail(
+          lang === 'bn'
+            ? 'নতুন ইমেইলটি বর্তমান ইমেইল থেকে আলাদা হতে হবে।'
+            : 'New email must be different from your current email.',
+          400
+        );
+      }
     }
 
     if (useRemote) {
@@ -1725,11 +1764,11 @@ export async function handleStandaloneApi(
       ]);
 
       const remoteExists = Boolean((remoteClaim && remoteClaim.uid) || authUri.data?.registered);
-      if (purpose === 'signup' && remoteExists) {
+      if ((purpose === 'signup' || purpose === 'change_email') && remoteExists) {
         return fail(
           lang === 'bn'
-            ? 'এই ইমেইলটি ইতিমধ্যেই ভেরিফাই করা এবং এটি দিয়ে একটি অ্যাকাউন্ট খোলা আছে — অনুগ্রহ করে সাইন ইন করুন অথবা নতুন ইমেইল ব্যবহার করুন।'
-            : 'This email is already verified and registered to an account — please sign in or use a different email.',
+            ? 'এই ইমেইলটি ইতিমধ্যেই ভেরিফাই করা এবং এটি দিয়ে একটি অ্যাকাউন্ট খোলা আছে — অনুগ্রহ করে অন্য ইমেইল ব্যবহার করুন।'
+            : 'This email is already verified and registered to an account — please use a different email.',
           409,
           { code: 'EMAIL_ALREADY_EXISTS', alreadyVerified: true, existingEmail: cleanEmail }
         );
@@ -1764,9 +1803,12 @@ export async function handleStandaloneApi(
           );
         }
       }
-    } else if (purpose === 'signup') {
+    } else if (purpose === 'signup' || purpose === 'change_email') {
       const exists = Object.values(store.accounts).some(
-        (a) => !a.deleted && (a.email === cleanEmail || a.canonicalEmail === canonical)
+        (a) =>
+          !a.deleted &&
+          (purpose === 'signup' || a.uid !== uid) &&
+          (a.email === cleanEmail || a.canonicalEmail === canonical)
       );
       if (exists) {
         return fail(
@@ -1970,14 +2012,14 @@ export async function handleStandaloneApi(
 
     if (useRemote) {
       let targetEmail: string | null = null;
-      const isEmailLogin = rawIdentifier.includes('@') && !rawIdentifier.startsWith('@');
+      const isEmailLogin = rawIdentifier.indexOf('@') > 0;
       if (isEmailLogin) {
         targetEmail = rawIdentifier;
       } else {
-        const normUser = normalizeUsername(rawIdentifier);
+        const normUser = normalizeUsername(rawIdentifier.replace(/^@+/, ''));
         const usernameMap = loadUsernameEmailMap();
         const localAcct = Object.values(store.accounts).find(
-          (a) => !a.deleted && a.username === normUser && a.email
+          (a) => !a.deleted && a.username.toLowerCase() === normUser && a.email
         );
         targetEmail =
           usernameMap[normUser] ||
@@ -2000,10 +2042,19 @@ export async function handleStandaloneApi(
         if (!targetEmail) {
           const claimDoc = await firestoreGetDoc(`usernames/${normUser}`);
           if (claimDoc && claimDoc.uid) {
-            return fail(
-              `Account @${normUser} found! Please sign in with your registered email address once on this device (after that, @${normUser} login will work automatically).`,
-              400
-            );
+            const claimUid = String(claimDoc.uid);
+            const fallbackEmail =
+              store.accounts[claimUid]?.email ||
+              store.usersPrivate[claimUid]?.email ||
+              '';
+            if (fallbackEmail) {
+              targetEmail = fallbackEmail.trim().toLowerCase();
+            } else {
+              return fail(
+                `Account @${normUser} found! Please sign in with your registered email address once on this device (after that, @${normUser} login will work automatically).`,
+                400
+              );
+            }
           }
         }
       }
@@ -2037,6 +2088,10 @@ export async function handleStandaloneApi(
         expiresInSec: Number(signInRes.data.expiresIn || 3600),
       });
 
+      if (session.userPublic.username) {
+        recordUsernameEmail(session.userPublic.username, session.userPrivate.email);
+      }
+
       if (session.userPublic.isDeactivated) {
         session.userPublic.isDeactivated = false;
         session.userPublic.deactivatedUntil = null;
@@ -2063,13 +2118,14 @@ export async function handleStandaloneApi(
     }
 
     // Offline unit test login
-    const normUser = normalizeUsername(rawIdentifier);
+    const stripped = rawIdentifier.replace(/^@+/, '');
+    const normUser = normalizeUsername(stripped);
     const acc = Object.values(store.accounts).find(
       (a) =>
         !a.deleted &&
         (a.email === rawIdentifier ||
           a.canonicalEmail === canonicalizeEmail(rawIdentifier) ||
-          a.username === normUser)
+          a.username.toLowerCase() === normUser)
     );
     if (!acc || acc.password !== password) {
       return fail('Invalid email/username or password.', 401);
@@ -2331,6 +2387,96 @@ export async function handleStandaloneApi(
     return ok({ ok: true });
   }
 
+  if (method === 'POST' && pathname === '/api/auth/change-email') {
+    const verificationToken = String(body.verificationToken || '');
+    const newEmailRaw = String(body.newEmail || '').trim().toLowerCase();
+    const currentPassword = String(body.currentPassword || '');
+    const ver = store.verifications[verificationToken];
+    if (!ver || ver.purpose !== 'change_email' || ver.expiresAt < Date.now()) {
+      return fail('Email verification expired. Please request a new OTP code.', 400);
+    }
+    const check = validateSignupEmail(newEmailRaw, currentPrivate.language);
+    if (!check.valid || ver.email !== check.cleanEmail) {
+      return fail('Verified email does not match the requested new email.', 400);
+    }
+    const oldEmail = currentPrivate.email || store.accounts[uid]?.email || '';
+    const oldCanonical = oldEmail ? canonicalizeEmail(oldEmail) : '';
+
+    if (useRemote && userIdToken) {
+      if (oldEmail && currentPassword) {
+        const reauth = await firebaseAuthPost('accounts:signInWithPassword', {
+          email: oldEmail,
+          password: currentPassword,
+          returnSecureToken: false,
+        });
+        if (!reauth.ok) {
+          return fail('Current password is incorrect.', 400);
+        }
+      }
+      const updateRes = await firebaseAuthPost('accounts:update', {
+        idToken: userIdToken,
+        email: check.cleanEmail,
+        returnSecureToken: false,
+      });
+      if (!updateRes.ok) {
+        return fail('Could not update authentication email. Try signing in again.', 400);
+      }
+      const newHash = sha256Hex(check.canonicalEmail);
+      const writes: Array<Record<string, unknown>> = [
+        {
+          update: {
+            name: firestoreDocPathName(`users/${uid}/private/info`),
+            fields: toFirestoreFields({ email: check.cleanEmail }),
+          },
+          updateMask: { fieldPaths: ['email'] },
+          updateTransforms: [{ fieldPath: 'updatedAt', setToServerValue: 'REQUEST_TIME' }],
+        },
+        {
+          update: {
+            name: firestoreDocPathName(`email_claims/${newHash}`),
+            fields: toFirestoreFields({ uid, canonicalEmail: check.canonicalEmail }),
+          },
+          updateTransforms: [{ fieldPath: 'createdAt', setToServerValue: 'REQUEST_TIME' }],
+        },
+      ];
+      if (oldCanonical && oldCanonical !== check.canonicalEmail) {
+        writes.push({
+          delete: firestoreDocPathName(`email_claims/${sha256Hex(oldCanonical)}`),
+        });
+      }
+      await firestoreCommitWrites(writes, userIdToken);
+    } else {
+      const acc = store.accounts[uid];
+      if (!acc || acc.password !== currentPassword) {
+        return fail('Current password is incorrect.', 400);
+      }
+      const emailTaken = Object.values(store.accounts).some(
+        (a) =>
+          !a.deleted &&
+          a.uid !== uid &&
+          (a.email === check.cleanEmail || a.canonicalEmail === check.canonicalEmail)
+      );
+      if (emailTaken) {
+        return fail('Another account already uses that email address.', 409);
+      }
+      acc.email = check.cleanEmail;
+      acc.canonicalEmail = check.canonicalEmail;
+    }
+
+    delete store.verifications[verificationToken];
+    currentPrivate.email = check.cleanEmail;
+    currentPrivate.updatedAt = new Date().toISOString();
+    if (store.accounts[uid]) {
+      store.accounts[uid].email = check.cleanEmail;
+      store.accounts[uid].canonicalEmail = check.canonicalEmail;
+    }
+    if (currentUser.username) {
+      recordUsernameEmail(currentUser.username, check.cleanEmail);
+    }
+    saveStore(store);
+    return ok({ ok: true, userPrivate: currentPrivate });
+  }
+
   if (method === 'POST' && pathname === '/api/auth/deactivate') {
     const days = Number(body.days || 30);
     currentUser.isDeactivated = true;
@@ -2433,7 +2579,19 @@ export async function handleStandaloneApi(
     }
     if (typeof body.bio === 'string') {
       if (!isValidBio(body.bio)) return fail(`Bio max ${MAX_BIO_LENGTH} characters.`, 400);
+      const prevBio = currentUser.bio || '';
       currentUser.bio = body.bio;
+      const oldMentions = new Set(extractMentions(prevBio));
+      const newBioMentions = extractMentions(body.bio).filter((m) => !oldMentions.has(m));
+      if (newBioMentions.length) {
+        emitMentionNotificationsStandalone(
+          store,
+          currentUser,
+          newBioMentions.map((m) => `@${m}`).join(' '),
+          'mentioned you in their bio',
+          uid
+        );
+      }
     }
     const copyFields = ['nicknameFont', 'pronouns', 'website', 'dateOfBirth', 'photoUrl', 'coverUrl', 'interests', 'isPrivate'] as const;
     copyFields.forEach((key) => {
@@ -2498,6 +2656,7 @@ export async function handleStandaloneApi(
     };
     store.posts.unshift(post);
     currentUser.postsCount = store.posts.filter((p) => p.authorId === uid).length;
+    emitMentionNotificationsStandalone(store, currentUser, post.caption, 'mentioned you in a post', post.id);
     try {
       saveStore(store);
     } catch {
@@ -2550,8 +2709,20 @@ export async function handleStandaloneApi(
       if (post.authorId !== uid) return fail('Forbidden.', 403);
       const caption = String(body.caption || '');
       if (!isValidPostCaption(caption)) return fail('Invalid caption.', 400);
+      const prevCaption = post.caption || '';
       post.caption = caption;
       post.hashtags = extractHashtags(caption);
+      const oldMentions = new Set(extractMentions(prevCaption));
+      const addedMentions = extractMentions(caption).filter((m) => !oldMentions.has(m));
+      if (addedMentions.length) {
+        emitMentionNotificationsStandalone(
+          store,
+          currentUser,
+          addedMentions.map((m) => `@${m}`).join(' '),
+          'mentioned you in a post',
+          post.id
+        );
+      }
       saveStore(store);
       if (useRemote && userIdToken) {
         await firestoreCommitWrites(
@@ -2699,6 +2870,13 @@ export async function handleStandaloneApi(
       store.commentsByPost[postId] = [...(store.commentsByPost[postId] || []), comment];
       post.commentsCount = Math.max((post.commentsCount || 0) + 1, store.commentsByPost[postId].length);
       pushNotification(store, post.authorId, currentUser, 'comment', 'commented on your post', postId);
+      emitMentionNotificationsStandalone(
+        store,
+        currentUser,
+        comment.text,
+        'mentioned you in a comment',
+        postId
+      );
       saveStore(store);
 
       if (useRemote && userIdToken) {
@@ -3127,16 +3305,51 @@ export async function handleStandaloneApi(
   if (chatMsgCreate && method === 'POST') {
     const chat = store.chats.find((c) => c.id === chatMsgCreate[1] && c.participantIds.includes(uid));
     if (!chat) return fail('Chat not found.', 404);
+    const rawPoll = body.poll && typeof body.poll === 'object' ? (body.poll as Record<string, unknown>) : null;
+    let sanitizedPoll: ChatPoll | undefined;
+    if ((body.type === 'poll' || rawPoll) && rawPoll) {
+      const q = String(rawPoll.question || '').trim().slice(0, 200);
+      const rawOpts = Array.isArray(rawPoll.options) ? rawPoll.options : [];
+      const cleanOpts = rawOpts
+        .map((opt, idx) => {
+          const rec = (typeof opt === 'object' && opt !== null ? opt : { text: String(opt || '') }) as Record<string, unknown>;
+          return {
+            id: typeof rec.id === 'string' && rec.id ? rec.id : `opt_${idx + 1}`,
+            text: String(rec.text || '').trim().slice(0, 100),
+            voterUids: [] as string[],
+          };
+        })
+        .filter((o) => o.text.length > 0)
+        .slice(0, 6);
+      if (!q || cleanOpts.length < 2) {
+        return fail('Poll requires a question and at least 2 options.', 400);
+      }
+      sanitizedPoll = {
+        question: q,
+        options: cleanOpts,
+        allowMultiple: Boolean(rawPoll.allowMultiple),
+      };
+    }
+
+    const msgType = sanitizedPoll ? 'poll' : ((body.type as ChatMessage['type']) || 'text');
     const msg: ChatMessage = {
       id: genId('msg'),
       chatId: chat.id,
       senderId: uid,
       senderName: currentUser.displayName,
-      type: (body.type as ChatMessage['type']) || 'text',
-      text: typeof body.text === 'string' ? body.text : undefined,
+      type: msgType,
+      text: sanitizedPoll ? sanitizedPoll.question : (typeof body.text === 'string' ? body.text : undefined),
       mediaUrl: typeof body.mediaUrl === 'string' ? body.mediaUrl : undefined,
       stickerUrl: typeof body.stickerUrl === 'string' ? body.stickerUrl : undefined,
       sharedPostId: typeof body.sharedPostId === 'string' ? body.sharedPostId : undefined,
+      sharedPostCaption: typeof body.sharedPostCaption === 'string' ? body.sharedPostCaption : undefined,
+      sharedPostThumb: typeof body.sharedPostThumb === 'string' ? body.sharedPostThumb : undefined,
+      sharedPostAuthor: typeof body.sharedPostAuthor === 'string' ? body.sharedPostAuthor : undefined,
+      sharedPostMediaType:
+        typeof body.sharedPostMediaType === 'string'
+          ? (body.sharedPostMediaType as ChatMessage['sharedPostMediaType'])
+          : undefined,
+      poll: sanitizedPoll,
       durationMs: typeof body.durationMs === 'number' ? body.durationMs : undefined,
       replyToId: typeof body.replyToId === 'string' ? body.replyToId : undefined,
       status: 'sent',
@@ -3144,16 +3357,25 @@ export async function handleStandaloneApi(
       createdAt: new Date().toISOString(),
     };
     store.messagesByChat[chat.id] = [...(store.messagesByChat[chat.id] || []), msg];
-    chat.lastMessageText = (msg.text || `[${msg.type}]`).slice(0, 300);
+    chat.lastMessageText = (
+      msg.type === 'poll'
+        ? `Poll: ${msg.poll?.question || msg.text || ''}`
+        : msg.type === 'post_share'
+        ? 'Shared a post'
+        : msg.type === 'reel_share'
+        ? 'Shared a reel'
+        : msg.text || `[${msg.type}]`
+    ).slice(0, 300);
     chat.lastMessageAt = msg.createdAt;
     saveStore(store);
 
     if (useRemote && userIdToken) {
+      const firestoreType = msg.type === 'poll' ? 'text' : msg.type === 'post_share' ? 'reel_share' : msg.type;
       const mFields: Record<string, unknown> = {
         id: msg.id,
         chatId: chat.id,
         senderId: uid,
-        type: msg.type,
+        type: firestoreType,
         ...(msg.text ? { text: msg.text.slice(0, 2000) } : {}),
         ...(msg.mediaUrl && msg.mediaUrl.length <= 200000 ? { mediaUrl: msg.mediaUrl } : {}),
         ...(msg.stickerUrl && msg.stickerUrl.length <= 200000 ? { stickerUrl: msg.stickerUrl } : {}),
@@ -3188,7 +3410,7 @@ export async function handleStandaloneApi(
     return ok({ message: msg }, 201);
   }
 
-  const chatMsgOp = pathname.match(/^\/api\/chats\/([^/]+)\/messages\/([^/]+)(?:\/(react|star|forward))?$/);
+  const chatMsgOp = pathname.match(/^\/api\/chats\/([^/]+)\/messages\/([^/]+)(?:\/(react|star|forward|vote))?$/);
   if (chatMsgOp) {
     const [, chatId, msgId, sub] = chatMsgOp;
     const msgs = store.messagesByChat[chatId] || [];
@@ -3221,6 +3443,15 @@ export async function handleStandaloneApi(
         : [...existingList, uid];
       saveStore(store);
       return ok({ reactions: msg.reactions, ok: true });
+    }
+    if (sub === 'vote' && method === 'POST') {
+      if (msg.type !== 'poll' || !msg.poll) {
+        return fail('Poll not found.', 400);
+      }
+      const optionId = String(body.optionId || '');
+      msg.poll = togglePollVote(msg.poll, optionId, uid);
+      saveStore(store);
+      return ok({ poll: msg.poll, ok: true });
     }
     if (sub === 'star' && method === 'POST') {
       const starred = msg.starredByUids || [];

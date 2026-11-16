@@ -224,12 +224,24 @@ export interface Chat {
   createdAt: string;
 }
 
+export interface ChatPollOption {
+  id: string;
+  text: string;
+  voterUids: string[];
+}
+
+export interface ChatPoll {
+  question: string;
+  options: ChatPollOption[];
+  allowMultiple?: boolean;
+}
+
 export interface ChatMessage {
   id: string;
   chatId: string;
   senderId: string;
   senderName: string;
-  type: 'text' | 'voice' | 'image' | 'video' | 'file' | 'sticker' | 'reel_share';
+  type: 'text' | 'voice' | 'image' | 'video' | 'file' | 'sticker' | 'reel_share' | 'post_share' | 'poll';
   text?: string;
   mediaUrl?: string;
   stickerUrl?: string;
@@ -237,6 +249,8 @@ export interface ChatMessage {
   sharedPostCaption?: string;
   sharedPostThumb?: string;
   sharedPostAuthor?: string;
+  sharedPostMediaType?: MediaType;
+  poll?: ChatPoll;
   fileName?: string;
   durationMs?: number;
   replyToId?: string;

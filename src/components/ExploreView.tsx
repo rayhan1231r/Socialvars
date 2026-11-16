@@ -1,10 +1,13 @@
 import { useMemo, useState } from 'react';
-import { Clapperboard, Hash, Search } from 'lucide-react';
+import { Clapperboard, Hash, Play, Search } from 'lucide-react';
 import { useSocialVerse } from '../context/SocialVerseContext';
 import {
   canViewPrivateProfileContent,
   formatCompactCount,
   getMaskedUserDisplay,
+  isReelPost,
+  isStandardPost,
+  isVideoMediaUrl,
 } from '../utils/validation';
 import { Avatar } from './Avatar';
 import { PostCard } from './PostCard';
@@ -21,6 +24,7 @@ export function ExploreView() {
     toggleFollow,
     openUserProfile,
     setActiveTab,
+    openReelsAt,
     t,
   } = useSocialVerse();
 
@@ -64,13 +68,8 @@ export function ExploreView() {
     });
   }, [creators, currentUser.uid, isAuthenticated, normalizedQuery]);
 
-  const matchedPosts = useMemo(() => {
-    const base =
-      filterTab === 'reels'
-        ? accessiblePosts.filter((p) => p.mediaType === 'reel' || p.mediaType === 'video')
-        : filterTab === 'posts'
-        ? accessiblePosts.filter((p) => p.mediaType !== 'reel')
-        : accessiblePosts;
+  const matchedStandardPosts = useMemo(() => {
+    const base = accessiblePosts.filter(isStandardPost);
     if (!normalizedQuery) return base;
     return base.filter(
       (p) =>
@@ -80,7 +79,20 @@ export function ExploreView() {
         p.authorId.toLowerCase().includes(normalizedQuery) ||
         p.hashtags.some((h) => h.toLowerCase().includes(normalizedQuery))
     );
-  }, [accessiblePosts, filterTab, normalizedQuery]);
+  }, [accessiblePosts, normalizedQuery]);
+
+  const matchedReels = useMemo(() => {
+    const base = accessiblePosts.filter(isReelPost);
+    if (!normalizedQuery) return base;
+    return base.filter(
+      (p) =>
+        p.caption.toLowerCase().includes(normalizedQuery) ||
+        p.authorUsername.toLowerCase().includes(normalizedQuery) ||
+        p.authorDisplayName.toLowerCase().includes(normalizedQuery) ||
+        p.authorId.toLowerCase().includes(normalizedQuery) ||
+        p.hashtags.some((h) => h.toLowerCase().includes(normalizedQuery))
+    );
+  }, [accessiblePosts, normalizedQuery]);
 
   return (
     <div className="space-y-5">
@@ -239,18 +251,93 @@ export function ExploreView() {
         </section>
       )}
 
-      {/* Popular Content */}
-      {filterTab !== 'users' && (
-        <section aria-label={t.explore.popularPosts} className="space-y-4">
-          <h2 className="text-sm font-bold text-slate-900 dark:text-white px-1">
-            {t.explore.popularPosts}
-          </h2>
-          {matchedPosts.length === 0 ? (
+      {/* Strictly Separated Reels Tab & Inline Reels Row in All */}
+      {(filterTab === 'reels' || (filterTab === 'all' && matchedReels.length > 0)) && (
+        <section aria-label={t.explore.reels} className="space-y-3">
+          <div className="flex items-center justify-between px-1">
+            <h2 className="text-sm font-bold text-slate-900 dark:text-white flex items-center gap-2">
+              <Clapperboard className="w-4 h-4 text-sky-600" />
+              <span>{t.explore.reels}</span>
+            </h2>
+          </div>
+          {matchedReels.length === 0 ? (
             <div className="liquid-glass rounded-2xl p-8 text-center text-sm text-slate-500 dark:text-slate-400">
               {t.feed.noPosts}
             </div>
           ) : (
-            matchedPosts.map((post) => <PostCard key={post.id} post={post} />)
+            <div
+              className={
+                filterTab === 'reels'
+                  ? 'grid grid-cols-2 sm:grid-cols-3 gap-3'
+                  : 'flex gap-2.5 overflow-x-auto snap-x snap-mandatory no-scrollbar pb-1'
+              }
+            >
+              {matchedReels.map((reel) => {
+                const thumb = reel.coverUrl || reel.mediaUrls?.[0];
+                const isVideoThumb = isVideoMediaUrl(thumb);
+                return (
+                  <button
+                    key={reel.id}
+                    type="button"
+                    onClick={() => openReelsAt(reel.id)}
+                    className={`${
+                      filterTab === 'reels' ? 'w-full' : 'snap-start shrink-0 w-32 sm:w-36'
+                    } aspect-[9/16] rounded-2xl overflow-hidden relative bg-slate-950 text-left group border border-white/10 shadow-sm`}
+                  >
+                    {thumb ? (
+                      isVideoThumb ? (
+                        <video
+                          src={thumb}
+                          muted
+                          playsInline
+                          preload="metadata"
+                          className="w-full h-full object-cover"
+                        />
+                      ) : (
+                        <img
+                          src={thumb}
+                          alt={reel.caption.slice(0, 40) || reel.authorUsername}
+                          referrerPolicy="no-referrer"
+                          className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+                        />
+                      )
+                    ) : (
+                      <div className="w-full h-full bg-gradient-to-br from-sky-600 to-slate-900" />
+                    )}
+                    <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/15 to-transparent" />
+                    <span className="absolute top-2 right-2 w-7 h-7 rounded-full bg-black/55 backdrop-blur-sm text-white flex items-center justify-center">
+                      <Play className="w-3.5 h-3.5 fill-current ml-0.5" />
+                    </span>
+                    <div className="absolute inset-x-2 bottom-2 space-y-0.5">
+                      <p className="text-[11px] font-bold text-white truncate">
+                        @{reel.authorUsername}
+                      </p>
+                      {reel.caption && (
+                        <p className="text-[10px] text-white/80 line-clamp-2 leading-tight">
+                          {reel.caption}
+                        </p>
+                      )}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </section>
+      )}
+
+      {/* Standard Posts Section */}
+      {(filterTab === 'all' || filterTab === 'posts') && (
+        <section aria-label={t.explore.popularPosts} className="space-y-4">
+          <h2 className="text-sm font-bold text-slate-900 dark:text-white px-1">
+            {t.explore.popularPosts}
+          </h2>
+          {matchedStandardPosts.length === 0 ? (
+            <div className="liquid-glass rounded-2xl p-8 text-center text-sm text-slate-500 dark:text-slate-400">
+              {t.feed.noPosts}
+            </div>
+          ) : (
+            matchedStandardPosts.map((post) => <PostCard key={post.id} post={post} />)
           )}
         </section>
       )}

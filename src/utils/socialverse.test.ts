@@ -16,6 +16,7 @@ import {
   canonicalizeEmail,
   evaluateRouteAccess,
   extractHashtags,
+  extractMentions,
   formatCalendarDate,
   formatCompactCount,
   getMaskedUserDisplay,
@@ -24,6 +25,8 @@ import {
   isHomeStoryVisibleToUser,
   isNoteVisibleToUser,
   isProtectedAppRoute,
+  isReelPost,
+  isStandardPost,
   isStoryActive,
   isValidBio,
   isValidDateOfBirth,
@@ -38,8 +41,18 @@ import {
   normalizeUsername,
   normalizeWebsiteUrl,
   parseAppRouteFromLocation,
+  UPLOAD_CHUNK_SIZE_BYTES,
+  MAX_IMAGE_UPLOAD_BYTES,
+  MAX_VIDEO_UPLOAD_BYTES,
+  isAllowedUploadMime,
+  isVideoMediaUrl,
+  planUploadChunks,
+  resolveSafeUploadExtension,
   requiresFollowApproval,
   shouldNotifyUser,
+  splitTextWithMentions,
+  togglePollVote,
+  validateMediaFileSize,
   validateSignupEmail,
 } from './validation';
 import { TRANSLATIONS } from './i18n';
@@ -550,6 +563,300 @@ test('Firestore REST serialization and coverUrl-to-mediaUrls hydration for posts
   assert.equal(hydratedPost.authorDisplayName, 'Rayhan');
   assert.deepEqual(hydratedPost.mediaUrls, ['data:image/webp;base64,UklGRh4AAABXRUJQVlA4']);
 });
+
+test('strict post vs reel separation, mention parsing, and poll voting rules', () => {
+  assert.equal(isReelPost({ mediaType: 'reel' }), true);
+  assert.equal(isStandardPost({ mediaType: 'reel' }), false);
+  for (const stdType of ['text', 'image', 'carousel', 'video']) {
+    assert.equal(isReelPost({ mediaType: stdType }), false);
+    assert.equal(isStandardPost({ mediaType: stdType }), true);
+  }
+
+  const text = 'Collab with @Aria_Studio and @RAFI_dev plus email test@gmail.com and @aria_studio';
+  assert.deepEqual(extractMentions(text), ['aria_studio', 'rafi_dev']);
+  const segments = splitTextWithMentions('Hi @Aria_Studio!');
+  assert.deepEqual(segments, [
+    { type: 'text', value: 'Hi ' },
+    { type: 'mention', value: '@Aria_Studio', username: 'aria_studio' },
+    { type: 'text', value: '!' },
+  ]);
+
+  // Single-choice poll replaces prior vote & toggles off on re-click
+  const singlePoll = {
+    question: 'Best sunset spot?',
+    allowMultiple: false,
+    options: [
+      { id: 'opt_1', text: 'Roof', voterUids: [] as string[] },
+      { id: 'opt_2', text: 'Beach', voterUids: [] as string[] },
+    ],
+  };
+  let voted = togglePollVote(singlePoll, 'opt_1', 'u1');
+  assert.deepEqual(voted.options[0].voterUids, ['u1']);
+  assert.deepEqual(voted.options[1].voterUids, []);
+  voted = togglePollVote(voted, 'opt_2', 'u1');
+  assert.deepEqual(voted.options[0].voterUids, []);
+  assert.deepEqual(voted.options[1].voterUids, ['u1']);
+  voted = togglePollVote(voted, 'opt_2', 'u1');
+  assert.deepEqual(voted.options[1].voterUids, []);
+
+  // Multi-choice poll keeps multiple selections independently
+  const multiPoll = { ...singlePoll, allowMultiple: true };
+  let mv = togglePollVote(multiPoll, 'opt_1', 'u1');
+  mv = togglePollVote(mv, 'opt_2', 'u1');
+  assert.deepEqual(mv.options[0].voterUids, ['u1']);
+  assert.deepEqual(mv.options[1].voterUids, ['u1']);
+});
+
+test('standalone backend handles @@username login, change-email OTP, mention notifications, polls & post shares', async () => {
+  resetStandaloneStoreForTesting();
+
+  // Register user 1
+  const otp1 = await handleStandaloneApi('/api/auth/send-otp', {
+    method: 'POST',
+    body: JSON.stringify({ email: 'creator1@gmail.com', purpose: 'signup', language: 'en' }),
+  });
+  const ver1 = await handleStandaloneApi('/api/auth/verify-otp', {
+    method: 'POST',
+    body: JSON.stringify({ email: 'creator1@gmail.com', code: String(otp1.data.devOtpCode), purpose: 'signup' }),
+  });
+  const reg1 = await handleStandaloneApi('/api/auth/register', {
+    method: 'POST',
+    body: JSON.stringify({
+      verificationToken: ver1.data.verificationToken,
+      email: 'creator1@gmail.com',
+      password: 'password123',
+      displayName: 'Creator One',
+      nicknameFont: 'classic',
+      username: 'creator_one',
+      dateOfBirth: '2000-01-10',
+      language: 'en',
+    }),
+  });
+  assert.equal(reg1.ok, true);
+  const token1 = String(reg1.data.token);
+
+  // Register user 2
+  const otp2 = await handleStandaloneApi('/api/auth/send-otp', {
+    method: 'POST',
+    body: JSON.stringify({ email: 'creator2@gmail.com', purpose: 'signup', language: 'en' }),
+  });
+  const ver2 = await handleStandaloneApi('/api/auth/verify-otp', {
+    method: 'POST',
+    body: JSON.stringify({ email: 'creator2@gmail.com', code: String(otp2.data.devOtpCode), purpose: 'signup' }),
+  });
+  const reg2 = await handleStandaloneApi('/api/auth/register', {
+    method: 'POST',
+    body: JSON.stringify({
+      verificationToken: ver2.data.verificationToken,
+      email: 'creator2@gmail.com',
+      password: 'password123',
+      displayName: 'Creator Two',
+      nicknameFont: 'classic',
+      username: 'creator_two',
+      dateOfBirth: '2001-02-20',
+      language: 'en',
+    }),
+  });
+  assert.equal(reg2.ok, true);
+  const token2 = String(reg2.data.token);
+  const uid2 = String((reg2.data.user as { uid: string }).uid);
+
+  // Login with uppercase username & multiple leading @ symbols
+  const loginAt = await handleStandaloneApi('/api/auth/login', {
+    method: 'POST',
+    body: JSON.stringify({ identifier: '@@CREATOR_ONE', password: 'password123' }),
+  });
+  assert.equal(loginAt.ok, true);
+
+  // Mention notifications via bio update, post creation, and comment
+  const bioRes = await handleStandaloneApi(
+    '/api/profile',
+    {
+      method: 'PATCH',
+      body: JSON.stringify({ bio: 'Building SocialVerse with @creator_two!' }),
+    },
+    token1
+  );
+  assert.equal(bioRes.ok, true);
+
+  const postRes = await handleStandaloneApi(
+    '/api/posts',
+    {
+      method: 'POST',
+      body: JSON.stringify({
+        caption: 'Shoutout @creator_two for the rooftop shots',
+        mediaUrls: [],
+        mediaType: 'text',
+        visibility: 'public',
+      }),
+    },
+    token1
+  );
+  assert.equal(postRes.ok, true);
+  const postId = String((postRes.data.post as { id: string }).id);
+
+  const commentRes = await handleStandaloneApi(
+    `/api/posts/${postId}/comments`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ text: 'Thank you @creator_two!' }),
+    },
+    token1
+  );
+  assert.equal(commentRes.ok, true);
+
+  const state2 = await handleStandaloneApi('/api/state', {}, token2);
+  const mentionsForTwo = (state2.data.notifications as Array<{ type: string }>).filter(
+    (n) => n.type === 'mention'
+  );
+  assert.ok(mentionsForTwo.length >= 2);
+
+  // Change Email OTP flow
+  const changeOtp = await handleStandaloneApi(
+    '/api/auth/send-otp',
+    {
+      method: 'POST',
+      body: JSON.stringify({ email: 'creator1.new@gmail.com', purpose: 'change_email', language: 'en' }),
+    },
+    token1
+  );
+  assert.equal(changeOtp.ok, true);
+  const changeVer = await handleStandaloneApi('/api/auth/verify-otp', {
+    method: 'POST',
+    body: JSON.stringify({
+      email: 'creator1.new@gmail.com',
+      code: String(changeOtp.data.devOtpCode),
+      purpose: 'change_email',
+    }),
+  });
+  assert.equal(changeVer.ok, true);
+  const changeRes = await handleStandaloneApi(
+    '/api/auth/change-email',
+    {
+      method: 'POST',
+      body: JSON.stringify({
+        verificationToken: changeVer.data.verificationToken,
+        newEmail: 'creator1.new@gmail.com',
+        currentPassword: 'password123',
+      }),
+    },
+    token1
+  );
+  assert.equal(changeRes.ok, true);
+  assert.equal((changeRes.data.userPrivate as { email: string }).email, 'creator1.new@gmail.com');
+
+  const loginNewEmail = await handleStandaloneApi('/api/auth/login', {
+    method: 'POST',
+    body: JSON.stringify({ identifier: 'creator1.new@gmail.com', password: 'password123' }),
+  });
+  assert.equal(loginNewEmail.ok, true);
+
+  // Create DM chat, send poll & vote, and send post_share
+  const chatRes = await handleStandaloneApi(
+    '/api/chats',
+    {
+      method: 'POST',
+      body: JSON.stringify({ type: 'direct', participantIds: [uid2], title: 'Creator Two' }),
+    },
+    token1
+  );
+  assert.equal(chatRes.ok, true);
+  const chatId = String((chatRes.data.chat as { id: string }).id);
+
+  const pollMsgRes = await handleStandaloneApi(
+    `/api/chats/${chatId}/messages`,
+    {
+      method: 'POST',
+      body: JSON.stringify({
+        type: 'poll',
+        text: 'Coffee or Tea?',
+        poll: {
+          question: 'Coffee or Tea?',
+          options: [
+            { id: 'opt_1', text: 'Coffee' },
+            { id: 'opt_2', text: 'Tea' },
+          ],
+          allowMultiple: false,
+        },
+      }),
+    },
+    token1
+  );
+  assert.equal(pollMsgRes.ok, true);
+  const pollMsgId = String((pollMsgRes.data.message as { id: string }).id);
+
+  const voteRes = await handleStandaloneApi(
+    `/api/chats/${chatId}/messages/${pollMsgId}/vote`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ optionId: 'opt_1' }),
+    },
+    token2
+  );
+  assert.equal(voteRes.ok, true);
+  const updatedPoll = voteRes.data.poll as { options: Array<{ voterUids: string[] }> };
+  assert.deepEqual(updatedPoll.options[0].voterUids, [uid2]);
+
+  const shareMsgRes = await handleStandaloneApi(
+    `/api/chats/${chatId}/messages`,
+    {
+      method: 'POST',
+      body: JSON.stringify({
+        type: 'post_share',
+        sharedPostId: postId,
+        sharedPostCaption: 'Shoutout @creator_two for the rooftop shots',
+        sharedPostAuthor: 'creator_one',
+        sharedPostMediaType: 'text',
+      }),
+    },
+    token1
+  );
+  assert.equal(shareMsgRes.ok, true);
+  assert.equal((shareMsgRes.data.message as { type: string }).type, 'post_share');
+
+  resetStandaloneStoreForTesting();
+});
+
+test('upload chunk planning, MIME allowlist, size limits, and video URL detection', () => {
+  // Video URL detection covers both base64 data URLs and /uploads/* media URLs
+  assert.equal(isVideoMediaUrl('data:video/mp4;base64,AAA'), true);
+  assert.equal(isVideoMediaUrl('/uploads/up_12345_abcd.mp4'), true);
+  assert.equal(isVideoMediaUrl('/uploads/clip.webm?v=2#t=0'), true);
+  assert.equal(isVideoMediaUrl('/uploads/photo.jpg'), false);
+  assert.equal(isVideoMediaUrl('data:image/webp;base64,AAA'), false);
+  assert.equal(isVideoMediaUrl(''), false);
+
+  // MIME allowlist permits safe media and blocks active web/executable files
+  assert.equal(isAllowedUploadMime('video/mp4', 'reel.mp4'), true);
+  assert.equal(isAllowedUploadMime('image/gif', 'anim.gif'), true);
+  assert.equal(isAllowedUploadMime('audio/webm', 'voice.webm'), true);
+  assert.equal(isAllowedUploadMime('application/pdf', 'doc.pdf'), true);
+  assert.equal(isAllowedUploadMime('image/svg+xml', 'xss.svg'), false);
+  assert.equal(isAllowedUploadMime('text/html', 'evil.html'), false);
+  assert.equal(isAllowedUploadMime('application/javascript', 'evil.js'), false);
+
+  // Safe extension mapping
+  assert.equal(resolveSafeUploadExtension('video/mp4', 'my.reel.MOV'), 'mp4');
+  assert.equal(resolveSafeUploadExtension('video/quicktime', 'clip.mov'), 'mov');
+  assert.equal(resolveSafeUploadExtension('application/octet-stream', 'malware.html'), 'bin');
+
+  // Chunk planner splits a 19.5 MB video cleanly into <= 2 MiB chunks
+  const videoBytes = 19 * 1024 * 1024 + 512 * 1024;
+  const plan = planUploadChunks(videoBytes, UPLOAD_CHUNK_SIZE_BYTES);
+  assert.equal(plan.length, 10);
+  assert.equal(plan[0].start, 0);
+  assert.equal(plan[0].size, UPLOAD_CHUNK_SIZE_BYTES);
+  assert.equal(plan[plan.length - 1].end, videoBytes);
+  assert.equal(plan.reduce((acc, c) => acc + c.size, 0), videoBytes);
+
+  // Size limits allow up to 100 MB video and reject oversized files with localized errors
+  assert.equal(validateMediaFileSize(25 * 1024 * 1024, 'video/mp4', 'en').valid, true);
+  assert.equal(validateMediaFileSize(MAX_VIDEO_UPLOAD_BYTES + 1, 'video/mp4', 'en').valid, false);
+  assert.equal(validateMediaFileSize(MAX_IMAGE_UPLOAD_BYTES + 1, 'image/png', 'bn').valid, false);
+  assert.equal(validateMediaFileSize(0, 'video/mp4', 'en').valid, false);
+});
+
+
 
 
 
