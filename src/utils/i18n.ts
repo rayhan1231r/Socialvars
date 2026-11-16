@@ -31,6 +31,13 @@ export interface TranslationBundle {
     usernameAvailable: string;
     usernameTaken: string;
     usernameInvalid: string;
+    dobStepTitle: string;
+    dobStepSubtitle: string;
+    dobLabel: string;
+    dobOneTimeWarning: string;
+    dobInvalidFormat: string;
+    dobTooYoung: string;
+    dobFutureError: string;
     photoStepTitle: string;
     skipForNow: string;
     savedLoginsTitle: string;
@@ -84,8 +91,11 @@ export interface TranslationBundle {
     publicOpt: string;
     followersOpt: string;
     onlyMeOpt: string;
+    closeFriendsOpt: string;
     publish: string;
     storyTextPlaceholder: string;
+    uploadingProgress: string;
+    uploadComplete: string;
   };
   explore: {
     searchPlaceholder: string;
@@ -169,6 +179,18 @@ export interface TranslationBundle {
     demoteAdmin: string;
     transferOwner: string;
     addMembers: string;
+    newNoteTitle: string;
+    shareNote: string;
+    noteHint24h: string;
+    quickVibes: string;
+    deleteNote: string;
+    noteThoughtPrompt: string;
+    deleteChat: string;
+    deleteGroup: string;
+    closeFriends: string;
+    followersAudience: string;
+    noteCloseFriendsHint: string;
+    manageCloseFriends: string;
   };
   profile: {
     posts: string;
@@ -207,6 +229,15 @@ export interface TranslationBundle {
     addHighlightTitle: string;
     deleteHighlight: string;
     back: string;
+    aboutOption: string;
+    aboutPageTitle: string;
+    aboutSubtitle: string;
+    dateOfBirth: string;
+    accountCreated: string;
+    dobLockedNote: string;
+    dobNotProvided: string;
+    setDobOnce: string;
+    saveDobOnce: string;
   };
   ai: {
     title: string;
@@ -243,8 +274,29 @@ export interface TranslationBundle {
     biometricLock: string;
     whoCanMessage: string;
     whoCanViewStories: string;
+    whoCanFollow: string;
+    followEveryone: string;
+    followApprovalRequired: string;
+    privacyLockSummary: string;
+    pendingFollowRequests: string;
     submitReport: string;
     reportReason: string;
+    notificationSettings: string;
+    deviceNotifications: string;
+    enablePushNotifications: string;
+    pauseAllNotifications: string;
+    notifyMessages: string;
+    notifyGroupMessages: string;
+    notifyUploadProgress: string;
+    notifyLikes: string;
+    notifyComments: string;
+    notifyFollows: string;
+    notifyFriendRequests: string;
+    notifyStories: string;
+    notifyMentions: string;
+    notifyAnnouncements: string;
+    testNotification: string;
+    closeFriendsList: string;
   };
 }
 
@@ -280,6 +332,13 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationBundle> = {
       usernameAvailable: 'Available',
       usernameTaken: 'Already taken',
       usernameInvalid: 'Use 3-24 lowercase letters, numbers, or underscores.',
+      dobStepTitle: 'Add your date of birth',
+      dobStepSubtitle: 'Your birthday is shown on your profile About page. It can only be set once and cannot be changed later.',
+      dobLabel: 'Date of Birth',
+      dobOneTimeWarning: 'Permanent: Once set, your date of birth can only be added once and cannot be changed.',
+      dobInvalidFormat: 'Please select a valid date of birth.',
+      dobTooYoung: 'You must be at least 13 years old to create an account.',
+      dobFutureError: 'Date of birth cannot be in the future.',
       photoStepTitle: 'Add a profile picture',
       skipForNow: 'Skip for now',
       savedLoginsTitle: 'Saved accounts on this device',
@@ -333,8 +392,11 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationBundle> = {
       publicOpt: 'Public',
       followersOpt: 'Friends only',
       onlyMeOpt: 'Only me (Private)',
+      closeFriendsOpt: 'Close Friends',
       publish: 'Publish',
       storyTextPlaceholder: 'Write a text story for the next 24 hours...',
+      uploadingProgress: 'Uploading...',
+      uploadComplete: 'Upload complete',
     },
     explore: {
       searchPlaceholder: 'Search usernames, IDs, posts, or reels',
@@ -418,6 +480,18 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationBundle> = {
       demoteAdmin: 'Remove Admin',
       transferOwner: 'Transfer Owner',
       addMembers: 'Add Members',
+      newNoteTitle: 'New note',
+      shareNote: 'Share',
+      noteHint24h: 'Visible to followers & inbox peers for 24 hours',
+      quickVibes: 'Quick thoughts',
+      deleteNote: 'Delete note',
+      noteThoughtPrompt: 'Share a thought...',
+      deleteChat: 'Delete from Inbox',
+      deleteGroup: 'Delete Group',
+      closeFriends: 'Close Friends',
+      followersAudience: 'Followers',
+      noteCloseFriendsHint: 'Visible only to your Close Friends for 24 hours',
+      manageCloseFriends: 'Edit Close Friends',
     },
     profile: {
       posts: 'Posts',
@@ -456,6 +530,15 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationBundle> = {
       addHighlightTitle: 'Create Highlight',
       deleteHighlight: 'Delete highlight',
       back: 'Back',
+      aboutOption: 'About',
+      aboutPageTitle: 'About this account',
+      aboutSubtitle: 'Account details & membership info',
+      dateOfBirth: 'Date of birth',
+      accountCreated: 'Account created',
+      dobLockedNote: 'Set once · Cannot be changed',
+      dobNotProvided: 'Not provided',
+      setDobOnce: 'Set Date of Birth (Once only)',
+      saveDobOnce: 'Save Date of Birth',
     },
     ai: {
       title: 'Gemini Profile Assistant',
@@ -492,8 +575,29 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationBundle> = {
       biometricLock: 'Biometric App Lock',
       whoCanMessage: 'Who can message you',
       whoCanViewStories: 'Who can view your stories',
+      whoCanFollow: 'Who can follow you',
+      followEveryone: 'Everyone (instant follow)',
+      followApprovalRequired: 'Approval required (Follow requests)',
+      privacyLockSummary: 'When Private Account is on, Posts, Videos & Reels, Stories, Highlights, and Follower/Following lists stay hidden until you approve a request.',
+      pendingFollowRequests: 'Pending follow requests',
       submitReport: 'Submit Report',
       reportReason: 'Add details or select a suggested reason...',
+      notificationSettings: 'Notification Controls',
+      deviceNotifications: 'Device & Browser Alerts',
+      enablePushNotifications: 'Allow Notifications',
+      pauseAllNotifications: 'Pause all notifications',
+      notifyMessages: 'Direct Messages (DM)',
+      notifyGroupMessages: 'Group Chat Messages',
+      notifyUploadProgress: 'Post & Reel Upload Progress (1–100%)',
+      notifyLikes: 'Likes & Reactions',
+      notifyComments: 'Comments & Replies',
+      notifyFollows: 'New Followers',
+      notifyFriendRequests: 'Follow Requests',
+      notifyStories: 'Story Reactions & Activity',
+      notifyMentions: 'Mentions',
+      notifyAnnouncements: 'Broadcasts & Announcements',
+      testNotification: 'Test Device Notification',
+      closeFriendsList: 'Close Friends List',
     },
   },
   bn: {
@@ -527,6 +631,13 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationBundle> = {
       usernameAvailable: 'এভেইলেবল',
       usernameTaken: 'অলরেডি টেকেন',
       usernameInvalid: '৩-২৪ অক্ষরের ছোট হাতের ইংরেজি অক্ষর, সংখ্যা বা _ ব্যবহার করুন।',
+      dobStepTitle: 'আপনার জন্মতারিখ দিন',
+      dobStepSubtitle: 'আপনার জন্মতারিখ প্রোফাইলের About পেজে দেখানো হবে। এটি শুধুমাত্র একবারই দেওয়া যাবে এবং পরে পরিবর্তন করা যাবে না।',
+      dobLabel: 'জন্মতারিখ',
+      dobOneTimeWarning: 'সতর্কতা: জন্মতারিখ শুধু একবারই সেট করা যাবে, পরবর্তীতে আর পরিবর্তন করা যাবে না।',
+      dobInvalidFormat: 'অনুগ্রহ করে সঠিক জন্মতারিখ নির্বাচন করুন।',
+      dobTooYoung: 'অ্যাকাউন্ট খুলতে আপনার বয়স কমপক্ষে ১৩ বছর হতে হবে।',
+      dobFutureError: 'জন্মতারিখ ভবিষ্যতের তারিখ হতে পারবে না।',
       photoStepTitle: 'প্রোফাইল ছবি আপলোড করুন',
       skipForNow: 'স্কিপ করুন',
       savedLoginsTitle: 'এই ডিভাইসে সেভ করা অ্যাকাউন্ট',
@@ -580,8 +691,11 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationBundle> = {
       publicOpt: 'পাবলিক (সবার জন্য)',
       followersOpt: 'শুধু ফ্রেন্ডস / ফলোয়ার',
       onlyMeOpt: 'শুধু আমি (প্রাইভেট)',
+      closeFriendsOpt: 'ক্লোজ ফ্রেন্ডস',
       publish: 'প্রকাশ করুন',
       storyTextPlaceholder: 'পরবর্তী ২৪ ঘণ্টার জন্য একটি টেক্সট স্টোরি লিখুন...',
+      uploadingProgress: 'আপলোড হচ্ছে...',
+      uploadComplete: 'আপলোড সম্পন্ন হয়েছে',
     },
     explore: {
       searchPlaceholder: 'ইউজারনেম, আইডি, পোস্ট বা রিল খুঁজুন',
@@ -665,6 +779,18 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationBundle> = {
       demoteAdmin: 'অ্যাডমিন সরান',
       transferOwner: 'মালিকানা হস্তান্তর',
       addMembers: 'সদস্য যোগ করুন',
+      newNoteTitle: 'নতুন নোট',
+      shareNote: 'শেয়ার করুন',
+      noteHint24h: '২৪ ঘণ্টার জন্য আপনার ফলোয়ার ও ইনবক্স বন্ধুরা দেখতে পাবে',
+      quickVibes: 'দ্রুত ভাবনা',
+      deleteNote: 'নোট মুছুন',
+      noteThoughtPrompt: 'আপনার ভাবনা লিখুন...',
+      deleteChat: 'ইনবক্স থেকে ডিলিট',
+      deleteGroup: 'গ্রুপ ডিলিট করুন',
+      closeFriends: 'ক্লোজ ফ্রেন্ডস',
+      followersAudience: 'ফলোয়ার',
+      noteCloseFriendsHint: '২৪ ঘণ্টার জন্য শুধু আপনার ক্লোজ ফ্রেন্ডস দেখতে পাবে',
+      manageCloseFriends: 'ক্লোজ ফ্রেন্ডস এডিট',
     },
     profile: {
       posts: 'পোস্ট',
@@ -703,6 +829,15 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationBundle> = {
       addHighlightTitle: 'নতুন হাইলাইট তৈরি করুন',
       deleteHighlight: 'হাইলাইট মুছুন',
       back: 'পিছনে যান',
+      aboutOption: 'About',
+      aboutPageTitle: 'অ্যাকাউন্ট সম্পর্কে',
+      aboutSubtitle: 'অ্যাকাউন্ট তৈরির তারিখ ও জন্মতারিখের তথ্য',
+      dateOfBirth: 'জন্মতারিখ',
+      accountCreated: 'অ্যাকাউন্ট তৈরির তারিখ',
+      dobLockedNote: 'শুধু ১ বার নির্ধারিত · পরিবর্তন করা যাবে না',
+      dobNotProvided: 'দেওয়া হয়নি',
+      setDobOnce: 'জন্মতারিখ সেট করুন (শুধুমাত্র একবার)',
+      saveDobOnce: 'জন্মতারিখ সংরক্ষণ করুন',
     },
     ai: {
       title: 'জেমিনি প্রোফাইল অ্যাসিস্ট্যান্ট',
@@ -739,8 +874,29 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationBundle> = {
       biometricLock: 'বায়োমেট্রিক অ্যাপ লক',
       whoCanMessage: 'কে আপনাকে মেসেজ করতে পারবে',
       whoCanViewStories: 'কে আপনার স্টোরি দেখতে পারবে',
+      whoCanFollow: 'কে আপনাকে ফলো করতে পারবে',
+      followEveryone: 'সবাই (সরাসরি ফলো)',
+      followApprovalRequired: 'অনুমোদন সাপেক্ষে (ফলো রিকোয়েস্ট)',
+      privacyLockSummary: 'প্রাইভেট অ্যাকাউন্ট চালু থাকলে পোস্ট, ভিডিও/রিলস, স্টোরি, স্টোরি হাইলাইট এবং ফলোয়ার/ফলোয়িং তালিকা কেবল অনুমোদিত ফলোয়াররাই দেখতে পারবে।',
+      pendingFollowRequests: 'অপেক্ষমান ফলো রিকোয়েস্ট',
       submitReport: 'রিপোর্ট জমা দিন',
       reportReason: 'কারণ লিখুন অথবা সাজেস্টেড কারণ বাছাই করুন...',
+      notificationSettings: 'নোটিফিকেশন কন্ট্রোল',
+      deviceNotifications: 'ফোন ও ব্রাউজার নোটিফিকেশন',
+      enablePushNotifications: 'নোটিফিকেশন চালু করুন',
+      pauseAllNotifications: 'সব নোটিফিকেশন সাময়িক বন্ধ রাখুন',
+      notifyMessages: 'ইনবক্স ডিরেক্ট মেসেজ (DM)',
+      notifyGroupMessages: 'গ্রুপ চ্যাট মেসেজ',
+      notifyUploadProgress: 'পোস্ট ও রিল আপলোড প্রোগ্রেস (১–১০০%)',
+      notifyLikes: 'লাইক ও রিঅ্যাকশন',
+      notifyComments: 'কমেন্ট ও রিপ্লাই',
+      notifyFollows: 'নতুন ফলোয়ার',
+      notifyFriendRequests: 'ফলো রিকোয়েস্ট',
+      notifyStories: 'স্টোরি রিঅ্যাকশন ও অ্যাক্টিভিটি',
+      notifyMentions: 'মেনশন',
+      notifyAnnouncements: 'ব্রডকাস্ট ও ঘোষণা',
+      testNotification: 'টেস্ট নোটিফিকেশন পাঠান',
+      closeFriendsList: 'ক্লোজ ফ্রেন্ডস তালিকা',
     },
   },
 };

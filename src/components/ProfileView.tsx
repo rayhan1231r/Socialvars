@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react';
 import {
   ArrowLeft,
   Bookmark,
+  Cake,
+  Calendar,
   Camera,
   Check,
   CheckCircle2,
@@ -14,6 +16,7 @@ import {
   Flag,
   Grid,
   Image as ImageIcon,
+  Info,
   Loader2,
   Lock,
   LogOut,
@@ -32,7 +35,7 @@ import {
 } from 'lucide-react';
 import { useSocialVerse } from '../context/SocialVerseContext';
 import { IMG_ARIA, IMG_COASTAL, IMG_DESK, IMG_RAFI, IMG_SKYLINE } from '../data/seed';
-import type { NicknameFontStyle, StoryHighlightItem } from '../types/social';
+import type { NicknameFontStyle, StoryHighlightItem, UserPublic } from '../types/social';
 import {
   BROADCAST_MIN_FOLLOWERS,
   MAX_BIO_LENGTH,
@@ -41,9 +44,11 @@ import {
   canChangeUsername,
   canOpenBroadcastChannel,
   canViewPrivateProfileContent,
+  formatCalendarDate,
   formatCompactCount,
   formatRelativeTime,
   getMaskedUserDisplay,
+  isValidDateOfBirth,
   isValidHighlightTitle,
   isValidUsername,
   normalizeUsername,
@@ -100,6 +105,7 @@ export function ProfileView() {
     followingIds,
     followerIds,
     friendRequests,
+    notifications,
     toggleFollow,
     respondToFriendRequest,
     removeFollower,
@@ -152,12 +158,15 @@ export function ProfileView() {
   const [editWebsite, setEditWebsite] = useState(currentUser.website || '');
   const [editPhotoUrl, setEditPhotoUrl] = useState(currentUser.photoUrl);
   const [editCoverUrl, setEditCoverUrl] = useState(currentUser.coverUrl);
-  const [editInterests, setEditInterests] = useState<string[]>(currentUser.interests);
+  const [editInterests, setEditInterests] = useState<string[]>(currentUser.interests || []);
   const [editIsPrivate, setEditIsPrivate] = useState(currentUser.isPrivate);
   const [editError, setEditError] = useState<string | null>(null);
   const [savingEdit, setSavingEdit] = useState(false);
   const [uploadingKind, setUploadingKind] = useState<'avatar' | 'cover' | null>(null);
   const [directUploading, setDirectUploading] = useState<'avatar' | 'cover' | null>(null);
+  const [oneTimeDobInput, setOneTimeDobInput] = useState('');
+  const [oneTimeDobError, setOneTimeDobError] = useState<string | null>(null);
+  const [savingOneTimeDob, setSavingOneTimeDob] = useState(false);
 
   const nicknameCooldown = canChangeNickname(currentUser.lastNicknameChangedAt);
   const usernameCooldown = canChangeUsername(currentUser.lastUsernameChangedAt);
@@ -203,8 +212,42 @@ export function ProfileView() {
     );
   }
 
-  const profileUser =
-    (viewedProfileUid ? creators.find((u) => u.uid === viewedProfileUid) : null) || currentUser;
+  const foundCreator = viewedProfileUid
+    ? creators.find((u) => u.uid === viewedProfileUid)
+    : undefined;
+  const fallbackFromSignal: UserPublic | null = (() => {
+    if (!viewedProfileUid || viewedProfileUid === currentUser.uid) return null;
+    const notif = notifications.find((n) => n.actorUid === viewedProfileUid);
+    const req = friendRequests.find(
+      (r) => r.fromUid === viewedProfileUid || r.toUid === viewedProfileUid
+    );
+    const username = notif?.actorUsername || req?.fromUsername || viewedProfileUid;
+    const displayName = req?.fromDisplayName || notif?.actorUsername || 'SocialVerse Member';
+    const photoUrl = notif?.actorAvatar || req?.fromAvatar || '';
+    return {
+      uid: viewedProfileUid,
+      username,
+      displayName,
+      bio: '',
+      photoUrl,
+      coverUrl: '',
+      interests: [],
+      isPrivate: false,
+      followersCount: 0,
+      followingCount: 0,
+      postsCount: 0,
+      onlineStatus: 'offline',
+      lastSeenAt: new Date().toISOString(),
+      onboardingCompleted: true,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+  })();
+
+  const profileUser: UserPublic =
+    viewedProfileUid && viewedProfileUid !== currentUser.uid
+      ? foundCreator || fallbackFromSignal!
+      : currentUser;
   const isOwn = profileUser.uid === currentUser.uid;
   const masked = getMaskedUserDisplay(profileUser, currentUser.uid, profileUser.uid);
   const canViewContent = canViewPrivateProfileContent(profileUser, currentUser.uid, followingIds);
@@ -248,7 +291,7 @@ export function ProfileView() {
     setEditWebsite(currentUser.website || '');
     setEditPhotoUrl(currentUser.photoUrl);
     setEditCoverUrl(currentUser.coverUrl);
-    setEditInterests(currentUser.interests);
+    setEditInterests(currentUser.interests || []);
     setEditIsPrivate(currentUser.isPrivate);
     setEditError(null);
     setSubscreen('edit_profile');
@@ -442,6 +485,165 @@ export function ProfileView() {
   const broadcastUnlocked = canOpenBroadcastChannel(currentUser.followersCount);
   const nicknameClass = NICKNAME_FONT_CLASSES[profileUser.nicknameFont || 'classic'];
 
+  const handleSaveOneTimeDob = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setOneTimeDobError(null);
+    const check = isValidDateOfBirth(oneTimeDobInput);
+    if (!check.valid) {
+      setOneTimeDobError(
+        check.reason === 'too_young'
+          ? t.auth.dobTooYoung
+          : check.reason === 'future'
+          ? t.auth.dobFutureError
+          : t.auth.dobInvalidFormat
+      );
+      return;
+    }
+    setSavingOneTimeDob(true);
+    const err = await updateProfile({ dateOfBirth: check.normalized });
+    setSavingOneTimeDob(false);
+    if (err) {
+      setOneTimeDobError(err);
+    } else {
+      setOneTimeDobInput('');
+    }
+  };
+
+  if (subscreen === 'profile_about') {
+    const formattedDob =
+      !masked.isDeactivatedView && profileUser.dateOfBirth
+        ? formatCalendarDate(profileUser.dateOfBirth, language)
+        : '';
+    const formattedCreatedAt = formatCalendarDate(profileUser.createdAt, language);
+
+    return (
+      <div className="space-y-4">
+        <div className="flex items-center gap-3 px-1">
+          <button
+            type="button"
+            onClick={goBack}
+            className="min-h-[40px] px-3.5 rounded-xl liquid-glass-btn inline-flex items-center gap-1.5 text-xs font-semibold text-slate-800 dark:text-slate-100"
+          >
+            <ArrowLeft className="w-4 h-4" />
+            <span>{t.profile.back}</span>
+          </button>
+          <div className="min-w-0">
+            <h1 className="text-base font-display font-bold text-slate-900 dark:text-white truncate">
+              {t.profile.aboutPageTitle}
+            </h1>
+            <p className="text-[11px] text-slate-500 dark:text-slate-400 truncate">
+              {t.profile.aboutSubtitle}
+            </p>
+          </div>
+        </div>
+
+        <section className="liquid-glass rounded-3xl p-5 sm:p-6 space-y-5">
+          <div className="flex items-center gap-3.5 pb-4 border-b border-slate-200/70 dark:border-white/10">
+            <Avatar
+              src={masked.isDeactivatedView ? '' : profileUser.photoUrl}
+              name={masked.displayName}
+              size="lg"
+            />
+            <div className="min-w-0">
+              <p className={`text-lg text-slate-900 dark:text-white truncate ${nicknameClass}`}>
+                {masked.displayName}
+              </p>
+              <p className="text-xs text-slate-500 dark:text-slate-400 truncate">
+                @{masked.username}
+              </p>
+            </div>
+          </div>
+
+          <div className="space-y-3">
+            {/* Date of Birth Row */}
+            <div className="p-4 rounded-2xl liquid-glass-subtle space-y-3">
+              <div className="flex items-start gap-3">
+                <div className="w-10 h-10 rounded-xl bg-sky-500/12 text-sky-600 dark:text-sky-400 flex items-center justify-center shrink-0">
+                  <Cake className="w-5 h-5" />
+                </div>
+                <div className="min-w-0 flex-1 space-y-1">
+                  <div className="flex items-center justify-between gap-2 flex-wrap">
+                    <p className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                      {t.profile.dateOfBirth}
+                    </p>
+                    {formattedDob && (
+                      <span className="inline-flex items-center gap-1 text-[11px] font-medium text-amber-600 dark:text-amber-400">
+                        <Lock className="w-3 h-3" />
+                        <span>{t.profile.dobLockedNote}</span>
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-base font-semibold text-slate-900 dark:text-white">
+                    {masked.isDeactivatedView
+                      ? t.profile.dobNotProvided
+                      : formattedDob || t.profile.dobNotProvided}
+                  </p>
+                </div>
+              </div>
+
+              {isOwn && !profileUser.dateOfBirth && !masked.isDeactivatedView && (
+                <form onSubmit={handleSaveOneTimeDob} className="pt-2 border-t border-slate-200/60 dark:border-white/10 space-y-2.5">
+                  <label
+                    htmlFor="about-onetime-dob"
+                    className="block text-xs font-semibold text-slate-800 dark:text-slate-200"
+                  >
+                    {t.profile.setDobOnce}
+                  </label>
+                  <div className="flex flex-col sm:flex-row gap-2">
+                    <input
+                      id="about-onetime-dob"
+                      type="date"
+                      required
+                      min="1900-01-01"
+                      max={new Date().toISOString().slice(0, 10)}
+                      value={oneTimeDobInput}
+                      onChange={(e) => {
+                        setOneTimeDobInput(e.target.value);
+                        setOneTimeDobError(null);
+                      }}
+                      className="flex-1 min-h-[42px] px-3 rounded-xl bg-white/85 dark:bg-slate-900/80 border border-slate-200 dark:border-slate-700 text-sm text-slate-900 dark:text-white"
+                    />
+                    <button
+                      type="submit"
+                      disabled={savingOneTimeDob || !oneTimeDobInput}
+                      className="min-h-[42px] px-4 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-xs font-semibold disabled:opacity-50"
+                    >
+                      {savingOneTimeDob ? '...' : t.profile.saveDobOnce}
+                    </button>
+                  </div>
+                  <p className="text-[11px] text-amber-700 dark:text-amber-300 flex items-center gap-1.5">
+                    <Lock className="w-3.5 h-3.5 shrink-0" />
+                    <span>{t.auth.dobOneTimeWarning}</span>
+                  </p>
+                  {oneTimeDobError && (
+                    <p className="text-xs font-medium text-rose-600 dark:text-rose-400">
+                      {oneTimeDobError}
+                    </p>
+                  )}
+                </form>
+              )}
+            </div>
+
+            {/* Account Creation Date Row */}
+            <div className="p-4 rounded-2xl liquid-glass-subtle flex items-start gap-3">
+              <div className="w-10 h-10 rounded-xl bg-indigo-500/12 text-indigo-600 dark:text-indigo-400 flex items-center justify-center shrink-0">
+                <Calendar className="w-5 h-5" />
+              </div>
+              <div className="min-w-0 flex-1 space-y-1">
+                <p className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                  {t.profile.accountCreated}
+                </p>
+                <p className="text-base font-semibold text-slate-900 dark:text-white">
+                  {formattedCreatedAt || t.profile.dobNotProvided}
+                </p>
+              </div>
+            </div>
+          </div>
+        </section>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-5">
       {/* Top Profile Bar: Own Account Switcher / Other Profile Back */}
@@ -568,14 +770,14 @@ export function ProfileView() {
                   <button
                     type="button"
                     onClick={openEditProfileModal}
-                    className="min-h-[40px] px-3.5 rounded-xl liquid-glass-subtle text-xs font-semibold text-slate-900 dark:text-white whitespace-nowrap"
+                    className="min-h-[40px] px-4 rounded-xl liquid-glass-btn text-xs font-semibold text-slate-900 dark:text-white whitespace-nowrap"
                   >
                     {t.profile.editProfile}
                   </button>
                   <button
                     type="button"
                     onClick={() => setSubscreen('ai_assistant')}
-                    className="min-h-[40px] px-3.5 rounded-xl bg-sky-600 text-white text-xs font-semibold inline-flex items-center gap-1.5 hover:bg-sky-700 whitespace-nowrap"
+                    className="min-h-[40px] px-4 rounded-xl bg-sky-600 text-white text-xs font-semibold inline-flex items-center gap-1.5 hover:bg-sky-700 whitespace-nowrap shadow-sm shadow-sky-600/25"
                   >
                     <Sparkles className="w-3.5 h-3.5" />
                     <span>{t.profile.aiAssistant}</span>
@@ -587,10 +789,10 @@ export function ProfileView() {
                     <button
                       type="button"
                       onClick={() => toggleFollow(profileUser.uid)}
-                      className={`min-h-[40px] px-4 rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 ${
+                      className={`min-h-[40px] px-4 rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 transition-all duration-150 ${
                         isFollowing || hasPendingRequest
-                          ? 'bg-slate-200/80 dark:bg-slate-800 text-slate-800 dark:text-slate-200'
-                          : 'bg-sky-600 text-white'
+                          ? 'liquid-glass-btn text-slate-800 dark:text-slate-100'
+                          : 'bg-sky-600 hover:bg-sky-700 text-white shadow-sm shadow-sky-600/25'
                       }`}
                     >
                       {isFollowing ? (
@@ -605,7 +807,7 @@ export function ProfileView() {
                     <button
                       type="button"
                       onClick={handleMessageUser}
-                      className="min-h-[40px] px-4 rounded-xl liquid-glass-subtle text-xs font-semibold text-slate-900 dark:text-white inline-flex items-center gap-1.5"
+                      className="min-h-[40px] px-4 rounded-xl liquid-glass-btn text-xs font-semibold text-slate-900 dark:text-white inline-flex items-center gap-1.5"
                     >
                       <MessageSquare className="w-4 h-4" />
                       <span>{t.profile.message}</span>
@@ -617,7 +819,7 @@ export function ProfileView() {
                     onClick={() =>
                       openReportModal('user', profileUser.uid, `@${masked.username}`)
                     }
-                    className="min-h-[40px] min-w-[40px] rounded-xl liquid-glass-subtle flex items-center justify-center text-rose-600"
+                    className="min-h-[40px] min-w-[40px] rounded-xl liquid-glass-btn flex items-center justify-center text-rose-600"
                   >
                     <Flag className="w-4 h-4" />
                   </button>
@@ -625,9 +827,17 @@ export function ProfileView() {
               )}
               <button
                 type="button"
+                onClick={() => setSubscreen('profile_about')}
+                className="min-h-[40px] px-3.5 rounded-xl liquid-glass-btn text-xs font-semibold text-slate-800 dark:text-slate-100 inline-flex items-center gap-1.5 whitespace-nowrap"
+              >
+                <Info className="w-4 h-4 text-sky-600 dark:text-sky-400" />
+                <span>{t.profile.aboutOption}</span>
+              </button>
+              <button
+                type="button"
                 aria-label={t.profile.shareProfile}
                 onClick={handleShareProfile}
-                className="min-h-[40px] min-w-[40px] rounded-xl liquid-glass-subtle flex items-center justify-center text-slate-700 dark:text-slate-200"
+                className="min-h-[40px] min-w-[40px] rounded-xl liquid-glass-btn flex items-center justify-center text-slate-700 dark:text-slate-200"
               >
                 <Share2 className="w-4 h-4" />
               </button>
@@ -659,20 +869,24 @@ export function ProfileView() {
             )}
 
             {!masked.isDeactivatedView && profileUser.website && (
-              <a
-                href={profileUser.website}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="inline-flex items-center gap-1 text-xs font-semibold text-sky-600 dark:text-sky-400 hover:underline"
-              >
-                <ExternalLink className="w-3.5 h-3.5" />
-                <span>{profileUser.website.replace(/^https?:\/\//i, '')}</span>
-              </a>
+              <div className="pt-0.5">
+                <a
+                  href={profileUser.website}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-2 min-h-[36px] px-3.5 rounded-xl liquid-glass-btn text-xs font-semibold text-sky-600 dark:text-sky-400 hover:text-sky-500 transition-colors"
+                >
+                  <ExternalLink className="w-3.5 h-3.5 shrink-0" />
+                  <span className="truncate max-w-[260px]">
+                    {profileUser.website.replace(/^https?:\/\//i, '')}
+                  </span>
+                </a>
+              </div>
             )}
 
-            {!masked.isDeactivatedView && profileUser.interests.length > 0 && (
-              <p className="text-xs text-slate-500 dark:text-slate-400">
-                {profileUser.interests.join(' · ')}
+            {!masked.isDeactivatedView && (profileUser.interests || []).length > 0 && (
+              <p className="text-xs text-slate-500 dark:text-slate-400 pt-0.5">
+                {(profileUser.interests || []).join(' · ')}
               </p>
             )}
           </div>
@@ -1308,6 +1522,24 @@ export function ProfileView() {
                     className="w-full min-h-[44px] px-3.5 rounded-xl bg-white/80 dark:bg-slate-900/70 border border-slate-200 dark:border-slate-700 text-sm text-slate-900 dark:text-white"
                   />
                 </div>
+              </div>
+
+              {/* Permanent Date of Birth (Locked — Read Only) */}
+              <div className="p-3.5 rounded-2xl liquid-glass-subtle flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="text-xs font-semibold text-slate-800 dark:text-slate-200">
+                    {t.profile.dateOfBirth}
+                  </p>
+                  <p className="text-xs text-slate-600 dark:text-slate-300 mt-0.5">
+                    {currentUser.dateOfBirth
+                      ? formatCalendarDate(currentUser.dateOfBirth, language)
+                      : t.profile.dobNotProvided}
+                  </p>
+                </div>
+                <span className="inline-flex items-center gap-1 text-[11px] font-medium text-amber-600 dark:text-amber-400 shrink-0">
+                  <Lock className="w-3.5 h-3.5" />
+                  <span>{t.profile.dobLockedNote}</span>
+                </span>
               </div>
 
               {/* Bio (unlimited edits, max 150 chars) */}

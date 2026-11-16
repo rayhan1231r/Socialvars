@@ -14,11 +14,13 @@ export type ActiveModalOrSubscreen =
   | 'saved'
   | 'ai_assistant'
   | 'edit_profile'
+  | 'profile_about'
   | 'followers'
   | 'following'
   | 'friend_requests'
   | 'create_sheet'
   | 'settings_home'
+  | 'settings_notifications'
   | 'settings_privacy'
   | 'settings_security'
   | 'settings_account'
@@ -42,6 +44,7 @@ export interface UserPublic {
   pronouns?: string;
   website?: string;
   noteText?: string;
+  dateOfBirth?: string;
   photoUrl: string;
   coverUrl: string;
   interests: string[];
@@ -61,12 +64,15 @@ export interface UserPublic {
 }
 
 export interface NotificationPrefs {
+  pausedAll?: boolean;
   follows: boolean;
   friendRequests: boolean;
   likes: boolean;
   comments: boolean;
   stories: boolean;
   messages: boolean;
+  groupMessages?: boolean;
+  uploadProgress?: boolean;
   mentions: boolean;
   announcements: boolean;
 }
@@ -85,7 +91,17 @@ export interface UserPrivate {
   notificationPrefs: NotificationPrefs;
   blockedUserIds: string[];
   mutedStoryUserIds: string[];
+  closeFriendUids?: string[];
   updatedAt: string;
+}
+
+export interface UploadTaskState {
+  id: string;
+  kind: 'post' | 'reel' | 'story';
+  label: string;
+  progress: number;
+  status: 'uploading' | 'done' | 'error';
+  error?: string;
 }
 
 export type MediaType = 'text' | 'image' | 'carousel' | 'video' | 'reel';
@@ -134,6 +150,7 @@ export interface Story {
   textContent?: string;
   backgroundGradient?: string;
   privacy: 'everyone' | 'followers' | 'close_friends';
+  viewerInCloseFriends?: boolean;
   viewersCount: number;
   viewerUsernames: string[];
   reactions: { username: string; emoji: string }[];
@@ -196,6 +213,8 @@ export interface Chat {
   mutedByUids?: string[];
   archivedByUids?: string[];
   unreadByUids?: string[];
+  deletedByUids?: string[];
+  clearedBeforeByUid?: Record<string, string>;
   disappearingMode?: 'off' | '24h' | '7d';
   lastMessageText: string;
   lastMessageAt: string;
@@ -237,6 +256,8 @@ export interface NoteItem {
   authorDisplayName: string;
   authorAvatar: string;
   text: string;
+  audience?: 'followers' | 'close_friends';
+  viewerInCloseFriends?: boolean;
   likedByUids: string[];
   createdAt: string;
   expiresAt: string;

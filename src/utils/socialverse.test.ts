@@ -14,13 +14,16 @@ import {
   canViewPrivateProfileContent,
   canonicalizeEmail,
   extractHashtags,
+  formatCalendarDate,
   formatCompactCount,
   getMaskedUserDisplay,
   isAllowedSignupEmailProvider,
   isDisposableEmail,
   isHomeStoryVisibleToUser,
+  isNoteVisibleToUser,
   isStoryActive,
   isValidBio,
+  isValidDateOfBirth,
   isValidDisplayName,
   isValidHighlightTitle,
   isValidPostCaption,
@@ -31,6 +34,8 @@ import {
   mapFirebaseAuthError,
   normalizeUsername,
   normalizeWebsiteUrl,
+  requiresFollowApproval,
+  shouldNotifyUser,
   validateSignupEmail,
 } from './validation';
 import { TRANSLATIONS } from './i18n';
@@ -291,3 +296,50 @@ test('home stories bar only shows followed friends and own active stories', () =
     false
   );
 });
+
+test('follow approval requirement respects both private lock and whoCanFollow setting', () => {
+  assert.equal(requiresFollowApproval({ isPrivate: true }, { whoCanFollow: 'everyone' }), true);
+  assert.equal(requiresFollowApproval({ isPrivate: false }, { whoCanFollow: 'approval' }), true);
+  assert.equal(requiresFollowApproval({ isPrivate: false }, { whoCanFollow: 'everyone' }), false);
+  assert.equal(requiresFollowApproval({ isPrivate: false }, undefined), false);
+});
+
+test('dateOfBirth strict calendar, 13+ age, and timezone-safe formatting validation', () => {
+  const now = Date.UTC(2026, 10, 15, 12, 0, 0); // Nov 15, 2026
+  assert.equal(isValidDateOfBirth('2001-05-15', now).valid, true);
+  assert.equal(isValidDateOfBirth('2013-11-15', now).valid, true); // Exactly 13 today
+  assert.equal(isValidDateOfBirth('2013-11-16', now).reason, 'too_young'); // 13 tomorrow
+  assert.equal(isValidDateOfBirth('2027-01-01', now).reason, 'future');
+  assert.equal(isValidDateOfBirth('2000-02-30', now).reason, 'invalid_date');
+  assert.equal(isValidDateOfBirth('1899-12-31', now).reason, 'too_old');
+  assert.equal(isValidDateOfBirth('15-05-2001', now).reason, 'format');
+
+  assert.equal(formatCalendarDate('2001-05-15', 'en'), 'May 15, 2001');
+  assert.ok(formatCalendarDate('2026-11-15T10:00:00.000Z', 'en').includes('2026'));
+});
+
+test('close friends stories and notes are restricted to owner and approved close friends', () => {
+  const now = Date.UTC(2026, 10, 15, 12, 0, 0);
+  const future = new Date(now + 3600_000).toISOString();
+  const cfStory = { authorId: 'u_author', expiresAt: future, privacy: 'close_friends' as const };
+  const cfNote = { authorUid: 'u_author', expiresAt: future, audience: 'close_friends' as const };
+  const author = { uid: 'u_author', isPrivate: false, isDeactivated: false };
+
+  assert.equal(isHomeStoryVisibleToUser(cfStory, author, 'u_author', [], now, []), true);
+  assert.equal(isHomeStoryVisibleToUser(cfStory, author, 'u_bestie', ['u_author'], now, ['u_bestie']), true);
+  assert.equal(isHomeStoryVisibleToUser(cfStory, author, 'u_other', ['u_author'], now, ['u_bestie']), false);
+
+  assert.equal(isNoteVisibleToUser(cfNote, author, 'u_author', [], now, []), true);
+  assert.equal(isNoteVisibleToUser(cfNote, author, 'u_bestie', ['u_author'], now, ['u_bestie']), true);
+  assert.equal(isNoteVisibleToUser(cfNote, author, 'u_other', ['u_author'], now, ['u_bestie']), false);
+});
+
+test('notification gating honors pausedAll, per-type prefs, and muted chats', () => {
+  assert.equal(shouldNotifyUser(undefined, 'message', false), true);
+  assert.equal(shouldNotifyUser(undefined, 'group_message', true), false);
+  assert.equal(shouldNotifyUser({ pausedAll: true, messages: true }, 'message', false), false);
+  assert.equal(shouldNotifyUser({ groupMessages: false }, 'group_message', false), false);
+  assert.equal(shouldNotifyUser({ uploadProgress: false }, 'upload', false), false);
+  assert.equal(shouldNotifyUser({ uploadProgress: true, groupMessages: true }, 'upload', false), true);
+});
+

@@ -39,11 +39,12 @@ import type {
   StoryHighlight,
   StoryHighlightItem,
   ThemeMode,
+  UploadTaskState,
   UserPrivate,
   UserPublic,
 } from '../types/social';
 import { TRANSLATIONS, type TranslationBundle } from '../utils/i18n';
-import { MAX_BIO_LENGTH } from '../utils/validation';
+import { DEFAULT_NOTIFICATION_PREFS, MAX_BIO_LENGTH, shouldNotifyUser } from '../utils/validation';
 import { validateFirestoreConnection } from '../firebase';
 
 export type AuthStage = 'splash' | 'app';
@@ -77,6 +78,7 @@ export interface ProfileUpdatePayload {
   bio?: string;
   pronouns?: string;
   website?: string;
+  dateOfBirth?: string;
   photoUrl?: string;
   coverUrl?: string;
   interests?: string[];
@@ -88,6 +90,11 @@ interface NavSnapshot {
   viewedProfileUid: string | null;
   subscreen: ActiveModalOrSubscreen;
   activeChatId: string | null;
+  mobileThreadOpen: boolean;
+}
+
+function isSettingsSubscreen(sub: ActiveModalOrSubscreen): boolean {
+  return Boolean(sub && (sub.startsWith('settings_') || sub === 'android_project'));
 }
 
 interface BackendStateResponse {
@@ -149,6 +156,8 @@ interface SocialVerseContextValue {
   setActiveHighlightId: (id: string | null) => void;
   activeChatId: string | null;
   setActiveChatId: (id: string | null) => void;
+  mobileThreadOpen: boolean;
+  setMobileThreadOpen: (v: boolean) => void;
   reportTarget: { type: 'post' | 'user' | 'story' | 'comment'; id: string; label: string } | null;
   openReportModal: (type: 'post' | 'user' | 'story' | 'comment', id: string, label: string) => void;
 
@@ -172,6 +181,16 @@ interface SocialVerseContextValue {
   reports: ReportItem[];
   toastMessage: string | null;
   showToast: (msg: string) => void;
+  uploadTask: UploadTaskState | null;
+  clearUploadTask: () => void;
+  browserNotifPermission: 'default' | 'granted' | 'denied' | 'unsupported';
+  notifBannerDismissed: boolean;
+  dismissNotifBanner: () => void;
+  requestBrowserNotificationPermission: () => Promise<'default' | 'granted' | 'denied' | 'unsupported'>;
+  sendTestNotification: () => Promise<void>;
+  closeFriendsModalOpen: boolean;
+  setCloseFriendsModalOpen: (open: boolean) => void;
+  toggleCloseFriend: (targetUid: string) => Promise<void>;
 
   // Calls (WebRTC + WebSocket signaling)
   activeCall: CallState | null;
@@ -195,6 +214,7 @@ interface SocialVerseContextValue {
     displayName: string;
     nicknameFont: NicknameFontStyle;
     username: string;
+    dateOfBirth: string;
     photoUrl?: string;
     saveLogin?: boolean;
   }) => Promise<void>;
@@ -261,7 +281,7 @@ interface SocialVerseContextValue {
   fetchUserConnections: (targetUid: string) => Promise<{ followerIds: string[]; followingIds: string[] }>;
 
   // Notes & Stickers
-  publishNote: (text: string) => Promise<void>;
+  publishNote: (text: string, audience?: 'followers' | 'close_friends') => Promise<void>;
   deleteMyNote: () => Promise<void>;
   toggleLikeNote: (noteId: string) => Promise<void>;
   createSticker: (label: string, imageUrl: string, kind?: 'sticker' | 'gif') => Promise<StickerItem | null>;
@@ -303,6 +323,7 @@ interface SocialVerseContextValue {
       disappearingMode?: 'off' | '24h' | '7d';
     }
   ) => Promise<void>;
+  deleteChatFromInbox: (chatId: string) => Promise<void>;
   deleteMessage: (chatId: string, messageId: string) => Promise<void>;
   createDirectOrGroupChat: (
     title: string,
@@ -476,6 +497,7 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
   const [activeStoryIndex, setActiveStoryIndex] = useState<number | null>(null);
   const [activeHighlightId, setActiveHighlightId] = useState<string | null>(null);
   const [activeChatId, setActiveChatId] = useState<string | null>(null);
+  const [mobileThreadOpen, setMobileThreadOpen] = useState<boolean>(false);
   const [reportTarget, setReportTarget] = useState<{
     type: 'post' | 'user' | 'story' | 'comment';
     id: string;
@@ -500,9 +522,26 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
   const [notifications, setNotifications] = useState<AppNotification[]>(INITIAL_NOTIFICATIONS);
   const [reports, setReports] = useState<ReportItem[]>([]);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const [uploadTask, setUploadTask] = useState<UploadTaskState | null>(null);
+  const [browserNotifPermission, setBrowserNotifPermission] = useState<
+    'default' | 'granted' | 'denied' | 'unsupported'
+  >(() => {
+    if (typeof window === 'undefined' || !('Notification' in window)) return 'unsupported';
+    return window.Notification.permission;
+  });
+  const [notifBannerDismissed, setNotifBannerDismissed] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('sv_notif_banner_dismissed') === '1';
+    } catch {
+      return false;
+    }
+  });
+  const [closeFriendsModalOpen, setCloseFriendsModalOpen] = useState<boolean>(false);
   const [typingByChat, setTypingByChat] = useState<Record<string, string[]>>({});
   const typingTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const lastTypingSentRef = useRef<Record<string, number>>({});
+  const seenNotifIdsRef = useRef<Set<string>>(new Set());
+  const notifsInitializedRef = useRef<boolean>(false);
 
   // WebRTC Call State
   const [activeCall, setActiveCall] = useState<CallState | null>(null);
@@ -518,6 +557,93 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
   const showToast = useCallback((msg: string) => {
     setToastMessage(msg);
   }, []);
+
+  const clearUploadTask = useCallback(() => {
+    setUploadTask(null);
+  }, []);
+
+  const dismissNotifBanner = useCallback(() => {
+    setNotifBannerDismissed(true);
+    try {
+      localStorage.setItem('sv_notif_banner_dismissed', '1');
+    } catch {
+      // ignore storage errors
+    }
+  }, []);
+
+  const dispatchDeviceNotification = useCallback(
+    async (title: string, body: string, tag?: string, icon?: string) => {
+      if (typeof window === 'undefined' || !('Notification' in window)) return;
+      if (window.Notification.permission !== 'granted') return;
+      try {
+        if ('serviceWorker' in navigator && navigator.serviceWorker.controller) {
+          const reg = await navigator.serviceWorker.getRegistration();
+          if (reg && 'showNotification' in reg) {
+            await reg.showNotification(title, {
+              body,
+              tag,
+              icon: icon || undefined,
+            });
+            return;
+          }
+        }
+        new window.Notification(title, {
+          body,
+          tag,
+          icon: icon || undefined,
+        });
+      } catch {
+        // Fallback if Notifications constructor blocked inside strict iframe
+      }
+    },
+    []
+  );
+
+  const requestBrowserNotificationPermission = useCallback(async () => {
+    if (typeof window === 'undefined' || !('Notification' in window)) {
+      setBrowserNotifPermission('unsupported');
+      return 'unsupported' as const;
+    }
+    try {
+      const result = await window.Notification.requestPermission();
+      setBrowserNotifPermission(result);
+      if (result === 'granted') {
+        dismissNotifBanner();
+        void dispatchDeviceNotification(
+          'SocialVerse Notifications Enabled',
+          language === 'bn'
+            ? 'এখন থেকে মেসেজ, গ্রুপ, আপলোড ও সব অ্যাক্টিভিটির নোটিফিকেশন পাবেন।'
+            : 'You will now receive alerts for DMs, group messages, uploads, and activity.',
+          'sv-welcome'
+        );
+      }
+      return result;
+    } catch {
+      return browserNotifPermission;
+    }
+  }, [browserNotifPermission, dismissNotifBanner, dispatchDeviceNotification, language]);
+
+  const sendTestNotification = useCallback(async () => {
+    if (typeof window === 'undefined' || !('Notification' in window)) {
+      showToast(language === 'bn' ? 'এই ব্রাউজারে নোটিফিকেশন সাপোর্ট নেই' : 'Notifications unsupported in this browser');
+      return;
+    }
+    if (window.Notification.permission !== 'granted') {
+      const perm = await requestBrowserNotificationPermission();
+      if (perm !== 'granted') {
+        showToast(language === 'bn' ? 'ব্রাউজার থেকে নোটিফিকেশন পারমিশন দিন' : 'Enable browser notification permission first');
+        return;
+      }
+    }
+    await dispatchDeviceNotification(
+      'SocialVerse',
+      language === 'bn'
+        ? 'টেস্ট নোটিফিকেশন সফল হয়েছে!'
+        : 'Notifications are active on this device!',
+      'sv-test'
+    );
+    showToast(language === 'bn' ? 'টেস্ট নোটিফিকেশন পাঠানো হয়েছে' : 'Test notification sent');
+  }, [dispatchDeviceNotification, language, requestBrowserNotificationPermission, showToast]);
 
   useEffect(() => {
     if (!toastMessage) return;
@@ -577,31 +703,74 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
     });
   }, []);
 
-  const applyServerState = useCallback((data: BackendStateResponse) => {
-    if (data.currentUser) {
-      setCurrentUser(data.currentUser);
-    }
-    if (data.userPrivate) {
-      setUserPrivate({ ...INITIAL_USER_PRIVATE, ...data.userPrivate });
-      if (data.userPrivate.language) setLanguageState(data.userPrivate.language);
-      if (data.userPrivate.themeMode) setThemeState(data.userPrivate.themeMode === 'dark' ? 'dark' : 'light');
-    }
-    setCreators(data.creators || []);
-    setPosts(data.posts || []);
-    setCommentsByPost(data.commentsByPost || {});
-    setStories(data.stories || []);
-    setStoryHighlights(data.storyHighlights || []);
-    setChats(data.chats || []);
-    setMessagesByChat(data.messagesByChat || {});
-    setNotes(data.notes || []);
-    setStickers([...(data.stickers || []), ...DEFAULT_STICKERS]);
-    setFavoriteStickerIds(data.favoriteStickerIds || []);
-    setBroadcastChannels(data.broadcastChannels || []);
-    setFollowingIds(data.followingIds || []);
-    setFollowerIds(data.followerIds || []);
-    setFriendRequests(data.friendRequests || []);
-    setNotifications(data.notifications || []);
-  }, []);
+  const applyServerState = useCallback(
+    (data: BackendStateResponse) => {
+      if (data.currentUser) {
+        setCurrentUser(data.currentUser);
+      }
+      const nextPrivate: UserPrivate | null = data.userPrivate
+        ? {
+            ...INITIAL_USER_PRIVATE,
+            ...data.userPrivate,
+            notificationPrefs: {
+              ...DEFAULT_NOTIFICATION_PREFS,
+              ...(data.userPrivate.notificationPrefs || {}),
+            },
+            closeFriendUids: data.userPrivate.closeFriendUids || [],
+          }
+        : null;
+
+      if (nextPrivate) {
+        setUserPrivate(nextPrivate);
+        if (nextPrivate.language) setLanguageState(nextPrivate.language);
+        if (nextPrivate.themeMode)
+          setThemeState(nextPrivate.themeMode === 'dark' ? 'dark' : 'light');
+      }
+      setCreators(data.creators || []);
+      setPosts(data.posts || []);
+      setCommentsByPost(data.commentsByPost || {});
+      setStories(data.stories || []);
+      setStoryHighlights(data.storyHighlights || []);
+      setChats(data.chats || []);
+      setMessagesByChat(data.messagesByChat || {});
+      setNotes(data.notes || []);
+      setStickers([...(data.stickers || []), ...DEFAULT_STICKERS]);
+      setFavoriteStickerIds(data.favoriteStickerIds || []);
+      setBroadcastChannels(data.broadcastChannels || []);
+      setFollowingIds(data.followingIds || []);
+      setFollowerIds(data.followerIds || []);
+      setFriendRequests(data.friendRequests || []);
+      const incomingNotifs = data.notifications || [];
+      setNotifications(incomingNotifs);
+
+      if (!notifsInitializedRef.current) {
+        incomingNotifs.forEach((n) => seenNotifIdsRef.current.add(n.id));
+        if (data.currentUser) notifsInitializedRef.current = true;
+      } else {
+        const activePrefs = nextPrivate?.notificationPrefs || userPrivate.notificationPrefs;
+        const viewerUid = data.currentUser?.uid || currentUser.uid;
+        incomingNotifs.forEach((n) => {
+          if (seenNotifIdsRef.current.has(n.id)) return;
+          seenNotifIdsRef.current.add(n.id);
+          const matchedChat = n.targetId
+            ? (data.chats || []).find((c) => c.id === n.targetId)
+            : undefined;
+          const isMutedChat = Boolean(
+            matchedChat && viewerUid && matchedChat.mutedByUids?.includes(viewerUid)
+          );
+          if (!n.read && shouldNotifyUser(activePrefs, n.type, isMutedChat)) {
+            void dispatchDeviceNotification(
+              `@${n.actorUsername}`,
+              n.summary,
+              `sv-notif-${n.targetId || n.type}`,
+              n.actorAvatar
+            );
+          }
+        });
+      }
+    },
+    [currentUser.uid, dispatchDeviceNotification, userPrivate.notificationPrefs]
+  );
 
   const apiFetch = useCallback(
     async <T,>(url: string, options: RequestInit = {}, overrideToken?: string): Promise<T> => {
@@ -698,6 +867,31 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
         if (msg.type === 'state:sync') {
           if (msg.state) applyServerState(msg.state);
           else refreshState(sessionToken);
+        } else if (msg.type === 'notification:new' && msg.notification) {
+          const notif = msg.notification as AppNotification;
+          if (!seenNotifIdsRef.current.has(notif.id)) {
+            seenNotifIdsRef.current.add(notif.id);
+            setNotifications((prev) => [notif, ...prev.filter((n) => n.id !== notif.id)]);
+            const matchedChat = notif.targetId
+              ? chats.find((c) => c.id === notif.targetId)
+              : undefined;
+            const isMutedChat = Boolean(
+              matchedChat && matchedChat.mutedByUids?.includes(currentUser.uid)
+            );
+            if (shouldNotifyUser(userPrivate.notificationPrefs, notif.type, isMutedChat)) {
+              void dispatchDeviceNotification(
+                `@${notif.actorUsername}`,
+                notif.summary,
+                `sv-notif-${notif.targetId || notif.type}`,
+                notif.actorAvatar
+              );
+              const isInsideSameChat =
+                activeTab === 'messages' && activeChatId && activeChatId === notif.targetId;
+              if (!isInsideSameChat) {
+                showToast(`@${notif.actorUsername}: ${notif.summary}`);
+              }
+            }
+          }
         } else if (msg.type === 'call:offer') {
           pendingOfferRef.current = { fromUid: msg.fromUid, sdp: msg.sdp };
           setActiveCall({
@@ -746,7 +940,19 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
       ws.close();
       wsRef.current = null;
     };
-  }, [sessionToken, applyServerState, refreshState, cleanupMediaAndPeer, showToast]);
+  }, [
+    sessionToken,
+    applyServerState,
+    refreshState,
+    cleanupMediaAndPeer,
+    showToast,
+    chats,
+    currentUser.uid,
+    userPrivate.notificationPrefs,
+    dispatchDeviceNotification,
+    activeTab,
+    activeChatId,
+  ]);
 
   const openAuthModal = (reason?: string, prefillIdentifier?: string) => {
     setAuthModalReason(reason || null);
@@ -768,7 +974,10 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
 
   const setActiveTab = (tab: MainTab) => {
     setActiveTabState(tab);
-    if (subscreen === 'notifications') {
+    if (tab !== 'profile') {
+      setViewedProfileUid(null);
+    }
+    if (subscreen === 'notifications' || isSettingsSubscreen(subscreen) || subscreen === 'profile_about') {
       setSubscreenState(null);
     }
   };
@@ -786,10 +995,13 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
       openAuthModal();
       return;
     }
-    if (sub === 'notifications' && subscreen !== 'notifications') {
+    const enteringNotifications = sub === 'notifications' && subscreen !== 'notifications';
+    const enteringSettings = isSettingsSubscreen(sub) && !isSettingsSubscreen(subscreen);
+    const enteringProfileAbout = sub === 'profile_about' && subscreen !== 'profile_about';
+    if (enteringNotifications || enteringSettings || enteringProfileAbout) {
       setNavHistory((prev) => [
         ...prev.slice(-19),
-        { tab: activeTab, viewedProfileUid, subscreen, activeChatId },
+        { tab: activeTab, viewedProfileUid, subscreen, activeChatId, mobileThreadOpen },
       ]);
     }
     setSubscreenState(sub);
@@ -1181,16 +1393,137 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
     }
   };
 
+  // XHR Upload Helper with smooth 1%–100% progress + device/in-app notification updates
+  const uploadJsonWithProgress = useCallback(
+    async <T,>(
+      url: string,
+      payload: unknown,
+      kind: 'post' | 'reel' | 'story',
+      label: string
+    ): Promise<T> => {
+      const taskId = `up_${Date.now()}`;
+      let highestPct = 1;
+      const allowUploadAlert = shouldNotifyUser(userPrivate.notificationPrefs, 'upload');
+
+      setUploadTask({
+        id: taskId,
+        kind,
+        label,
+        progress: 1,
+        status: 'uploading',
+      });
+      if (allowUploadAlert) {
+        void dispatchDeviceNotification(label, '1% · Starting upload...', 'sv-upload-progress');
+      }
+
+      let lastOsMilestone = 0;
+
+      const data = await new Promise<T>((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', url, true);
+        xhr.setRequestHeader('Content-Type', 'application/json');
+        if (sessionToken) {
+          xhr.setRequestHeader('Authorization', `Bearer ${sessionToken}`);
+        }
+
+        xhr.upload.onprogress = (evt) => {
+          if (evt.lengthComputable && evt.total > 0) {
+            const rawPct = Math.round((evt.loaded / evt.total) * 88);
+            const pct = Math.max(highestPct, Math.min(88, Math.max(5, rawPct)));
+            highestPct = pct;
+            setUploadTask((prev) =>
+              prev && prev.id === taskId ? { ...prev, progress: pct } : prev
+            );
+            if (allowUploadAlert && pct - lastOsMilestone >= 35) {
+              lastOsMilestone = pct;
+              void dispatchDeviceNotification(label, `${pct}% · Uploading...`, 'sv-upload-progress');
+            }
+          }
+        };
+
+        xhr.onload = () => {
+          let parsed: unknown = {};
+          try {
+            parsed = JSON.parse(xhr.responseText || '{}');
+          } catch {
+            parsed = {};
+          }
+          if (xhr.status >= 200 && xhr.status < 300) {
+            resolve(parsed as T);
+          } else {
+            const errMsg =
+              (parsed as { error?: string })?.error || `Upload failed (${xhr.status})`;
+            reject(new Error(errMsg));
+          }
+        };
+
+        xhr.onerror = () => reject(new Error('Network error during upload.'));
+        xhr.send(JSON.stringify(payload));
+      }).catch((err) => {
+        const errMsg = err instanceof Error ? err.message : 'Upload failed';
+        setUploadTask({
+          id: taskId,
+          kind,
+          label,
+          progress: highestPct,
+          status: 'error',
+          error: errMsg,
+        });
+        if (allowUploadAlert) {
+          void dispatchDeviceNotification(`${label} failed`, errMsg, 'sv-upload-progress');
+        }
+        window.setTimeout(() => {
+          setUploadTask((prev) => (prev?.id === taskId ? null : prev));
+        }, 4200);
+        throw err;
+      });
+
+      // Ensure 1% -> 100% progress is smoothly visible even on rapid local uploads
+      const milestones = highestPct < 55 ? [28, 62, 88, 96, 100] : [95, 100];
+      for (const pct of milestones) {
+        if (pct <= highestPct && pct < 100) continue;
+        setUploadTask((prev) =>
+          prev && prev.id === taskId
+            ? { ...prev, progress: pct, status: pct === 100 ? 'done' : 'uploading' }
+            : prev
+        );
+        if (pct < 100) {
+          await new Promise((r) => setTimeout(r, 85));
+        }
+      }
+
+      if (allowUploadAlert) {
+        void dispatchDeviceNotification(
+          `${label} · 100%`,
+          language === 'bn' ? 'সফলভাবে প্রকাশিত হয়েছে!' : 'Published successfully!',
+          'sv-upload-progress'
+        );
+      }
+
+      window.setTimeout(() => {
+        setUploadTask((prev) => (prev?.id === taskId ? null : prev));
+      }, 2800);
+
+      return data;
+    },
+    [dispatchDeviceNotification, language, sessionToken, userPrivate.notificationPrefs]
+  );
+
   // Posts, Reels & Stories
   const createPost: SocialVerseContextValue['createPost'] = async (payload) => {
     if (!requireAuth()) return;
-    await apiFetch('/api/posts', {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    });
-    await refreshState();
+    const isReel = payload.mediaType === 'reel';
+    const label = isReel
+      ? language === 'bn'
+        ? 'রিল আপলোড হচ্ছে'
+        : 'Uploading Reel'
+      : language === 'bn'
+      ? 'পোস্ট আপলোড হচ্ছে'
+      : 'Uploading Post';
     setSubscreenState(null);
-    setActiveTab(payload.mediaType === 'reel' ? 'reels' : 'home');
+    await uploadJsonWithProgress('/api/posts', payload, isReel ? 'reel' : 'post', label);
+    await refreshState();
+    setActiveTab(isReel ? 'reels' : 'home');
     showToast(language === 'bn' ? 'প্রকাশিত হয়েছে!' : 'Published!');
   };
 
@@ -1310,12 +1643,10 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
 
   const createStory: SocialVerseContextValue['createStory'] = async (payload) => {
     if (!requireAuth()) return;
-    await apiFetch('/api/stories', {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    });
-    await refreshState();
+    const label = language === 'bn' ? 'স্টোরি আপলোড হচ্ছে' : 'Uploading Story';
     setSubscreenState(null);
+    await uploadJsonWithProgress('/api/stories', payload, 'story', label);
+    await refreshState();
     setActiveTab('home');
     showToast(language === 'bn' ? '২৪ ঘণ্টার স্টোরি প্রকাশিত হয়েছে' : '24-hour story published');
   };
@@ -1410,11 +1741,11 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
   };
 
   // Notes & Stickers
-  const publishNote = async (text: string) => {
+  const publishNote = async (text: string, audience: 'followers' | 'close_friends' = 'followers') => {
     if (!requireAuth()) return;
     await apiFetch('/api/notes', {
       method: 'POST',
-      body: JSON.stringify({ text }),
+      body: JSON.stringify({ text, audience }),
     });
     await refreshState();
     showToast(language === 'bn' ? 'নোট শেয়ার হয়েছে' : 'Note shared');
@@ -1465,47 +1796,183 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
 
   const sendMessage: SocialVerseContextValue['sendMessage'] = async (chatId, payload) => {
     if (!requireAuth()) return;
-    await apiFetch(`/api/chats/${chatId}/messages`, {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    });
-    await refreshState();
+    const tempId = `temp_m_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+    const nowIso = new Date().toISOString();
+    const targetChat = chats.find((c) => c.id === chatId);
+    const optimisticMsg: ChatMessage = {
+      id: tempId,
+      chatId,
+      senderId: currentUser.uid,
+      senderName: targetChat?.chatNicknames?.[currentUser.uid] || currentUser.displayName,
+      type: payload.type || 'text',
+      text: payload.text,
+      mediaUrl: payload.mediaUrl,
+      stickerUrl: payload.stickerUrl,
+      sharedPostId: payload.sharedPostId,
+      sharedPostCaption: payload.sharedPostCaption,
+      sharedPostThumb: payload.sharedPostThumb,
+      sharedPostAuthor: payload.sharedPostAuthor,
+      fileName: payload.fileName,
+      durationMs: payload.durationMs,
+      replyToId: payload.replyToId,
+      replyPreview: payload.replyPreview,
+      forwarded: Boolean(payload.forwarded),
+      starredByUids: [],
+      status: 'delivered',
+      reactions: {},
+      createdAt: nowIso,
+    };
+    const previewText =
+      optimisticMsg.type === 'sticker'
+        ? 'Sent a sticker'
+        : optimisticMsg.type === 'reel_share'
+        ? 'Shared a reel'
+        : optimisticMsg.type === 'voice'
+        ? 'Voice message'
+        : optimisticMsg.text || optimisticMsg.fileName || 'Attachment';
+
+    setMessagesByChat((prev) => ({
+      ...prev,
+      [chatId]: [...(prev[chatId] || []), optimisticMsg],
+    }));
+    setChats((prev) =>
+      prev.map((c) =>
+        c.id === chatId
+          ? {
+              ...c,
+              lastMessageText: previewText,
+              lastMessageAt: nowIso,
+              archivedByUids: [],
+            }
+          : c
+      )
+    );
+
+    try {
+      const res = await apiFetch<{ message: ChatMessage }>(`/api/chats/${chatId}/messages`, {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+      if (res?.message) {
+        setMessagesByChat((prev) => ({
+          ...prev,
+          [chatId]: (prev[chatId] || []).map((m) => (m.id === tempId ? res.message : m)),
+        }));
+      }
+    } catch (err) {
+      setMessagesByChat((prev) => ({
+        ...prev,
+        [chatId]: (prev[chatId] || []).filter((m) => m.id !== tempId),
+      }));
+      void refreshState();
+      showToast(err instanceof Error ? err.message : 'Could not send message.');
+    }
   };
 
   const editMessage = async (chatId: string, messageId: string, text: string) => {
     if (!requireAuth()) return;
-    await apiFetch(`/api/chats/${chatId}/messages/${messageId}`, {
-      method: 'PATCH',
-      body: JSON.stringify({ text }),
-    });
-    await refreshState();
+    const trimmed = text.trim();
+    const nowIso = new Date().toISOString();
+    setMessagesByChat((prev) => ({
+      ...prev,
+      [chatId]: (prev[chatId] || []).map((m) =>
+        m.id === messageId ? { ...m, text: trimmed, editedAt: nowIso } : m
+      ),
+    }));
     showToast(language === 'bn' ? 'মেসেজ সম্পাদনা হয়েছে' : 'Message edited');
+    try {
+      const res = await apiFetch<{ message: ChatMessage }>(
+        `/api/chats/${chatId}/messages/${messageId}`,
+        {
+          method: 'PATCH',
+          body: JSON.stringify({ text: trimmed }),
+        }
+      );
+      if (res?.message) {
+        setMessagesByChat((prev) => ({
+          ...prev,
+          [chatId]: (prev[chatId] || []).map((m) => (m.id === messageId ? res.message : m)),
+        }));
+      }
+    } catch (err) {
+      void refreshState();
+      showToast(err instanceof Error ? err.message : 'Could not edit message.');
+    }
   };
 
   const reactToMessage = async (chatId: string, messageId: string, emoji: string) => {
     if (!requireAuth()) return;
-    await apiFetch(`/api/chats/${chatId}/messages/${messageId}/react`, {
-      method: 'POST',
-      body: JSON.stringify({ emoji }),
-    });
-    await refreshState();
+    setMessagesByChat((prev) => ({
+      ...prev,
+      [chatId]: (prev[chatId] || []).map((m) => {
+        if (m.id !== messageId) return m;
+        const cur = m.reactions?.[emoji] || [];
+        const nextList = cur.includes(currentUser.uid)
+          ? cur.filter((id) => id !== currentUser.uid)
+          : [...cur, currentUser.uid];
+        return { ...m, reactions: { ...(m.reactions || {}), [emoji]: nextList } };
+      }),
+    }));
+    try {
+      const res = await apiFetch<{ reactions: Record<string, string[]> }>(
+        `/api/chats/${chatId}/messages/${messageId}/react`,
+        {
+          method: 'POST',
+          body: JSON.stringify({ emoji }),
+        }
+      );
+      if (res?.reactions) {
+        setMessagesByChat((prev) => ({
+          ...prev,
+          [chatId]: (prev[chatId] || []).map((m) =>
+            m.id === messageId ? { ...m, reactions: res.reactions } : m
+          ),
+        }));
+      }
+    } catch {
+      void refreshState();
+    }
   };
 
   const starMessage = async (chatId: string, messageId: string) => {
     if (!requireAuth()) return;
-    await apiFetch(`/api/chats/${chatId}/messages/${messageId}/star`, {
-      method: 'POST',
-    });
-    await refreshState();
+    setMessagesByChat((prev) => ({
+      ...prev,
+      [chatId]: (prev[chatId] || []).map((m) => {
+        if (m.id !== messageId) return m;
+        const cur = m.starredByUids || [];
+        const exists = cur.includes(currentUser.uid);
+        return {
+          ...m,
+          starredByUids: exists ? cur.filter((id) => id !== currentUser.uid) : [...cur, currentUser.uid],
+        };
+      }),
+    }));
+    try {
+      const res = await apiFetch<{ starredByUids: string[] }>(
+        `/api/chats/${chatId}/messages/${messageId}/star`,
+        {
+          method: 'POST',
+        }
+      );
+      if (Array.isArray(res?.starredByUids)) {
+        setMessagesByChat((prev) => ({
+          ...prev,
+          [chatId]: (prev[chatId] || []).map((m) =>
+            m.id === messageId ? { ...m, starredByUids: res.starredByUids } : m
+          ),
+        }));
+      }
+    } catch {
+      void refreshState();
+    }
   };
 
   const pinMessage = async (chatId: string, messageId: string | null) => {
     if (!requireAuth()) return;
-    await apiFetch(`/api/chats/${chatId}/pin`, {
-      method: 'POST',
-      body: JSON.stringify({ messageId }),
-    });
-    await refreshState();
+    setChats((prev) =>
+      prev.map((c) => (c.id === chatId ? { ...c, pinnedMessageId: messageId || undefined } : c))
+    );
     showToast(
       messageId
         ? language === 'bn'
@@ -1515,15 +1982,32 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
         ? 'পিন সরানো হয়েছে'
         : 'Message unpinned'
     );
+    try {
+      await apiFetch(`/api/chats/${chatId}/pin`, {
+        method: 'POST',
+        body: JSON.stringify({ messageId }),
+      });
+    } catch {
+      void refreshState();
+    }
   };
 
   const forwardMessage = async (chatId: string, messageId: string, targetChatId: string) => {
     if (!requireAuth()) return;
-    await apiFetch(`/api/chats/${chatId}/messages/${messageId}/forward`, {
-      method: 'POST',
-      body: JSON.stringify({ targetChatId }),
-    });
-    await refreshState();
+    const res = await apiFetch<{ message?: ChatMessage }>(
+      `/api/chats/${chatId}/messages/${messageId}/forward`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ targetChatId }),
+      }
+    );
+    if (res?.message) {
+      setMessagesByChat((prev) => ({
+        ...prev,
+        [targetChatId]: [...(prev[targetChatId] || []), res.message!],
+      }));
+    }
+    void refreshState();
     showToast(language === 'bn' ? 'মেসেজ ফরওয়ার্ড হয়েছে' : 'Message forwarded');
   };
 
@@ -1532,17 +2016,81 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
     prefs
   ) => {
     if (!requireAuth()) return;
-    await apiFetch(`/api/chats/${chatId}/preferences`, {
-      method: 'PATCH',
-      body: JSON.stringify(prefs),
+    const toggle = (arr: string[] | undefined, val: boolean | undefined) => {
+      if (val === undefined) return arr || [];
+      const cur = arr || [];
+      return val
+        ? Array.from(new Set([...cur, currentUser.uid]))
+        : cur.filter((id) => id !== currentUser.uid);
+    };
+    setChats((prev) =>
+      prev.map((c) =>
+        c.id === chatId
+          ? {
+              ...c,
+              pinnedByUids: toggle(c.pinnedByUids, prefs.pinned),
+              mutedByUids: toggle(c.mutedByUids, prefs.muted),
+              archivedByUids: toggle(c.archivedByUids, prefs.archived),
+              unreadByUids: toggle(c.unreadByUids, prefs.unread),
+              unreadCount: prefs.unread === false ? 0 : c.unreadCount,
+              ...(prefs.disappearingMode ? { disappearingMode: prefs.disappearingMode } : {}),
+            }
+          : c
+      )
+    );
+    try {
+      const res = await apiFetch<{ chat?: Chat }>(`/api/chats/${chatId}/preferences`, {
+        method: 'PATCH',
+        body: JSON.stringify(prefs),
+      });
+      if (res?.chat) {
+        setChats((prev) => prev.map((c) => (c.id === chatId ? res.chat! : c)));
+      }
+    } catch {
+      void refreshState();
+    }
+  };
+
+  const deleteChatFromInbox = async (chatId: string) => {
+    if (!requireAuth()) return;
+    const target = chats.find((c) => c.id === chatId);
+    setChats((prev) => prev.filter((c) => c.id !== chatId));
+    setMessagesByChat((prev) => {
+      const next = { ...prev };
+      delete next[chatId];
+      return next;
     });
-    await refreshState();
+    if (activeChatId === chatId) {
+      setActiveChatId(null);
+      setMobileThreadOpen(false);
+    }
+    showToast(
+      target?.type === 'group'
+        ? language === 'bn'
+          ? 'গ্রুপ ইনবক্স থেকে মুছে ফেলা হয়েছে'
+          : 'Group deleted from inbox'
+        : language === 'bn'
+        ? 'চ্যাট ইনবক্স থেকে মুছে ফেলা হয়েছে'
+        : 'Chat deleted from inbox'
+    );
+    try {
+      await apiFetch(`/api/chats/${chatId}`, { method: 'DELETE' });
+    } catch {
+      void refreshState();
+    }
   };
 
   const deleteMessage = async (chatId: string, messageId: string) => {
     if (!requireAuth()) return;
-    await apiFetch(`/api/chats/${chatId}/messages/${messageId}`, { method: 'DELETE' });
-    await refreshState();
+    setMessagesByChat((prev) => ({
+      ...prev,
+      [chatId]: (prev[chatId] || []).filter((m) => m.id !== messageId),
+    }));
+    try {
+      await apiFetch(`/api/chats/${chatId}/messages/${messageId}`, { method: 'DELETE' });
+    } catch {
+      void refreshState();
+    }
   };
 
   const createDirectOrGroupChat = async (
@@ -1933,21 +2481,40 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
     const wasPending = friendRequests.some(
       (r) => r.fromUid === currentUser.uid && r.toUid === targetUid && r.status === 'pending'
     );
+    const tempReqId = `temp_fr_${Date.now()}`;
 
-    // Optimistic update for snappy Follow / Follow Back feedback
+    // Optimistic update for snappy Follow / Follow Back / Private Request feedback
     if (wasFollowing) {
       setFollowingIds((prev) => prev.filter((id) => id !== targetUid));
-    } else if (!target?.isPrivate) {
-      setFollowingIds((prev) => Array.from(new Set([...prev, targetUid])));
     } else if (wasPending) {
       setFriendRequests((prev) =>
-        prev.filter((r) => !(r.fromUid === currentUser.uid && r.toUid === targetUid && r.status === 'pending'))
+        prev.filter(
+          (r) => !(r.fromUid === currentUser.uid && r.toUid === targetUid && r.status === 'pending')
+        )
       );
+    } else if (target?.isPrivate) {
+      setFriendRequests((prev) => [
+        {
+          id: tempReqId,
+          fromUid: currentUser.uid,
+          fromUsername: currentUser.username,
+          fromDisplayName: currentUser.displayName,
+          fromAvatar: currentUser.photoUrl,
+          toUid: targetUid,
+          status: 'pending',
+          mutualCount: 0,
+          createdAt: new Date().toISOString(),
+        },
+        ...prev,
+      ]);
+    } else {
+      setFollowingIds((prev) => Array.from(new Set([...prev, targetUid])));
     }
 
     try {
       const res = await apiFetch<{
         status: string;
+        request?: FriendRequest;
         followingIds?: string[];
         targetFollowersCount?: number;
       }>(`/api/users/${targetUid}/follow`, {
@@ -1957,8 +2524,32 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
         setFollowingIds(res.followingIds);
       }
       if (res.status === 'requested') {
+        const nextReq: FriendRequest = res.request || {
+          id: tempReqId,
+          fromUid: currentUser.uid,
+          fromUsername: currentUser.username,
+          fromDisplayName: currentUser.displayName,
+          fromAvatar: currentUser.photoUrl,
+          toUid: targetUid,
+          status: 'pending',
+          mutualCount: 0,
+          createdAt: new Date().toISOString(),
+        };
+        setFriendRequests((prev) => {
+          const withoutTempOrDup = prev.filter(
+            (r) =>
+              r.id !== tempReqId &&
+              !(r.fromUid === currentUser.uid && r.toUid === targetUid && r.status === 'pending')
+          );
+          return [nextReq, ...withoutTempOrDup];
+        });
         showToast(language === 'bn' ? 'ফলো রিকোয়েস্ট পাঠানো হয়েছে' : 'Follow request sent');
       } else if (res.status === 'cancelled') {
+        setFriendRequests((prev) =>
+          prev.filter(
+            (r) => !(r.fromUid === currentUser.uid && r.toUid === targetUid && r.status === 'pending')
+          )
+        );
         showToast(language === 'bn' ? 'ফলো রিকোয়েস্ট বাতিল হয়েছে' : 'Follow request cancelled');
       }
       void refreshState();
@@ -2052,6 +2643,25 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
     }
   };
 
+  const toggleCloseFriend = async (targetUid: string) => {
+    if (!requireAuth() || !targetUid || targetUid === currentUser.uid) return;
+    const currentList = userPrivate.closeFriendUids || [];
+    const exists = currentList.includes(targetUid);
+    const nextList = exists
+      ? currentList.filter((id) => id !== targetUid)
+      : [...currentList, targetUid];
+    await updatePrivateSettings({ closeFriendUids: nextList });
+    showToast(
+      exists
+        ? language === 'bn'
+          ? 'ক্লোজ ফ্রেন্ডস থেকে সরানো হয়েছে'
+          : 'Removed from Close Friends'
+        : language === 'bn'
+        ? 'ক্লোজ ফ্রেন্ডসে যোগ করা হয়েছে'
+        : 'Added to Close Friends'
+    );
+  };
+
   const markAllNotificationsRead = async () => {
     if (!isAuthenticated) return;
     await apiFetch('/api/notifications/read-all', { method: 'POST' });
@@ -2090,7 +2700,7 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
     if (!isAlreadyThatProfile) {
       setNavHistory((prev) => [
         ...prev.slice(-19),
-        { tab: activeTab, viewedProfileUid, subscreen, activeChatId },
+        { tab: activeTab, viewedProfileUid, subscreen, activeChatId, mobileThreadOpen },
       ]);
     }
     setViewedProfileUid(uid);
@@ -2106,9 +2716,10 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
       setViewedProfileUid(prevSnap.viewedProfileUid);
       setSubscreenState(prevSnap.subscreen);
       setActiveChatId(prevSnap.activeChatId);
+      setMobileThreadOpen(prevSnap.mobileThreadOpen);
       return;
     }
-    if (subscreen === 'notifications') {
+    if (subscreen === 'notifications' || isSettingsSubscreen(subscreen) || subscreen === 'profile_about') {
       setSubscreenState(null);
       return;
     }
@@ -2185,7 +2796,12 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
         setSubscreen,
         viewedProfileUid,
         openUserProfile,
-        canGoBack: navHistory.length > 0 || subscreen === 'notifications' || Boolean(viewedProfileUid && viewedProfileUid !== currentUser.uid),
+        canGoBack:
+          navHistory.length > 0 ||
+          subscreen === 'notifications' ||
+          subscreen === 'profile_about' ||
+          isSettingsSubscreen(subscreen) ||
+          Boolean(viewedProfileUid && viewedProfileUid !== currentUser.uid),
         goBack,
         activeStoryIndex,
         setActiveStoryIndex,
@@ -2193,6 +2809,8 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
         setActiveHighlightId,
         activeChatId,
         setActiveChatId,
+        mobileThreadOpen,
+        setMobileThreadOpen,
         reportTarget,
         openReportModal,
         creators,
@@ -2215,6 +2833,16 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
         reports,
         toastMessage,
         showToast,
+        uploadTask,
+        clearUploadTask,
+        browserNotifPermission,
+        notifBannerDismissed,
+        dismissNotifBanner,
+        requestBrowserNotificationPermission,
+        sendTestNotification,
+        closeFriendsModalOpen,
+        setCloseFriendsModalOpen,
+        toggleCloseFriend,
         activeCall,
         localStream,
         remoteStream,
@@ -2268,6 +2896,7 @@ export function SocialVerseProvider({ children }: { children: React.ReactNode })
         pinMessage,
         forwardMessage,
         updateChatPreferences,
+        deleteChatFromInbox,
         deleteMessage,
         createDirectOrGroupChat,
         updateChatTheme,

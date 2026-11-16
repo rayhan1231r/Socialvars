@@ -1,9 +1,11 @@
 import {
   Bell,
+  CheckCircle2,
   Clapperboard,
   Compass,
   Globe,
   Home,
+  Loader2,
   LogIn,
   MessageCircle,
   Moon,
@@ -11,7 +13,9 @@ import {
   Settings,
   Sparkles,
   Sun,
+  UploadCloud,
   User,
+  X,
 } from 'lucide-react';
 import { useSocialVerse } from '../context/SocialVerseContext';
 import type { MainTab } from '../types/social';
@@ -27,7 +31,7 @@ import { MessagesView } from './MessagesView';
 import { NotificationsView } from './NotificationsView';
 import { ProfileView } from './ProfileView';
 import { ReelsView } from './ReelsView';
-import { SettingsAndModals } from './SettingsAndModals';
+import { SettingsAndModals, SettingsPage } from './SettingsAndModals';
 
 export function AppShell() {
   const {
@@ -50,6 +54,12 @@ export function AppShell() {
     theme,
     setTheme,
     toastMessage,
+    uploadTask,
+    clearUploadTask,
+    browserNotifPermission,
+    notifBannerDismissed,
+    dismissNotifBanner,
+    requestBrowserNotificationPermission,
     t,
   } = useSocialVerse();
 
@@ -89,10 +99,14 @@ export function AppShell() {
     .filter((c) => c.uid !== currentUser.uid && !c.isDeactivated)
     .slice(0, 4);
 
-  const isFullScreenInbox = activeTab === 'messages';
+  const isSettingsPage = Boolean(
+    subscreen && (subscreen.startsWith('settings_') || subscreen === 'android_project')
+  );
+  const isFullScreenInbox =
+    activeTab === 'messages' && subscreen !== 'notifications' && !isSettingsPage;
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-100 via-sky-50/70 to-cyan-50/70 dark:from-slate-950 dark:via-slate-900 dark:to-sky-950 text-slate-900 dark:text-slate-100 transition-colors">
+    <div className="min-h-screen bg-gradient-to-br from-slate-100 via-sky-50/70 to-cyan-50/70 dark:from-[#03050c] dark:via-[#070b18] dark:to-[#040a16] text-slate-900 dark:text-slate-100 transition-colors">
       {isFullScreenInbox ? (
         <main className="h-[100dvh] w-full overflow-hidden">
           <MessagesView />
@@ -133,7 +147,7 @@ export function AppShell() {
                 type="button"
                 aria-label="Toggle language"
                 onClick={() => setLanguage(language === 'en' ? 'bn' : 'en')}
-                className="min-h-[40px] px-1.5 rounded-xl text-xs font-semibold text-slate-700 dark:text-slate-200 whitespace-nowrap"
+                className="min-h-[40px] px-2 rounded-xl liquid-glass-btn text-xs font-semibold text-slate-700 dark:text-slate-200 whitespace-nowrap"
               >
                 {language === 'en' ? 'বাংলা' : 'EN'}
               </button>
@@ -141,7 +155,7 @@ export function AppShell() {
                 type="button"
                 aria-label="Toggle theme"
                 onClick={() => setTheme(theme === 'light' ? 'dark' : 'light')}
-                className="min-h-[40px] min-w-[34px] flex items-center justify-center rounded-xl text-slate-700 dark:text-slate-200"
+                className="min-h-[40px] min-w-[38px] flex items-center justify-center rounded-xl liquid-glass-btn text-slate-700 dark:text-slate-200"
               >
                 {theme === 'light' ? <Moon className="w-4 h-4" /> : <Sun className="w-4 h-4" />}
               </button>
@@ -149,7 +163,11 @@ export function AppShell() {
                 type="button"
                 aria-label={t.settings.title}
                 onClick={() => setSubscreen('settings_home')}
-                className="min-h-[40px] min-w-[34px] flex items-center justify-center rounded-xl text-slate-700 dark:text-slate-200"
+                className={`min-h-[40px] min-w-[38px] flex items-center justify-center rounded-xl transition-all duration-150 ${
+                  isSettingsPage
+                    ? 'bg-sky-600 text-white shadow-md shadow-sky-600/25'
+                    : 'liquid-glass-btn text-slate-700 dark:text-slate-200'
+                }`}
               >
                 <Settings className="w-4.5 h-4.5" />
               </button>
@@ -157,7 +175,7 @@ export function AppShell() {
                 <button
                   type="button"
                   onClick={() => openAuthModal()}
-                  className="min-h-[34px] px-2.5 rounded-xl bg-sky-600 text-white text-xs font-semibold whitespace-nowrap ml-0.5"
+                  className="min-h-[38px] px-3 rounded-xl bg-sky-600 text-white text-xs font-semibold whitespace-nowrap ml-0.5 shadow-sm"
                 >
                   {t.auth.signIn}
                 </button>
@@ -186,7 +204,8 @@ export function AppShell() {
 
                 <nav aria-label="Main navigation" className="space-y-1.5">
                   {navItems.map(({ id, label, icon: Icon }) => {
-                    const active = activeTab === id && subscreen !== 'notifications';
+                    const active =
+                      activeTab === id && subscreen !== 'notifications' && !isSettingsPage;
                     return (
                       <button
                         key={id}
@@ -263,7 +282,11 @@ export function AppShell() {
                   <button
                     type="button"
                     onClick={() => setSubscreen('settings_home')}
-                    className="w-full min-h-[42px] px-3.5 rounded-xl flex items-center gap-2.5 text-xs font-semibold text-slate-700 dark:text-slate-300 hover:bg-white/60 dark:hover:bg-white/10 transition-colors duration-150"
+                    className={`w-full min-h-[42px] px-3.5 rounded-xl flex items-center gap-2.5 text-xs font-semibold transition-all duration-150 ${
+                      isSettingsPage
+                        ? 'bg-sky-600 text-white shadow-sm'
+                        : 'text-slate-700 dark:text-slate-300 hover:bg-white/60 dark:hover:bg-white/10'
+                    }`}
                   >
                     <Settings className="w-4 h-4" />
                     <span>{t.settings.title}</span>
@@ -312,6 +335,8 @@ export function AppShell() {
             <main className="lg:col-span-6">
               {subscreen === 'notifications' ? (
                 <NotificationsView />
+              ) : isSettingsPage ? (
+                <SettingsPage />
               ) : (
                 <>
                   {activeTab === 'home' && <HomeFeed />}
@@ -395,23 +420,24 @@ export function AppShell() {
           {/* Mobile Fixed 5-Tab iOS Liquid Glass Floating Dock */}
           <nav
             aria-label="Mobile bottom navigation"
-            className="lg:hidden fixed bottom-2.5 left-2.5 right-2.5 z-40 h-16 px-1.5 rounded-[26px] liquid-glass-dock grid grid-cols-5 items-center gap-1"
+            className="lg:hidden fixed bottom-2.5 left-2.5 right-2.5 z-40 h-[66px] px-1.5 rounded-[28px] liquid-glass-dock grid grid-cols-5 items-center gap-1"
           >
             {navItems.map(({ id, label, icon: Icon }) => {
-              const active = activeTab === id && subscreen !== 'notifications';
+              const active =
+                activeTab === id && subscreen !== 'notifications' && !isSettingsPage;
               return (
                 <button
                   key={id}
                   type="button"
                   onClick={() => handleNavClick(id)}
-                  className={`relative min-h-[48px] mx-0.5 rounded-[20px] flex flex-col items-center justify-center gap-0.5 transition-all duration-150 active:scale-95 ${
+                  className={`relative min-h-[50px] mx-0.5 rounded-[22px] flex flex-col items-center justify-center gap-0.5 transition-all duration-150 active:scale-95 ${
                     active
-                      ? 'bg-white/80 dark:bg-white/15 text-sky-600 dark:text-sky-300 shadow-[inset_0_1px_0_rgba(255,255,255,0.9),0_4px_14px_rgba(14,165,233,0.18)] dark:shadow-[inset_0_1px_0_rgba(255,255,255,0.24),0_4px_16px_rgba(56,189,248,0.22)]'
-                      : 'text-slate-600 dark:text-slate-300 hover:bg-white/35 dark:hover:bg-white/5'
+                      ? 'liquid-glass-capsule-active text-sky-600 dark:text-sky-300'
+                      : 'text-slate-700 dark:text-slate-300 hover:bg-white/35 dark:hover:bg-white/5'
                   }`}
                 >
                   <div className="relative">
-                    <Icon className="w-5 h-5" />
+                    <Icon className={`w-5 h-5 transition-transform duration-150 ${active ? 'scale-105' : ''}`} />
                     {id === 'messages' && unreadMessages > 0 && (
                       <span className="absolute -top-0.5 -right-1 w-2 h-2 rounded-full bg-sky-500 ring-2 ring-white dark:ring-slate-900" />
                     )}
@@ -434,6 +460,119 @@ export function AppShell() {
       <SettingsAndModals />
       <AuthModal />
       <ProfilePhotoSetupModal />
+
+      {/* Polite Browser / Device Notification Permission Prompt */}
+      {isAuthenticated && browserNotifPermission === 'default' && !notifBannerDismissed && !uploadTask && (
+        <div
+          role="region"
+          aria-label={t.settings.deviceNotifications}
+          className={`fixed right-3 sm:right-5 z-[55] max-w-sm w-[calc(100%-1.5rem)] sm:w-80 liquid-glass rounded-2xl p-3.5 shadow-2xl border border-sky-500/25 flex items-start gap-3 ${
+            isFullScreenInbox ? 'top-16' : 'bottom-20 lg:bottom-6'
+          }`}
+        >
+          <div className="w-9 h-9 rounded-xl bg-sky-600/15 text-sky-600 dark:text-sky-400 flex items-center justify-center shrink-0">
+            <Bell className="w-4.5 h-4.5" />
+          </div>
+          <div className="min-w-0 flex-1 space-y-2">
+            <p className="text-xs font-bold text-slate-900 dark:text-white leading-snug">
+              {t.settings.enablePushNotifications}
+            </p>
+            <p className="text-[11px] text-slate-600 dark:text-slate-300 leading-relaxed">
+              {language === 'bn'
+                ? 'মেসেজ, গ্রুপ মেসেজ এবং আপলোড (১%–১০০%) নোটিফিকেশন পেতে অনুমতি দিন।'
+                : 'Allow alerts for DMs, group chats, reactions & 1–100% upload progress.'}
+            </p>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => requestBrowserNotificationPermission()}
+                className="min-h-[34px] px-3 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-xs font-semibold transition-colors"
+              >
+                {language === 'bn' ? 'অনুমতি দিন' : 'Allow'}
+              </button>
+              <button
+                type="button"
+                onClick={dismissNotifBanner}
+                className="min-h-[34px] px-2.5 rounded-xl liquid-glass-btn text-xs font-semibold text-slate-600 dark:text-slate-300"
+              >
+                {language === 'bn' ? 'পরে' : 'Later'}
+              </button>
+            </div>
+          </div>
+          <button
+            type="button"
+            aria-label="Dismiss notification prompt"
+            onClick={dismissNotifBanner}
+            className="w-7 h-7 rounded-lg flex items-center justify-center text-slate-400 hover:text-slate-700 dark:hover:text-white shrink-0"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
+
+      {/* Persistent 1%–100% In-App Upload Progress Notification */}
+      {uploadTask && (
+        <div
+          role="status"
+          aria-live="polite"
+          data-testid="upload-progress-notification"
+          className="fixed top-4 right-3 sm:right-5 z-[60] max-w-sm w-[calc(100%-1.5rem)] sm:w-80 liquid-glass rounded-2xl p-3.5 shadow-2xl border border-sky-500/30 space-y-2"
+        >
+          <div className="flex items-center justify-between gap-2.5">
+            <div className="flex items-center gap-2.5 min-w-0">
+              <div
+                className={`w-8 h-8 rounded-xl flex items-center justify-center shrink-0 ${
+                  uploadTask.status === 'done'
+                    ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400'
+                    : uploadTask.status === 'error'
+                    ? 'bg-rose-500/15 text-rose-600 dark:text-rose-400'
+                    : 'bg-sky-600/15 text-sky-600 dark:text-sky-400'
+                }`}
+              >
+                {uploadTask.status === 'done' ? (
+                  <CheckCircle2 className="w-4.5 h-4.5" />
+                ) : uploadTask.status === 'uploading' ? (
+                  <Loader2 className="w-4.5 h-4.5 animate-spin" />
+                ) : (
+                  <UploadCloud className="w-4.5 h-4.5" />
+                )}
+              </div>
+              <div className="min-w-0">
+                <p className="text-xs font-bold text-slate-900 dark:text-white truncate">
+                  {uploadTask.status === 'done'
+                    ? t.create.uploadComplete
+                    : uploadTask.status === 'error'
+                    ? uploadTask.error || 'Upload failed'
+                    : uploadTask.label}
+                </p>
+                <p className="text-[11px] font-mono-num font-semibold text-sky-600 dark:text-sky-400">
+                  {uploadTask.progress}%
+                </p>
+              </div>
+            </div>
+            <button
+              type="button"
+              aria-label="Close upload progress"
+              onClick={clearUploadTask}
+              className="w-7 h-7 rounded-lg flex items-center justify-center text-slate-400 hover:text-slate-700 dark:hover:text-white shrink-0"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+          <div className="w-full h-2 rounded-full bg-slate-200/80 dark:bg-slate-800 overflow-hidden">
+            <div
+              className={`h-full rounded-full transition-all duration-150 ${
+                uploadTask.status === 'done'
+                  ? 'bg-emerald-500'
+                  : uploadTask.status === 'error'
+                  ? 'bg-rose-500'
+                  : 'bg-gradient-to-r from-sky-500 to-blue-600'
+              }`}
+              style={{ width: `${Math.max(1, Math.min(100, uploadTask.progress))}%` }}
+            />
+          </div>
+        </div>
+      )}
 
       {/* Transient Toast */}
       {toastMessage && (

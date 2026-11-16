@@ -12,6 +12,7 @@
         "bio": { "type": "string", "maxLength": 150 },
         "pronouns": { "type": "string", "maxLength": 32 },
         "website": { "type": "string", "maxLength": 200 },
+        "dateOfBirth": { "type": "string", "minLength": 10, "maxLength": 10, "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
         "photoUrl": { "type": "string", "maxLength": 200000 },
         "coverUrl": { "type": "string", "maxLength": 200000 },
         "interests": { "type": "array" },

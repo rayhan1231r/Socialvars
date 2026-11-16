@@ -1,7 +1,10 @@
 import type {
+  AppNotification,
   BroadcastChannel,
   Chat,
   NicknameFontStyle,
+  NoteItem,
+  NotificationPrefs,
   Story,
   UserPrivate,
   UserPublic,
@@ -17,6 +20,20 @@ export const NICKNAME_COOLDOWN_MS = NICKNAME_COOLDOWN_DAYS * 24 * 3_600_000;
 export const USERNAME_COOLDOWN_MS = USERNAME_COOLDOWN_DAYS * 24 * 3_600_000;
 export const BROADCAST_MIN_FOLLOWERS = 500;
 export const MAX_GROUP_MEMBERS = 250;
+
+export const DEFAULT_NOTIFICATION_PREFS: NotificationPrefs = {
+  pausedAll: false,
+  follows: true,
+  friendRequests: true,
+  likes: true,
+  comments: true,
+  stories: true,
+  messages: true,
+  groupMessages: true,
+  uploadProgress: true,
+  mentions: true,
+  announcements: true,
+};
 
 export const NICKNAME_FONT_CLASSES: Record<NicknameFontStyle, string> = {
   classic: 'font-display font-bold tracking-tight',
@@ -996,18 +1013,79 @@ export function isValidHighlightTitle(title: string): boolean {
 }
 
 export function isHomeStoryVisibleToUser(
-  story: Pick<Story, 'authorId' | 'expiresAt' | 'privacy'>,
+  story: Pick<Story, 'authorId' | 'expiresAt' | 'privacy'> & { viewerInCloseFriends?: boolean },
   author: Pick<UserPublic, 'uid' | 'isPrivate' | 'isDeactivated'> | undefined,
   viewerUid: string | null,
   followingIds: string[],
-  nowMs: number = Date.now()
+  nowMs: number = Date.now(),
+  authorCloseFriendUids?: string[]
 ): boolean {
   if (!isStoryActive(story, nowMs)) return false;
   if (!author || author.isDeactivated) return false;
   if (viewerUid && story.authorId === viewerUid) return true;
   if (!viewerUid) return false;
+  if (story.privacy === 'close_friends') {
+    if (story.viewerInCloseFriends) return true;
+    return Boolean(authorCloseFriendUids && authorCloseFriendUids.includes(viewerUid));
+  }
   if (!followingIds.includes(story.authorId)) return false;
   return true;
+}
+
+export function isNoteVisibleToUser(
+  note: Pick<NoteItem, 'authorUid' | 'expiresAt' | 'audience'> & { viewerInCloseFriends?: boolean },
+  author: Pick<UserPublic, 'uid' | 'isPrivate' | 'isDeactivated'> | undefined,
+  viewerUid: string | null,
+  followingIds: string[],
+  nowMs: number = Date.now(),
+  authorCloseFriendUids?: string[]
+): boolean {
+  const exp = Date.parse(note.expiresAt);
+  if (Number.isNaN(exp) || exp <= nowMs) return false;
+  if (!author || author.isDeactivated) return false;
+  if (viewerUid && note.authorUid === viewerUid) return true;
+  if (!viewerUid) return false;
+  if (note.audience === 'close_friends') {
+    if (note.viewerInCloseFriends) return true;
+    return Boolean(authorCloseFriendUids && authorCloseFriendUids.includes(viewerUid));
+  }
+  if (author.isPrivate && !followingIds.includes(note.authorUid)) return false;
+  return true;
+}
+
+export function shouldNotifyUser(
+  prefs: Partial<NotificationPrefs> | undefined,
+  type: AppNotification['type'] | 'upload',
+  isMutedChat: boolean = false
+): boolean {
+  if (isMutedChat) return false;
+  const merged = { ...DEFAULT_NOTIFICATION_PREFS, ...(prefs || {}) };
+  if (merged.pausedAll) return false;
+  switch (type) {
+    case 'follow':
+      return merged.follows !== false;
+    case 'friend_request':
+      return merged.friendRequests !== false;
+    case 'like':
+      return merged.likes !== false;
+    case 'comment':
+    case 'reply':
+      return merged.comments !== false;
+    case 'story_reaction':
+      return merged.stories !== false;
+    case 'message':
+      return merged.messages !== false;
+    case 'group_message':
+      return merged.groupMessages !== false;
+    case 'mention':
+      return merged.mentions !== false;
+    case 'announcement':
+      return merged.announcements !== false;
+    case 'upload':
+      return merged.uploadProgress !== false;
+    default:
+      return true;
+  }
 }
 
 export function canPostInBroadcast(
@@ -1045,6 +1123,15 @@ export function canMessageUser(
   return true;
 }
 
+export function requiresFollowApproval(
+  targetPublic: Pick<UserPublic, 'isPrivate'> | undefined,
+  targetPrivate?: Pick<UserPrivate, 'whoCanFollow'> | undefined
+): boolean {
+  if (targetPublic?.isPrivate) return true;
+  if (targetPrivate?.whoCanFollow === 'approval') return true;
+  return false;
+}
+
 export function formatCompactCount(count: number): string {
   if (count >= 1_000_000) return `${(count / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`;
   if (count >= 1_000) return `${(count / 1_000).toFixed(1).replace(/\.0$/, '')}K`;
@@ -1080,6 +1167,104 @@ export function normalizeWebsiteUrl(raw: string): string {
   const trimmed = raw.trim();
   if (!trimmed) return '';
   return /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
+}
+
+export const DATE_OF_BIRTH_REGEX = /^\d{4}-\d{2}-\d{2}$/;
+export const MIN_SIGNUP_AGE_YEARS = 13;
+
+export function isValidDateOfBirth(
+  raw: string,
+  nowMs: number = Date.now()
+): {
+  valid: boolean;
+  normalized: string;
+  reason?: 'format' | 'invalid_date' | 'future' | 'too_old' | 'too_young';
+} {
+  const normalized = (raw || '').trim();
+  if (!DATE_OF_BIRTH_REGEX.test(normalized)) {
+    return { valid: false, normalized, reason: 'format' };
+  }
+  const [yStr, mStr, dStr] = normalized.split('-');
+  const year = Number(yStr);
+  const month = Number(mStr);
+  const day = Number(dStr);
+  if (month < 1 || month > 12 || day < 1 || day > 31) {
+    return { valid: false, normalized, reason: 'invalid_date' };
+  }
+  const parsed = new Date(Date.UTC(year, month - 1, day));
+  if (
+    parsed.getUTCFullYear() !== year ||
+    parsed.getUTCMonth() !== month - 1 ||
+    parsed.getUTCDate() !== day
+  ) {
+    return { valid: false, normalized, reason: 'invalid_date' };
+  }
+  if (year < 1900) {
+    return { valid: false, normalized, reason: 'too_old' };
+  }
+  const nowDate = new Date(nowMs);
+  const todayUtcMs = Date.UTC(
+    nowDate.getUTCFullYear(),
+    nowDate.getUTCMonth(),
+    nowDate.getUTCDate()
+  );
+  if (parsed.getTime() > todayUtcMs) {
+    return { valid: false, normalized, reason: 'future' };
+  }
+
+  let age = nowDate.getUTCFullYear() - year;
+  const monthDiff = nowDate.getUTCMonth() + 1 - month;
+  if (monthDiff < 0 || (monthDiff === 0 && nowDate.getUTCDate() < day)) {
+    age -= 1;
+  }
+  if (age < MIN_SIGNUP_AGE_YEARS) {
+    return { valid: false, normalized, reason: 'too_young' };
+  }
+  return { valid: true, normalized };
+}
+
+export function formatCalendarDate(
+  raw: string | null | undefined,
+  lang: 'en' | 'bn' = 'en'
+): string {
+  const trimmed = (raw || '').trim();
+  if (!trimmed) return '';
+  const locale = lang === 'bn' ? 'bn-BD' : 'en-US';
+  if (DATE_OF_BIRTH_REGEX.test(trimmed)) {
+    const [yStr, mStr, dStr] = trimmed.split('-');
+    const year = Number(yStr);
+    const month = Number(mStr);
+    const day = Number(dStr);
+    const utcDate = new Date(Date.UTC(year, month - 1, day));
+    if (
+      utcDate.getUTCFullYear() !== year ||
+      utcDate.getUTCMonth() !== month - 1 ||
+      utcDate.getUTCDate() !== day
+    ) {
+      return trimmed;
+    }
+    try {
+      return new Intl.DateTimeFormat(locale, {
+        year: 'numeric',
+        month: 'long',
+        day: 'numeric',
+        timeZone: 'UTC',
+      }).format(utcDate);
+    } catch {
+      return trimmed;
+    }
+  }
+  const parsedMs = Date.parse(trimmed);
+  if (Number.isNaN(parsedMs)) return '';
+  try {
+    return new Intl.DateTimeFormat(locale, {
+      year: 'numeric',
+      month: 'long',
+      day: 'numeric',
+    }).format(new Date(parsedMs));
+  } catch {
+    return trimmed.slice(0, 10);
+  }
 }
 
 export function mapFirebaseAuthError(error: unknown, lang: 'en' | 'bn' = 'en'): string {

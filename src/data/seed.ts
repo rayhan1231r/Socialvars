@@ -59,17 +59,21 @@ export const INITIAL_USER_PRIVATE: UserPrivate = {
   whoCanViewStories: 'everyone',
   whoCanFollow: 'everyone',
   notificationPrefs: {
+    pausedAll: false,
     follows: true,
     friendRequests: true,
     likes: true,
     comments: true,
     stories: true,
     messages: true,
+    groupMessages: true,
+    uploadProgress: true,
     mentions: true,
     announcements: true,
   },
   blockedUserIds: [],
   mutedStoryUserIds: [],
+  closeFriendUids: [],
   updatedAt: new Date().toISOString(),
 };
 

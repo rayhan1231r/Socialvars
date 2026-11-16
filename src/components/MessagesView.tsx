@@ -76,6 +76,15 @@ import { Avatar } from './Avatar';
 
 const QUICK_REACTIONS = ['❤️', '😂', '😮', '😢', '🔥', '👏'];
 const QUICK_EMOJIS = ['😊', '😂', '❤️', '🔥', '🙌', '🥳', '🤩', '😍', '🤝', '✨', '💯', '😎'];
+const NOTE_QUICK_THOUGHTS = [
+  { emoji: '☕', en: 'Coffee break', bn: 'কফি বিরতি' },
+  { emoji: '🎧', en: 'Listening to music', bn: 'গান শুনছি' },
+  { emoji: '💻', en: 'Deep focus mode', bn: 'কাজে ব্যস্ত' },
+  { emoji: '🌙', en: 'Late night thoughts', bn: 'রাতের ভাবনা' },
+  { emoji: '✨', en: 'Feeling inspired', bn: 'দারুণ অনুপ্রেরণা' },
+  { emoji: '🏃', en: 'On the move', bn: 'বাইরে যাচ্ছি' },
+];
+const NOTE_EMOJI_BAR = ['🔥', '❤️', '😂', '✨', '💯', '🎧', '☕', '🌙'];
 
 function formatDateDivider(isoDate: string, lang: 'en' | 'bn'): string {
   const date = new Date(isoDate);
@@ -131,6 +140,8 @@ export function MessagesView() {
     pinMessage,
     forwardMessage,
     updateChatPreferences,
+    deleteChatFromInbox,
+    setCloseFriendsModalOpen,
     deleteMessage,
     createDirectOrGroupChat,
     updateChatTheme,
@@ -155,6 +166,8 @@ export function MessagesView() {
     unblockUser,
     uploadImageDataUrl,
     openUserProfile,
+    mobileThreadOpen: mobileShowThread,
+    setMobileThreadOpen: setMobileShowThread,
     showToast,
     t,
   } = useSocialVerse();
@@ -163,7 +176,6 @@ export function MessagesView() {
   const [inboxFilter, setInboxFilter] = useState<
     'primary' | 'groups' | 'broadcasts' | 'archived' | 'requests'
   >('primary');
-  const [mobileShowThread, setMobileShowThread] = useState(false);
   const [draftText, setDraftText] = useState('');
   const [replyingTo, setReplyingTo] = useState<{ id: string; text: string } | null>(null);
   const [editingMsg, setEditingMsg] = useState<{ id: string; text: string } | null>(null);
@@ -207,6 +219,7 @@ export function MessagesView() {
   // Notes Modal state
   const [showNoteComposer, setShowNoteComposer] = useState(false);
   const [noteInput, setNoteInput] = useState('');
+  const [noteAudience, setNoteAudience] = useState<'followers' | 'close_friends'>('followers');
   const [activeNote, setActiveNote] = useState<NoteItem | null>(null);
   const [noteReplyText, setNoteReplyText] = useState('');
 
@@ -678,20 +691,20 @@ export function MessagesView() {
   return (
     <div
       data-testid="fullscreen-inbox"
-      className="h-[100dvh] w-full flex overflow-hidden relative bg-slate-50/75 dark:bg-slate-950/92 backdrop-blur-2xl"
+      className="h-[100dvh] w-full flex overflow-hidden relative bg-slate-50/80 dark:bg-[#050811]/95 backdrop-blur-2xl"
     >
       {/* Desktop Mini Navigation Rail */}
       <nav
         aria-label="Inbox app navigation"
-        className="hidden lg:flex w-[72px] shrink-0 h-full flex-col items-center justify-between py-4 border-r border-slate-200/70 dark:border-white/10 bg-white/80 dark:bg-slate-950/95 backdrop-blur-2xl"
+        className="hidden lg:flex w-[78px] shrink-0 h-full flex-col items-center justify-between py-4 border-r border-slate-200/70 dark:border-white/[0.08] bg-white/85 dark:bg-[#070b16]/95 backdrop-blur-2xl"
       >
-        <div className="flex flex-col items-center gap-2">
+        <div className="flex flex-col items-center gap-2.5">
           <button
             type="button"
             onClick={() => setActiveTab('home')}
             title={t.messages.backToFeed}
             aria-label={t.messages.backToFeed}
-            className="w-11 h-11 rounded-2xl bg-gradient-to-br from-sky-500 to-cyan-500 text-white font-display font-bold text-base flex items-center justify-center shadow-lg shadow-sky-500/25 mb-2 active:scale-95 transition-transform duration-150"
+            className="w-12 h-12 rounded-2xl bg-gradient-to-br from-sky-500 to-cyan-500 text-white font-display font-bold text-base flex items-center justify-center shadow-lg shadow-sky-500/25 mb-2 active:scale-95 transition-transform duration-150"
           >
             SV
           </button>
@@ -701,7 +714,7 @@ export function MessagesView() {
             onClick={() => setActiveTab('home')}
             title={t.nav.home}
             aria-label={t.nav.home}
-            className="w-11 h-11 rounded-2xl liquid-glass-btn flex items-center justify-center text-slate-600 dark:text-slate-300"
+            className="w-12 h-12 rounded-2xl liquid-glass-btn flex items-center justify-center text-slate-600 dark:text-slate-300"
           >
             <Home className="w-5 h-5" />
           </button>
@@ -711,7 +724,7 @@ export function MessagesView() {
             onClick={() => setActiveTab('reels')}
             title={t.nav.reels}
             aria-label={t.nav.reels}
-            className="w-11 h-11 rounded-2xl liquid-glass-btn flex items-center justify-center text-slate-600 dark:text-slate-300"
+            className="w-12 h-12 rounded-2xl liquid-glass-btn flex items-center justify-center text-slate-600 dark:text-slate-300"
           >
             <Clapperboard className="w-5 h-5" />
           </button>
@@ -721,11 +734,11 @@ export function MessagesView() {
             aria-current="page"
             title={t.nav.messages}
             aria-label={t.nav.messages}
-            className="relative w-11 h-11 rounded-2xl bg-sky-600 text-white flex items-center justify-center shadow-md shadow-sky-600/30"
+            className="relative w-12 h-12 rounded-2xl bg-sky-600 text-white flex items-center justify-center shadow-md shadow-sky-600/30"
           >
             <MessageCircle className="w-5 h-5" />
             {totalUnreadChats > 0 && (
-              <span className="absolute -top-1 -right-1 min-w-[18px] h-[18px] px-1 rounded-full bg-rose-500 text-white text-[10px] font-bold flex items-center justify-center">
+              <span className="absolute -top-1 -right-1 min-w-[20px] h-[20px] px-1 rounded-full bg-rose-500 text-white text-[11px] font-bold flex items-center justify-center">
                 {totalUnreadChats}
               </span>
             )}
@@ -736,7 +749,7 @@ export function MessagesView() {
             onClick={() => setActiveTab('explore')}
             title={t.nav.explore}
             aria-label={t.nav.explore}
-            className="w-11 h-11 rounded-2xl liquid-glass-btn flex items-center justify-center text-slate-600 dark:text-slate-300"
+            className="w-12 h-12 rounded-2xl liquid-glass-btn flex items-center justify-center text-slate-600 dark:text-slate-300"
           >
             <Compass className="w-5 h-5" />
           </button>
@@ -746,19 +759,19 @@ export function MessagesView() {
             onClick={() => setSubscreen('create_sheet')}
             title={t.nav.create}
             aria-label={t.nav.create}
-            className="w-11 h-11 rounded-2xl liquid-glass-btn flex items-center justify-center text-sky-600 dark:text-sky-400"
+            className="w-12 h-12 rounded-2xl liquid-glass-btn flex items-center justify-center text-sky-600 dark:text-sky-400"
           >
             <PlusSquare className="w-5 h-5" />
           </button>
         </div>
 
-        <div className="flex flex-col items-center gap-2">
+        <div className="flex flex-col items-center gap-2.5">
           <button
             type="button"
             onClick={() => setLanguage(language === 'en' ? 'bn' : 'en')}
             title={t.settings.language}
             aria-label="Toggle language"
-            className="w-11 h-10 rounded-xl liquid-glass-btn text-[11px] font-bold text-slate-700 dark:text-slate-200 flex items-center justify-center"
+            className="w-12 h-11 rounded-2xl liquid-glass-btn text-xs font-bold text-slate-700 dark:text-slate-200 flex items-center justify-center"
           >
             {language === 'en' ? 'বাং' : 'EN'}
           </button>
@@ -767,18 +780,18 @@ export function MessagesView() {
             onClick={() => setTheme(theme === 'light' ? 'dark' : 'light')}
             title={t.settings.theme}
             aria-label="Toggle theme"
-            className="w-11 h-11 rounded-xl liquid-glass-btn text-slate-700 dark:text-slate-200 flex items-center justify-center"
+            className="w-12 h-12 rounded-2xl liquid-glass-btn text-slate-700 dark:text-slate-200 flex items-center justify-center"
           >
-            {theme === 'light' ? <Moon className="w-4 h-4" /> : <Sun className="w-4 h-4" />}
+            {theme === 'light' ? <Moon className="w-5 h-5" /> : <Sun className="w-5 h-5" />}
           </button>
           <button
             type="button"
             onClick={() => setSubscreen('settings_home')}
             title={t.settings.title}
             aria-label={t.settings.title}
-            className="w-11 h-11 rounded-xl liquid-glass-btn text-slate-700 dark:text-slate-200 flex items-center justify-center"
+            className="w-12 h-12 rounded-2xl liquid-glass-btn text-slate-700 dark:text-slate-200 flex items-center justify-center"
           >
-            <Settings className="w-4 h-4" />
+            <Settings className="w-5 h-5" />
           </button>
           <button
             type="button"
@@ -787,46 +800,46 @@ export function MessagesView() {
             aria-label={t.nav.profile}
             className="mt-1 rounded-full ring-2 ring-sky-500/40"
           >
-            <Avatar src={currentUser.photoUrl} name={currentUser.displayName} size="sm" online />
+            <Avatar src={currentUser.photoUrl} name={currentUser.displayName} size="md" online />
           </button>
         </div>
       </nav>
 
       {/* Conversation List Sidebar */}
       <aside
-        className={`w-full md:w-[330px] lg:w-[376px] shrink-0 h-full border-r border-slate-200/70 dark:border-white/10 bg-white/80 dark:bg-slate-950/88 backdrop-blur-2xl flex flex-col ${
+        className={`w-full md:w-[365px] lg:w-[416px] shrink-0 h-full border-r border-slate-200/70 dark:border-white/[0.08] bg-white/85 dark:bg-[#070b16]/95 backdrop-blur-2xl flex flex-col ${
           mobileShowThread ? 'hidden md:flex' : 'flex'
         }`}
       >
-        <div className="p-3.5 sm:p-4 space-y-3 border-b border-slate-200/70 dark:border-white/10">
-          <div className="flex items-center justify-between gap-2">
-            <div className="flex items-center gap-2 min-w-0">
+        <div className="p-4 sm:p-5 space-y-3.5 border-b border-slate-200/70 dark:border-white/[0.08]">
+          <div className="flex items-center justify-between gap-2.5">
+            <div className="flex items-center gap-2.5 min-w-0">
               <button
                 type="button"
                 aria-label={t.messages.backToFeed}
                 onClick={() => setActiveTab('home')}
-                className="lg:hidden min-h-[44px] min-w-[44px] rounded-xl liquid-glass-btn flex items-center justify-center text-slate-700 dark:text-slate-200 shrink-0"
+                className="lg:hidden min-h-[46px] min-w-[46px] rounded-2xl liquid-glass-btn flex items-center justify-center text-slate-700 dark:text-slate-200 shrink-0"
               >
-                <ArrowLeft className="w-4 h-4" />
+                <ArrowLeft className="w-5 h-5" />
               </button>
               <div className="min-w-0">
-                <div className="flex items-center gap-1.5">
-                  <h1 className="text-base sm:text-lg font-bold text-slate-900 dark:text-white tracking-tight truncate">
+                <div className="flex items-center gap-2">
+                  <h1 className="text-xl sm:text-2xl font-bold text-slate-900 dark:text-white tracking-tight truncate">
                     {t.messages.chatsTitle}
                   </h1>
                   {totalUnreadChats > 0 && (
-                    <span className="text-[11px] font-bold font-mono-num text-sky-600 dark:text-sky-400">
+                    <span className="text-xs font-bold font-mono-num text-sky-600 dark:text-sky-400">
                       · {totalUnreadChats}
                     </span>
                   )}
                 </div>
-                <p className="text-[11px] text-slate-500 dark:text-slate-400 truncate">
+                <p className="text-xs text-slate-500 dark:text-slate-400 truncate">
                   @{currentUser.username}
                 </p>
               </div>
             </div>
 
-            <div className="flex items-center gap-1.5 shrink-0">
+            <div className="flex items-center gap-2 shrink-0">
               <button
                 type="button"
                 aria-label="New message"
@@ -834,13 +847,13 @@ export function MessagesView() {
                   setShowNewDirect((s) => !s);
                   setShowNewGroup(false);
                 }}
-                className={`min-h-[40px] px-3 rounded-xl text-xs font-semibold inline-flex items-center gap-1 transition-all duration-150 ${
+                className={`min-h-[44px] px-3.5 sm:px-4 rounded-2xl text-xs sm:text-sm font-semibold inline-flex items-center gap-1.5 transition-all duration-150 ${
                   showNewDirect
                     ? 'bg-sky-600 text-white shadow-sm'
                     : 'liquid-glass-btn text-slate-800 dark:text-slate-200'
                 }`}
               >
-                <SquarePen className="w-3.5 h-3.5" />
+                <SquarePen className="w-4 h-4" />
                 <span>DM</span>
               </button>
               <button
@@ -850,48 +863,85 @@ export function MessagesView() {
                   setShowNewGroup((s) => !s);
                   setShowNewDirect(false);
                 }}
-                className={`min-h-[40px] px-3 rounded-xl text-xs font-semibold inline-flex items-center gap-1 transition-all duration-150 ${
+                className={`min-h-[44px] px-3.5 sm:px-4 rounded-2xl text-xs sm:text-sm font-semibold inline-flex items-center gap-1.5 transition-all duration-150 ${
                   showNewGroup
                     ? 'bg-sky-600 text-white shadow-sm'
                     : 'liquid-glass-btn text-slate-800 dark:text-slate-200'
                 }`}
               >
-                <Users className="w-3.5 h-3.5" />
+                <Users className="w-4 h-4" />
                 <span>Group</span>
               </button>
             </div>
           </div>
 
           <div className="relative">
-            <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+            <Search className="w-4 h-4 text-slate-400 absolute left-4 top-1/2 -translate-y-1/2" />
             <input
               type="search"
               value={chatSearch}
               onChange={(e) => setChatSearch(e.target.value)}
               placeholder={t.messages.searchChats}
               aria-label={t.messages.searchChats}
-              className="w-full min-h-[38px] pl-10 pr-3.5 rounded-2xl bg-slate-100/90 dark:bg-slate-800/80 border border-slate-200/80 dark:border-slate-700/80 text-xs text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-sky-500"
+              className="w-full min-h-[46px] pl-11 pr-4 rounded-2xl bg-slate-100/90 dark:bg-white/[0.06] border border-slate-200/80 dark:border-white/[0.08] text-sm text-slate-900 dark:text-white placeholder:text-slate-400 dark:placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-sky-500"
             />
           </div>
 
-          {/* Notes Bar */}
+          {/* Instagram-Style Notes Bar */}
           <div aria-label={t.messages.notesTitle} className="pt-0.5">
-            <div className="flex items-start gap-2.5 overflow-x-auto no-scrollbar pb-1">
-              <div className="relative flex flex-col items-center shrink-0 w-[82px]">
+            <div className="flex items-end gap-3.5 overflow-x-auto no-scrollbar pb-1 pt-4 px-1.5">
+              <div className="relative flex flex-col items-center shrink-0 w-[96px]">
                 <button
                   type="button"
+                  aria-label={myNote ? `Edit note: ${myNote.text}` : t.messages.yourNote}
                   onClick={() => {
                     setNoteInput(myNote?.text || '');
+                    setNoteAudience(myNote?.audience || 'followers');
                     setShowNoteComposer(true);
                   }}
-                  className="flex flex-col items-center w-full"
+                  className="flex flex-col items-center w-full group"
                 >
-                  <div className="mb-1 px-2 py-1 rounded-xl bg-white dark:bg-slate-800 border border-slate-200/80 dark:border-slate-700 shadow-sm text-[10px] text-slate-700 dark:text-slate-200 truncate max-w-[82px]">
-                    {myNote ? myNote.text : `+ ${t.messages.yourNote}`}
+                  {/* Floating Thought Bubble */}
+                  <div className="relative z-10 -mb-2.5 flex flex-col items-center">
+                    <div
+                      className={`px-3 py-2 rounded-2xl min-w-[78px] max-w-[96px] text-center shadow-md border transition-transform group-hover:scale-[1.03] ${
+                        myNote?.audience === 'close_friends'
+                          ? 'bg-emerald-50 dark:bg-emerald-950/90 border-emerald-400/70 text-emerald-950 dark:text-emerald-100'
+                          : myNote
+                          ? 'bg-white dark:bg-[#1a2642] border-sky-200/90 dark:border-sky-400/35 text-slate-900 dark:text-white'
+                          : 'bg-white/95 dark:bg-[#152038] border-slate-200/85 dark:border-white/15 text-slate-500 dark:text-slate-300'
+                      }`}
+                    >
+                      <p className="text-xs font-medium leading-snug line-clamp-2 break-words">
+                        {myNote ? myNote.text : t.messages.noteThoughtPrompt}
+                      </p>
+                    </div>
+                    <div className="flex flex-col items-start self-start ml-3 -mt-0.5 space-y-0.5" aria-hidden="true">
+                      <span className="w-2.5 h-2.5 rounded-full bg-white dark:bg-[#1a2642] border border-slate-200/90 dark:border-white/25 shadow-xs" />
+                      <span className="w-1.5 h-1.5 rounded-full bg-white dark:bg-[#1a2642] border border-slate-200/90 dark:border-white/25 ml-1" />
+                    </div>
                   </div>
-                  <Avatar src={currentUser.photoUrl} name={currentUser.displayName} size="md" online />
-                  <span className="mt-1 text-[11px] font-medium text-slate-700 dark:text-slate-300 truncate max-w-[68px]">
-                    You
+
+                  <div className="relative">
+                    <Avatar src={currentUser.photoUrl} name={currentUser.displayName} size="lg" online={false} />
+                    {!myNote ? (
+                      <span
+                        aria-hidden="true"
+                        className="absolute -bottom-0.5 -right-0.5 w-6 h-6 rounded-full bg-sky-600 text-white border-2 border-white dark:border-[#070b16] flex items-center justify-center shadow"
+                      >
+                        <Plus className="w-3.5 h-3.5" />
+                      </span>
+                    ) : myNote.audience === 'close_friends' ? (
+                      <span
+                        aria-hidden="true"
+                        className="absolute -bottom-0.5 -right-0.5 w-5 h-5 rounded-full bg-emerald-600 text-white border-2 border-white dark:border-[#070b16] flex items-center justify-center shadow"
+                      >
+                        <Star className="w-2.5 h-2.5 fill-current" />
+                      </span>
+                    ) : null}
+                  </div>
+                  <span className="mt-1.5 text-xs font-semibold text-slate-700 dark:text-slate-200 truncate max-w-[84px]">
+                    {t.messages.yourNote}
                   </span>
                 </button>
                 {myNote && (
@@ -899,9 +949,9 @@ export function MessagesView() {
                     type="button"
                     aria-label="Clear my note"
                     onClick={() => deleteMyNote()}
-                    className="absolute -top-1 right-1 w-4 h-4 rounded-full bg-slate-700 text-white flex items-center justify-center shadow"
+                    className="absolute -top-2.5 -right-1.5 z-20 w-6 h-6 rounded-full bg-slate-800 hover:bg-rose-600 text-white flex items-center justify-center shadow-md ring-2 ring-white dark:ring-[#070b16] transition-colors"
                   >
-                    <X className="w-2.5 h-2.5" />
+                    <X className="w-3 h-3" />
                   </button>
                 )}
               </div>
@@ -910,6 +960,7 @@ export function MessagesView() {
                 .filter((n) => n.authorUid !== currentUser.uid)
                 .map((note) => {
                   const liked = note.likedByUids.includes(currentUser.uid);
+                  const isCfNote = note.audience === 'close_friends';
                   return (
                     <button
                       key={note.id}
@@ -918,14 +969,36 @@ export function MessagesView() {
                         setActiveNote(note);
                         setNoteReplyText('');
                       }}
-                      className="flex flex-col items-center shrink-0 w-[72px]"
+                      className="flex flex-col items-center shrink-0 w-[96px] group"
                     >
-                      <div className="mb-1 px-2 py-1 rounded-xl bg-white dark:bg-slate-800 border border-slate-200/80 dark:border-slate-700 shadow-sm text-[10px] text-slate-700 dark:text-slate-200 truncate max-w-[72px] inline-flex items-center gap-1">
-                        <span className="truncate">{note.text}</span>
-                        {liked && <Heart className="w-2.5 h-2.5 fill-rose-500 text-rose-500 shrink-0" />}
+                      <div className="relative z-10 -mb-2.5 flex flex-col items-center">
+                        <div
+                          className={`px-3 py-2 rounded-2xl min-w-[78px] max-w-[96px] shadow-md text-xs font-medium inline-flex items-center justify-center gap-1 group-hover:scale-[1.03] transition-transform border ${
+                            isCfNote
+                              ? 'bg-emerald-50 dark:bg-emerald-950/90 border-emerald-400/70 text-emerald-950 dark:text-emerald-100'
+                              : 'bg-white dark:bg-[#1a2642] border-slate-200/90 dark:border-white/20 text-slate-800 dark:text-slate-100'
+                          }`}
+                        >
+                          <span className="line-clamp-2 leading-snug break-words text-center">{note.text}</span>
+                          {liked && <Heart className="w-3 h-3 fill-rose-500 text-rose-500 shrink-0" />}
+                        </div>
+                        <div className="flex flex-col items-start self-start ml-3 -mt-0.5 space-y-0.5" aria-hidden="true">
+                          <span className="w-2.5 h-2.5 rounded-full bg-white dark:bg-[#1a2642] border border-slate-200/90 dark:border-white/25 shadow-xs" />
+                          <span className="w-1.5 h-1.5 rounded-full bg-white dark:bg-[#1a2642] border border-slate-200/90 dark:border-white/25 ml-1" />
+                        </div>
                       </div>
-                      <Avatar src={note.authorAvatar} name={note.authorDisplayName} size="md" online />
-                      <span className="mt-1 text-[11px] font-medium text-slate-700 dark:text-slate-300 truncate max-w-[68px]">
+                      <div className="relative">
+                        <Avatar src={note.authorAvatar} name={note.authorDisplayName} size="lg" online />
+                        {isCfNote && (
+                          <span
+                            aria-label={t.messages.closeFriends}
+                            className="absolute -bottom-0.5 -right-0.5 w-5 h-5 rounded-full bg-emerald-600 text-white border-2 border-white dark:border-[#070b16] flex items-center justify-center shadow"
+                          >
+                            <Star className="w-2.5 h-2.5 fill-current" />
+                          </span>
+                        )}
+                      </div>
+                      <span className="mt-1.5 text-xs font-semibold text-slate-700 dark:text-slate-200 truncate max-w-[84px]">
                         {note.authorDisplayName.split(' ')[0]}
                       </span>
                     </button>
@@ -935,7 +1008,7 @@ export function MessagesView() {
           </div>
 
           {/* 5 Inbox Filter Tabs */}
-          <div className="flex flex-wrap items-center justify-between gap-0.5 p-1 rounded-xl bg-slate-100/90 dark:bg-slate-800/80">
+          <div className="flex items-center justify-between gap-0.5 overflow-x-auto no-scrollbar p-1.5 rounded-2xl bg-slate-100/90 dark:bg-white/[0.06] border border-transparent dark:border-white/[0.06]">
             {(
               [
                 { id: 'primary', label: t.messages.primaryTab },
@@ -957,9 +1030,9 @@ export function MessagesView() {
                 key={tab.id}
                 type="button"
                 onClick={() => setInboxFilter(tab.id)}
-                className={`min-h-[30px] px-1.5 rounded-lg text-[10.5px] font-semibold transition-colors whitespace-nowrap shrink-0 ${
+                className={`min-h-[38px] px-2.5 rounded-xl text-[11.5px] sm:text-xs font-semibold transition-all whitespace-nowrap shrink-0 ${
                   inboxFilter === tab.id
-                    ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-white shadow-sm'
+                    ? 'bg-white dark:bg-[#131c31] text-slate-900 dark:text-white shadow-sm ring-1 ring-black/5 dark:ring-white/10'
                     : 'text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200'
                 }`}
               >
@@ -970,21 +1043,22 @@ export function MessagesView() {
 
           {/* Start DM Panel */}
           {showNewDirect && (
-            <div className="p-3 rounded-2xl liquid-glass-subtle space-y-2">
+            <div className="p-3.5 rounded-2xl liquid-glass-subtle space-y-2.5">
               <div className="flex items-center justify-between">
-                <p className="text-xs font-semibold text-slate-800 dark:text-slate-200">Start DM</p>
+                <p className="text-sm font-semibold text-slate-800 dark:text-slate-200">Start DM</p>
                 <button
                   type="button"
+                  aria-label="Close start DM"
                   onClick={() => setShowNewDirect(false)}
-                  className="text-slate-400 hover:text-slate-700"
+                  className="w-9 h-9 rounded-full flex items-center justify-center text-slate-500 hover:bg-slate-200/60 dark:hover:bg-slate-800 hover:text-slate-700 dark:hover:text-white"
                 >
-                  <X className="w-3.5 h-3.5" />
+                  <X className="w-4 h-4" />
                 </button>
               </div>
               {availablePeers.length === 0 ? (
                 <p className="text-xs text-slate-500">No other accounts available yet.</p>
               ) : (
-                <div className="flex flex-wrap gap-1.5 max-h-32 overflow-y-auto">
+                <div className="flex flex-wrap gap-2 max-h-36 overflow-y-auto">
                   {availablePeers.map((u) => (
                     <button
                       key={u.uid}
@@ -1001,7 +1075,7 @@ export function MessagesView() {
                           setMobileShowThread(true);
                         }
                       }}
-                      className="px-2.5 py-1.5 rounded-xl bg-white/85 dark:bg-slate-800 text-xs font-medium text-slate-800 dark:text-slate-200 hover:bg-sky-600 hover:text-white transition-colors"
+                      className="min-h-[38px] px-3.5 py-1.5 rounded-xl bg-white/85 dark:bg-slate-800 text-xs font-semibold text-slate-800 dark:text-slate-200 hover:bg-sky-600 hover:text-white transition-colors"
                     >
                       {u.displayName} (@{u.username})
                     </button>
@@ -1115,7 +1189,7 @@ export function MessagesView() {
               <button
                 type="submit"
                 disabled={!groupTitle.trim() || groupMembers.length === 0}
-                className="w-full min-h-[40px] rounded-xl bg-sky-600 hover:bg-sky-500 text-white text-xs font-semibold disabled:opacity-45 transition-colors"
+                className="w-full min-h-[44px] rounded-xl bg-sky-600 hover:bg-sky-500 text-white text-sm font-semibold disabled:opacity-45 transition-colors"
               >
                 Create Group Chat ({groupMembers.length + 1})
               </button>
@@ -1127,11 +1201,11 @@ export function MessagesView() {
         {inboxFilter === 'requests' ? (
           <div className="divide-y divide-slate-200/60 dark:divide-slate-800/60 overflow-y-auto flex-1 p-2">
             {pendingRequests.length === 0 ? (
-              <p className="p-6 text-center text-xs text-slate-500">{t.profile.noRequests}</p>
+              <p className="p-6 text-center text-sm text-slate-500">{t.profile.noRequests}</p>
             ) : (
               pendingRequests.map((req) => (
-                <div key={req.id} className="p-3 flex items-center justify-between gap-2">
-                  <div className="flex items-center gap-2.5 min-w-0">
+                <div key={req.id} className="p-3.5 flex items-center justify-between gap-2.5">
+                  <div className="flex items-center gap-3 min-w-0">
                     <Avatar src={req.fromAvatar} name={req.fromDisplayName} size="md" />
                     <div className="min-w-0">
                       <p className="text-sm font-semibold text-slate-900 dark:text-white truncate">
@@ -1140,18 +1214,18 @@ export function MessagesView() {
                       <p className="text-xs text-slate-500 truncate">@{req.fromUsername}</p>
                     </div>
                   </div>
-                  <div className="flex items-center gap-1.5 shrink-0">
+                  <div className="flex items-center gap-2 shrink-0">
                     <button
                       type="button"
                       onClick={() => respondToFriendRequest(req.id, true)}
-                      className="min-h-[34px] px-3 rounded-lg bg-sky-600 text-white text-xs font-semibold"
+                      className="min-h-[38px] px-3.5 rounded-xl bg-sky-600 text-white text-xs font-semibold"
                     >
                       {t.profile.accept}
                     </button>
                     <button
                       type="button"
                       onClick={() => respondToFriendRequest(req.id, false)}
-                      className="min-h-[34px] px-2.5 rounded-lg liquid-glass-subtle text-xs font-semibold text-slate-700 dark:text-slate-300"
+                      className="min-h-[38px] px-3 rounded-xl liquid-glass-subtle text-xs font-semibold text-slate-700 dark:text-slate-300"
                     >
                       {t.profile.reject}
                     </button>
@@ -1253,7 +1327,7 @@ export function MessagesView() {
             )}
           </div>
         ) : (
-          <div className="divide-y divide-slate-200/50 dark:divide-slate-800/50 overflow-y-auto flex-1">
+          <div className="divide-y divide-slate-200/50 dark:divide-white/[0.06] overflow-y-auto flex-1">
             {filteredChats.length === 0 ? (
               <div className="p-8 text-center space-y-2">
                 <p className="text-xs font-medium text-slate-500">
@@ -1289,43 +1363,43 @@ export function MessagesView() {
                 return (
                   <div key={chat.id} className="relative group">
                     <div
-                      className={`w-full px-3.5 py-3 flex items-center gap-3 transition-colors ${
+                      className={`w-full px-4 py-3.5 flex items-center gap-3.5 transition-colors ${
                         active
-                          ? 'bg-sky-500/12 dark:bg-sky-500/18'
-                          : 'hover:bg-white/60 dark:hover:bg-slate-800/45'
+                          ? 'bg-sky-500/12 dark:bg-sky-500/16'
+                          : 'hover:bg-white/60 dark:hover:bg-white/[0.04]'
                       }`}
                     >
                       <button
                         type="button"
                         onClick={() => handleSelectChat(chat.id)}
-                        className="flex-1 min-w-0 flex items-center gap-3 text-left"
+                        className="flex-1 min-w-0 flex items-center gap-3.5 text-left"
                       >
                         {chat.type === 'group' ? (
                           chat.avatarUrl ? (
                             <img
                               src={chat.avatarUrl}
                               alt={displayTitle}
-                              className="w-11 h-11 rounded-full object-cover shrink-0 ring-1 ring-white/20"
+                              className="w-13 h-13 rounded-full object-cover shrink-0 ring-1 ring-white/20"
                             />
                           ) : (
-                            <div className="w-11 h-11 rounded-full bg-gradient-to-br from-sky-500/25 to-cyan-500/25 text-sky-700 dark:text-sky-300 flex items-center justify-center shrink-0">
-                              <Users className="w-5 h-5" />
+                            <div className="w-13 h-13 rounded-full bg-gradient-to-br from-sky-500/25 to-cyan-500/25 text-sky-700 dark:text-sky-300 flex items-center justify-center shrink-0">
+                              <Users className="w-6 h-6" />
                             </div>
                           )
                         ) : (
                           <Avatar
                             src={avatar}
                             name={displayTitle}
-                            size="md"
+                            size="lg"
                             online={peer?.onlineStatus === 'online'}
                           />
                         )}
                         <div className="min-w-0 flex-1">
-                          <div className="flex items-center justify-between gap-1.5">
-                            <div className="flex items-center gap-1 min-w-0">
-                              {pinned && <Pin className="w-3 h-3 text-sky-600 shrink-0" />}
+                          <div className="flex items-center justify-between gap-2">
+                            <div className="flex items-center gap-1.5 min-w-0">
+                              {pinned && <Pin className="w-3.5 h-3.5 text-sky-600 shrink-0" />}
                               <p
-                                className={`text-sm truncate ${
+                                className={`text-[15px] truncate ${
                                   unread
                                     ? 'font-bold text-slate-950 dark:text-white'
                                     : 'font-semibold text-slate-900 dark:text-white'
@@ -1333,18 +1407,18 @@ export function MessagesView() {
                               >
                                 {displayTitle}
                               </p>
-                              {muted && <BellOff className="w-3 h-3 text-slate-400 shrink-0" />}
+                              {muted && <BellOff className="w-3.5 h-3.5 text-slate-400 shrink-0" />}
                               {chat.disappearingMode && chat.disappearingMode !== 'off' && (
-                                <Clock className="w-3 h-3 text-amber-500 shrink-0" />
+                                <Clock className="w-3.5 h-3.5 text-amber-500 shrink-0" />
                               )}
                             </div>
-                            <span className="text-[11px] text-slate-400 shrink-0">
+                            <span className="text-xs text-slate-400 shrink-0">
                               {formatRelativeTime(chat.lastMessageAt, language)}
                             </span>
                           </div>
-                          <div className="flex items-center justify-between gap-2 mt-0.5">
+                          <div className="flex items-center justify-between gap-2 mt-1">
                             <p
-                              className={`text-xs truncate ${
+                              className={`text-[13px] truncate ${
                                 isTyping
                                   ? 'text-sky-600 dark:text-sky-400 font-medium italic'
                                   : unread
@@ -1355,7 +1429,7 @@ export function MessagesView() {
                               {isTyping ? t.messages.typing : chat.lastMessageText}
                             </p>
                             {unread && (
-                              <span className="w-2.5 h-2.5 rounded-full bg-sky-600 shrink-0" />
+                              <span className="w-3 h-3 rounded-full bg-sky-600 shrink-0" />
                             )}
                           </div>
                         </div>
@@ -1367,23 +1441,23 @@ export function MessagesView() {
                         onClick={() =>
                           setChatMenuOpenId((cur) => (cur === chat.id ? null : chat.id))
                         }
-                        className="w-8 h-8 rounded-full flex items-center justify-center text-slate-400 hover:text-slate-700 dark:hover:text-white hover:bg-slate-200/70 dark:hover:bg-slate-700/70 shrink-0"
+                        className="w-10 h-10 rounded-full flex items-center justify-center text-slate-400 hover:text-slate-700 dark:hover:text-white hover:bg-slate-200/70 dark:hover:bg-slate-700/70 shrink-0"
                       >
-                        <MoreHorizontal className="w-4 h-4" />
+                        <MoreHorizontal className="w-5 h-5" />
                       </button>
                     </div>
 
                     {chatMenuOpenId === chat.id && (
-                      <div className="mx-3 mb-2 p-1.5 rounded-2xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 shadow-lg flex flex-wrap gap-1 z-20">
+                      <div className="mx-3.5 mb-2.5 p-2 rounded-2xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 shadow-lg flex flex-wrap gap-1.5 z-20">
                         <button
                           type="button"
                           onClick={() => {
                             updateChatPreferences(chat.id, { pinned: !pinned });
                             setChatMenuOpenId(null);
                           }}
-                          className="px-2.5 py-1 rounded-xl text-[11px] font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700 inline-flex items-center gap-1"
+                          className="min-h-[36px] px-3 py-1.5 rounded-xl text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700 inline-flex items-center gap-1.5"
                         >
-                          {pinned ? <PinOff className="w-3 h-3" /> : <Pin className="w-3 h-3" />}
+                          {pinned ? <PinOff className="w-3.5 h-3.5" /> : <Pin className="w-3.5 h-3.5" />}
                           <span>{pinned ? t.messages.unpinChat : t.messages.pinChat}</span>
                         </button>
                         <button
@@ -1392,9 +1466,9 @@ export function MessagesView() {
                             updateChatPreferences(chat.id, { muted: !muted });
                             setChatMenuOpenId(null);
                           }}
-                          className="px-2.5 py-1 rounded-xl text-[11px] font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700 inline-flex items-center gap-1"
+                          className="min-h-[36px] px-3 py-1.5 rounded-xl text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700 inline-flex items-center gap-1.5"
                         >
-                          {muted ? <Bell className="w-3 h-3" /> : <BellOff className="w-3 h-3" />}
+                          {muted ? <Bell className="w-3.5 h-3.5" /> : <BellOff className="w-3.5 h-3.5" />}
                           <span>{muted ? t.messages.unmuteChat : t.messages.muteChat}</span>
                         </button>
                         <button
@@ -1403,9 +1477,9 @@ export function MessagesView() {
                             updateChatPreferences(chat.id, { unread: !unread });
                             setChatMenuOpenId(null);
                           }}
-                          className="px-2.5 py-1 rounded-xl text-[11px] font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700 inline-flex items-center gap-1"
+                          className="min-h-[36px] px-3 py-1.5 rounded-xl text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700 inline-flex items-center gap-1.5"
                         >
-                          <Mail className="w-3 h-3" />
+                          <Mail className="w-3.5 h-3.5" />
                           <span>{t.messages.markUnread}</span>
                         </button>
                         <button
@@ -1414,14 +1488,27 @@ export function MessagesView() {
                             updateChatPreferences(chat.id, { archived: !archived });
                             setChatMenuOpenId(null);
                           }}
-                          className="px-2.5 py-1 rounded-xl text-[11px] font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700 inline-flex items-center gap-1"
+                          className="min-h-[36px] px-3 py-1.5 rounded-xl text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700 inline-flex items-center gap-1.5"
                         >
                           {archived ? (
-                            <ArchiveRestore className="w-3 h-3" />
+                            <ArchiveRestore className="w-3.5 h-3.5" />
                           ) : (
-                            <Archive className="w-3 h-3" />
+                            <Archive className="w-3.5 h-3.5" />
                           )}
                           <span>{archived ? t.messages.unarchiveChat : t.messages.archiveChat}</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            setChatMenuOpenId(null);
+                            await deleteChatFromInbox(chat.id);
+                          }}
+                          className="min-h-[36px] px-3 py-1.5 rounded-xl text-xs font-semibold text-rose-600 dark:text-rose-400 hover:bg-rose-500/10 inline-flex items-center gap-1.5"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                          <span>
+                            {chat.type === 'group' ? t.messages.deleteGroup : t.messages.deleteChat}
+                          </span>
                         </button>
                       </div>
                     )}
@@ -1598,13 +1685,13 @@ export function MessagesView() {
             {/* Active Conversation Column */}
             <div className="flex-1 flex flex-col min-w-0 h-full relative">
               {/* Thread Header */}
-              <div className="relative z-20 px-3.5 sm:px-5 py-3 border-b border-slate-200/70 dark:border-white/10 flex items-center justify-between gap-2 bg-white/80 dark:bg-slate-950/90 backdrop-blur-2xl">
-                <div className="flex items-center gap-2.5 min-w-0">
+              <div className="relative z-20 px-4 sm:px-6 py-3.5 border-b border-slate-200/70 dark:border-white/[0.08] flex items-center justify-between gap-2.5 bg-white/85 dark:bg-[#070b16]/95 backdrop-blur-2xl">
+                <div className="flex items-center gap-3 min-w-0">
                   <button
                     type="button"
                     aria-label={t.messages.backToInbox}
                     onClick={() => setMobileShowThread(false)}
-                    className="md:hidden min-h-[42px] min-w-[42px] -ml-1 rounded-full liquid-glass-btn flex items-center justify-center text-slate-700 dark:text-slate-200"
+                    className="md:hidden min-h-[46px] min-w-[46px] -ml-1 rounded-full liquid-glass-btn flex items-center justify-center text-slate-700 dark:text-slate-200"
                   >
                     <ArrowLeft className="w-5 h-5" />
                   </button>
@@ -1613,18 +1700,18 @@ export function MessagesView() {
                       <img
                         src={activeChat.avatarUrl}
                         alt={activeDisplayTitle}
-                        className="w-10 h-10 rounded-full object-cover shrink-0 ring-1 ring-white/20"
+                        className="w-11 h-11 rounded-full object-cover shrink-0 ring-1 ring-white/20"
                       />
                     ) : (
-                      <div className="w-10 h-10 rounded-full bg-sky-600/15 text-sky-600 dark:text-sky-300 flex items-center justify-center shrink-0">
-                        <Users className="w-4 h-4" />
+                      <div className="w-11 h-11 rounded-full bg-sky-600/15 text-sky-600 dark:text-sky-300 flex items-center justify-center shrink-0">
+                        <Users className="w-5 h-5" />
                       </div>
                     )
                   ) : (
                     <Avatar
                       src={otherUser?.photoUrl}
                       name={activeDisplayTitle}
-                      size="sm"
+                      size="md"
                       online={otherUser?.onlineStatus === 'online'}
                     />
                   )}
@@ -1638,23 +1725,23 @@ export function MessagesView() {
                         setShowChatInfo((s) => !s);
                       }
                     }}
-                    className="min-w-0 text-left"
+                    className="min-w-0 text-left py-1"
                   >
                     <div className="flex items-center gap-1.5">
-                      <h2 className="text-sm font-bold text-slate-900 dark:text-white truncate">
+                      <h2 className="text-base sm:text-[17px] font-bold text-slate-900 dark:text-white truncate">
                         {activeDisplayTitle}
                       </h2>
                       {disappearingMode !== 'off' && (
-                        <span className="text-amber-600 dark:text-amber-300 text-[10px] font-bold inline-flex items-center gap-0.5 shrink-0">
-                          <Clock className="w-3 h-3" />
+                        <span className="text-amber-600 dark:text-amber-300 text-xs font-bold inline-flex items-center gap-0.5 shrink-0">
+                          <Clock className="w-3.5 h-3.5" />
                           {disappearingMode}
                         </span>
                       )}
                       {isMutedChat && (
-                        <BellOff className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                        <BellOff className="w-4 h-4 text-slate-400 shrink-0" />
                       )}
                     </div>
-                    <p className="text-[11px] text-slate-500 dark:text-slate-400 truncate">
+                    <p className="text-xs text-slate-500 dark:text-slate-400 truncate">
                       {activeTypingPeers.length > 0 ? (
                         <span className="text-sky-600 dark:text-sky-400 font-semibold">
                           {activeTypingPeers.join(', ')} {t.messages.typing}
@@ -1670,7 +1757,7 @@ export function MessagesView() {
                   </button>
                 </div>
 
-                <div className="flex items-center gap-1.5 shrink-0">
+                <div className="flex items-center gap-2 shrink-0">
                   <button
                     type="button"
                     aria-label={t.messages.searchInChat}
@@ -1678,13 +1765,13 @@ export function MessagesView() {
                       setShowInChatSearch((s) => !s);
                       setInChatQuery('');
                     }}
-                    className={`min-h-[40px] min-w-[40px] rounded-full flex items-center justify-center transition-all duration-150 ${
+                    className={`min-h-[46px] min-w-[46px] rounded-full flex items-center justify-center transition-all duration-150 ${
                       showInChatSearch
                         ? 'bg-sky-600 text-white'
                         : 'liquid-glass-btn text-slate-700 dark:text-slate-200 hover:text-sky-500'
                     }`}
                   >
-                    <Search className="w-4 h-4" />
+                    <Search className="w-5 h-5" />
                   </button>
                   {otherParticipantId && (
                     <>
@@ -1692,17 +1779,17 @@ export function MessagesView() {
                         type="button"
                         aria-label={t.messages.voiceCall}
                         onClick={() => startCall(activeChat.id, otherParticipantId, 'voice')}
-                        className="min-h-[40px] min-w-[40px] rounded-full liquid-glass-btn flex items-center justify-center text-slate-700 dark:text-slate-200 hover:text-sky-500"
+                        className="min-h-[46px] min-w-[46px] rounded-full liquid-glass-btn flex items-center justify-center text-slate-700 dark:text-slate-200 hover:text-sky-500"
                       >
-                        <Phone className="w-4 h-4" />
+                        <Phone className="w-5 h-5" />
                       </button>
                       <button
                         type="button"
                         aria-label={t.messages.videoCall}
                         onClick={() => startCall(activeChat.id, otherParticipantId, 'video')}
-                        className="min-h-[40px] min-w-[40px] rounded-full liquid-glass-btn flex items-center justify-center text-slate-700 dark:text-slate-200 hover:text-sky-500"
+                        className="min-h-[46px] min-w-[46px] rounded-full liquid-glass-btn flex items-center justify-center text-slate-700 dark:text-slate-200 hover:text-sky-500"
                       >
-                        <Video className="w-4 h-4" />
+                        <Video className="w-5 h-5" />
                       </button>
                     </>
                   )}
@@ -1717,13 +1804,13 @@ export function MessagesView() {
                         setShowChatInfo((s) => !s);
                       }
                     }}
-                    className={`min-h-[40px] min-w-[40px] rounded-full flex items-center justify-center transition-all duration-150 ${
+                    className={`min-h-[46px] min-w-[46px] rounded-full flex items-center justify-center transition-all duration-150 ${
                       showChatInfo || showGroupPage
                         ? 'bg-sky-600 text-white'
                         : 'liquid-glass-btn text-slate-700 dark:text-slate-200'
                     }`}
                   >
-                    <Info className="w-4 h-4" />
+                    <Info className="w-5 h-5" />
                   </button>
                 </div>
               </div>
@@ -1866,8 +1953,8 @@ export function MessagesView() {
                       const prevMsg = idx > 0 ? activeMessages[idx - 1] : null;
                       const showDateDivider =
                         !prevMsg || getDayKey(prevMsg.createdAt) !== getDayKey(msg.createdAt);
-                      const reactionEntries = Object.entries(msg.reactions).filter(
-                        ([, list]) => list.length > 0
+                      const reactionEntries = Object.entries(msg.reactions || {}).filter(
+                        ([, list]) => Array.isArray(list) && list.length > 0
                       );
                       const displaySender =
                         activeChat.chatNicknames?.[msg.senderId] || msg.senderName;
@@ -1891,25 +1978,25 @@ export function MessagesView() {
                             className={`flex flex-col ${mine ? 'items-end' : 'items-start'} group`}
                           >
                             <div
-                              className={`max-w-[82%] sm:max-w-[70%] rounded-3xl px-4 py-2.5 space-y-1.5 shadow-sm transition-all ${
+                              className={`max-w-[84%] sm:max-w-[72%] rounded-3xl px-4.5 py-3 space-y-1.5 shadow-sm transition-all ${
                                 isSearchMatch ? 'ring-2 ring-amber-400' : ''
                               } ${
                                 msg.type === 'sticker'
                                   ? 'bg-transparent shadow-none p-1'
                                   : mine
                                   ? `${matchedPreset.bubbleMine} rounded-br-md`
-                                  : 'bg-white/95 dark:bg-slate-800/95 text-slate-900 dark:text-slate-100 border border-slate-200/70 dark:border-slate-700/70 rounded-bl-md'
+                                  : 'bg-white/95 dark:bg-[#11192e]/95 text-slate-900 dark:text-slate-100 border border-slate-200/70 dark:border-white/[0.08] rounded-bl-md'
                               }`}
                             >
                               {msg.forwarded && (
-                                <p className="text-[10px] italic opacity-75 inline-flex items-center gap-1">
-                                  <CornerUpRight className="w-3 h-3" />
+                                <p className="text-[11px] italic opacity-75 inline-flex items-center gap-1">
+                                  <CornerUpRight className="w-3.5 h-3.5" />
                                   <span>{t.messages.forwardedLabel}</span>
                                 </p>
                               )}
 
                               {activeChat.type === 'group' && !mine && (
-                                <p className="text-[11px] font-semibold opacity-80">
+                                <p className="text-xs font-semibold opacity-80">
                                   {displaySender}
                                 </p>
                               )}
@@ -1918,7 +2005,7 @@ export function MessagesView() {
                                 <button
                                   type="button"
                                   onClick={() => msg.replyToId && scrollToMessage(msg.replyToId)}
-                                  className="w-full text-left px-2.5 py-1.5 rounded-xl bg-black/15 dark:bg-white/15 border-l-2 border-white/70 text-[11px] opacity-90 truncate"
+                                  className="w-full text-left px-3 py-2 rounded-xl bg-black/15 dark:bg-white/15 border-l-2 border-white/70 text-xs opacity-90 truncate"
                                 >
                                   {msg.replyPreview}
                                 </button>
@@ -1929,7 +2016,7 @@ export function MessagesView() {
                                   <img
                                     src={msg.stickerUrl}
                                     alt="Sticker"
-                                    className="w-32 h-32 rounded-2xl object-cover shadow-md"
+                                    className="w-36 h-36 rounded-2xl object-cover shadow-md"
                                   />
                                   <button
                                     type="button"
@@ -1941,9 +2028,9 @@ export function MessagesView() {
                                         'Saved Sticker'
                                       )
                                     }
-                                    className="mt-1 px-2 py-0.5 rounded-full bg-black/65 text-white text-[10px] font-semibold inline-flex items-center gap-1"
+                                    className="mt-1.5 min-h-[30px] px-3 py-1 rounded-full bg-black/65 text-white text-xs font-semibold inline-flex items-center gap-1.5"
                                   >
-                                    <Bookmark className="w-3 h-3" />
+                                    <Bookmark className="w-3.5 h-3.5" />
                                     <span>{t.messages.saveSticker}</span>
                                   </button>
                                 </div>
@@ -1953,21 +2040,21 @@ export function MessagesView() {
                                 <button
                                   type="button"
                                   onClick={() => setActiveTab('reels')}
-                                  className="rounded-2xl overflow-hidden bg-black/20 border border-white/15 w-52 space-y-1.5 p-2 text-left hover:opacity-95"
+                                  className="rounded-2xl overflow-hidden bg-black/20 border border-white/15 w-56 space-y-1.5 p-2.5 text-left hover:opacity-95"
                                 >
                                   {msg.sharedPostThumb && (
                                     <img
                                       src={msg.sharedPostThumb}
                                       alt="Shared reel"
-                                      className="w-full h-32 object-cover rounded-xl"
+                                      className="w-full h-36 object-cover rounded-xl"
                                     />
                                   )}
-                                  <p className="text-[11px] font-semibold truncate flex items-center gap-1">
-                                    <Clapperboard className="w-3 h-3 shrink-0" />
+                                  <p className="text-xs font-semibold truncate flex items-center gap-1.5">
+                                    <Clapperboard className="w-3.5 h-3.5 shrink-0" />
                                     <span>Reel by @{msg.sharedPostAuthor || 'creator'}</span>
                                   </p>
                                   {msg.sharedPostCaption && (
-                                    <p className="text-[11px] opacity-85 line-clamp-2">
+                                    <p className="text-xs opacity-85 line-clamp-2">
                                       {msg.sharedPostCaption}
                                     </p>
                                   )}
@@ -1979,24 +2066,24 @@ export function MessagesView() {
                                   src={msg.mediaUrl}
                                   alt={msg.text || 'Attachment'}
                                   referrerPolicy="no-referrer"
-                                  className="rounded-2xl max-h-64 object-cover"
+                                  className="rounded-2xl max-h-72 object-cover"
                                 />
                               )}
 
                               {msg.type === 'video' && msg.mediaUrl && (
-                                <video src={msg.mediaUrl} controls className="rounded-2xl max-h-64" />
+                                <video src={msg.mediaUrl} controls className="rounded-2xl max-h-72" />
                               )}
 
                               {msg.type === 'voice' && (
-                                <div className="flex items-center gap-2.5 py-0.5">
+                                <div className="flex items-center gap-3 py-0.5">
                                   {msg.mediaUrl ? (
                                     <audio
                                       controls
                                       src={msg.mediaUrl}
-                                      className="h-8 max-w-[210px]"
+                                      className="h-9 max-w-[225px]"
                                     />
                                   ) : (
-                                    <div className="inline-flex items-center gap-2 text-xs font-medium">
+                                    <div className="inline-flex items-center gap-2 text-sm font-medium">
                                       <Play className="w-4 h-4 fill-current" />
                                       <span className="font-mono-num">
                                         0:
@@ -2012,9 +2099,9 @@ export function MessagesView() {
                                       href={msg.mediaUrl}
                                       download={msg.fileName || 'voice-note.webm'}
                                       aria-label="Download voice message"
-                                      className="p-1.5 rounded-lg bg-black/15 hover:bg-black/25"
+                                      className="p-2 rounded-lg bg-black/15 hover:bg-black/25"
                                     >
-                                      <Download className="w-3.5 h-3.5" />
+                                      <Download className="w-4 h-4" />
                                     </a>
                                   )}
                                 </div>
@@ -2024,7 +2111,7 @@ export function MessagesView() {
                                 <a
                                   href={msg.mediaUrl || '#'}
                                   download={msg.fileName || 'attachment'}
-                                  className="inline-flex items-center gap-2 text-xs underline font-medium"
+                                  className="inline-flex items-center gap-2 text-sm underline font-medium"
                                 >
                                   <FileText className="w-4 h-4 shrink-0" />
                                   <span className="truncate">{msg.fileName || 'Attachment'}</span>
@@ -2032,35 +2119,35 @@ export function MessagesView() {
                               )}
 
                               {msg.text && msg.type !== 'reel_share' && msg.type !== 'file' && (
-                                <p className="text-sm leading-relaxed whitespace-pre-wrap break-words">
+                                <p className="text-[15px] leading-relaxed whitespace-pre-wrap break-words">
                                   {msg.text}
                                 </p>
                               )}
 
-                              <div className="flex items-center justify-end gap-1.5 text-[10px] opacity-75 pt-0.5">
-                                {isPinnedMsg && <Pin className="w-2.5 h-2.5" />}
-                                {isStarred && <Star className="w-2.5 h-2.5 fill-amber-400 text-amber-400" />}
+                              <div className="flex items-center justify-end gap-1.5 text-[11px] opacity-75 pt-0.5">
+                                {isPinnedMsg && <Pin className="w-3 h-3" />}
+                                {isStarred && <Star className="w-3 h-3 fill-amber-400 text-amber-400" />}
                                 {msg.editedAt && <span>{t.messages.editedLabel} ·</span>}
                                 <span>{formatRelativeTime(msg.createdAt, language)}</span>
-                                {mine && isLastMsg && <CheckCheck className="w-3 h-3" />}
+                                {mine && isLastMsg && <CheckCheck className="w-3.5 h-3.5" />}
                               </div>
                             </div>
 
                             {/* Reactions + Action Toolbar */}
-                            <div className="flex flex-wrap items-center gap-1 mt-1 px-1 relative">
+                            <div className="flex flex-wrap items-center gap-1.5 mt-1.5 px-1 relative">
                               {reactionEntries.map(([emoji, users]) => (
                                 <button
                                   key={emoji}
                                   type="button"
                                   title="Click to toggle reaction"
                                   onClick={() => reactToMessage(activeChat.id, msg.id, emoji)}
-                                  className="px-2 py-0.5 rounded-full bg-white/95 dark:bg-slate-800/95 text-[11px] border border-slate-200 dark:border-slate-700 shadow-sm"
+                                  className="min-h-[30px] px-2.5 py-0.5 rounded-full bg-white/95 dark:bg-slate-800/95 text-xs border border-slate-200 dark:border-slate-700 shadow-sm"
                                 >
                                   {emoji} {users.length}
                                 </button>
                               ))}
 
-                              <div className="inline-flex items-center gap-0.5 opacity-85 sm:opacity-0 sm:group-hover:opacity-100 sm:focus-within:opacity-100 transition-opacity">
+                              <div className="inline-flex items-center gap-0.5 opacity-90 sm:opacity-0 sm:group-hover:opacity-100 sm:focus-within:opacity-100 transition-opacity">
                                 <button
                                   type="button"
                                   aria-label="React to message"
@@ -2068,9 +2155,9 @@ export function MessagesView() {
                                   onClick={() =>
                                     setReactMenuMsgId((cur) => (cur === msg.id ? null : msg.id))
                                   }
-                                  className="p-1 rounded-full text-slate-400 hover:text-rose-500 hover:bg-white/80 dark:hover:bg-slate-800"
+                                  className="w-8 h-8 rounded-full flex items-center justify-center text-slate-400 hover:text-rose-500 hover:bg-white/80 dark:hover:bg-slate-800"
                                 >
-                                  <Smile className="w-3.5 h-3.5" />
+                                  <Smile className="w-4 h-4" />
                                 </button>
                                 <button
                                   type="button"
@@ -2083,9 +2170,9 @@ export function MessagesView() {
                                       text: msg.text || msg.fileName || 'Sticker / Media',
                                     });
                                   }}
-                                  className="p-1 rounded-full text-slate-400 hover:text-slate-700 dark:hover:text-white hover:bg-white/80 dark:hover:bg-slate-800"
+                                  className="w-8 h-8 rounded-full flex items-center justify-center text-slate-400 hover:text-slate-700 dark:hover:text-white hover:bg-white/80 dark:hover:bg-slate-800"
                                 >
-                                  <Reply className="w-3.5 h-3.5" />
+                                  <Reply className="w-4 h-4" />
                                 </button>
                                 {msg.text && (
                                   <button
@@ -2093,9 +2180,9 @@ export function MessagesView() {
                                     aria-label={t.messages.copyMessage}
                                     title={t.messages.copyMessage}
                                     onClick={() => handleCopyMessage(msg.text)}
-                                    className="p-1 rounded-full text-slate-400 hover:text-slate-700 dark:hover:text-white hover:bg-white/80 dark:hover:bg-slate-800"
+                                    className="w-8 h-8 rounded-full flex items-center justify-center text-slate-400 hover:text-slate-700 dark:hover:text-white hover:bg-white/80 dark:hover:bg-slate-800"
                                   >
-                                    <Copy className="w-3.5 h-3.5" />
+                                    <Copy className="w-4 h-4" />
                                   </button>
                                 )}
                                 <button
@@ -2107,11 +2194,11 @@ export function MessagesView() {
                                     isStarred ? t.messages.unstarMessage : t.messages.starMessage
                                   }
                                   onClick={() => starMessage(activeChat.id, msg.id)}
-                                  className={`p-1 rounded-full hover:bg-white/80 dark:hover:bg-slate-800 ${
+                                  className={`w-8 h-8 rounded-full flex items-center justify-center hover:bg-white/80 dark:hover:bg-slate-800 ${
                                     isStarred ? 'text-amber-500' : 'text-slate-400 hover:text-amber-500'
                                   }`}
                                 >
-                                  <Star className={`w-3.5 h-3.5 ${isStarred ? 'fill-current' : ''}`} />
+                                  <Star className={`w-4 h-4 ${isStarred ? 'fill-current' : ''}`} />
                                 </button>
                                 <button
                                   type="button"
@@ -2124,11 +2211,11 @@ export function MessagesView() {
                                   onClick={() =>
                                     pinMessage(activeChat.id, isPinnedMsg ? null : msg.id)
                                   }
-                                  className={`p-1 rounded-full hover:bg-white/80 dark:hover:bg-slate-800 ${
+                                  className={`w-8 h-8 rounded-full flex items-center justify-center hover:bg-white/80 dark:hover:bg-slate-800 ${
                                     isPinnedMsg ? 'text-sky-600' : 'text-slate-400 hover:text-sky-600'
                                   }`}
                                 >
-                                  <Pin className="w-3.5 h-3.5" />
+                                  <Pin className="w-4 h-4" />
                                 </button>
                                 <button
                                   type="button"
@@ -2138,9 +2225,9 @@ export function MessagesView() {
                                     setForwardingMsg(msg);
                                     setForwardSearch('');
                                   }}
-                                  className="p-1 rounded-full text-slate-400 hover:text-sky-600 hover:bg-white/80 dark:hover:bg-slate-800"
+                                  className="w-8 h-8 rounded-full flex items-center justify-center text-slate-400 hover:text-sky-600 hover:bg-white/80 dark:hover:bg-slate-800"
                                 >
-                                  <CornerUpRight className="w-3.5 h-3.5" />
+                                  <CornerUpRight className="w-4 h-4" />
                                 </button>
                                 {mine && msg.type === 'text' && (
                                   <button
@@ -2152,9 +2239,9 @@ export function MessagesView() {
                                       setEditingMsg({ id: msg.id, text: msg.text || '' });
                                       setDraftText(msg.text || '');
                                     }}
-                                    className="p-1 rounded-full text-slate-400 hover:text-sky-600 hover:bg-white/80 dark:hover:bg-slate-800"
+                                    className="w-8 h-8 rounded-full flex items-center justify-center text-slate-400 hover:text-sky-600 hover:bg-white/80 dark:hover:bg-slate-800"
                                   >
-                                    <Pencil className="w-3.5 h-3.5" />
+                                    <Pencil className="w-4 h-4" />
                                   </button>
                                 )}
                                 {mine && (
@@ -2163,15 +2250,15 @@ export function MessagesView() {
                                     aria-label={t.messages.deleteMessage}
                                     title={t.messages.deleteMessage}
                                     onClick={() => deleteMessage(activeChat.id, msg.id)}
-                                    className="p-1 rounded-full text-slate-400 hover:text-rose-500 hover:bg-white/80 dark:hover:bg-slate-800"
+                                    className="w-8 h-8 rounded-full flex items-center justify-center text-slate-400 hover:text-rose-500 hover:bg-white/80 dark:hover:bg-slate-800"
                                   >
-                                    <Trash2 className="w-3.5 h-3.5" />
+                                    <Trash2 className="w-4 h-4" />
                                   </button>
                                 )}
                               </div>
 
                               {reactMenuMsgId === msg.id && (
-                                <div className="flex items-center gap-1 p-1 rounded-full bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 shadow-lg z-20">
+                                <div className="flex items-center gap-1 p-1.5 rounded-full bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 shadow-lg z-20">
                                   {QUICK_REACTIONS.map((em) => (
                                     <button
                                       key={em}
@@ -2180,7 +2267,7 @@ export function MessagesView() {
                                         reactToMessage(activeChat.id, msg.id, em);
                                         setReactMenuMsgId(null);
                                       }}
-                                      className="w-7 h-7 rounded-full hover:bg-slate-100 dark:hover:bg-slate-700 text-sm flex items-center justify-center"
+                                      className="w-9 h-9 rounded-full hover:bg-slate-100 dark:hover:bg-slate-700 text-base flex items-center justify-center"
                                     >
                                       {em}
                                     </button>
@@ -2227,21 +2314,21 @@ export function MessagesView() {
                       });
                     }
                   }}
-                  className="absolute bottom-24 right-5 z-20 w-9 h-9 rounded-full bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 shadow-lg flex items-center justify-center text-slate-700 dark:text-slate-200 hover:text-sky-600"
+                  className="absolute bottom-24 right-5 z-20 w-11 h-11 rounded-full bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 shadow-lg flex items-center justify-center text-slate-700 dark:text-slate-200 hover:text-sky-600"
                 >
-                  <ArrowDown className="w-4 h-4" />
+                  <ArrowDown className="w-5 h-5" />
                 </button>
               )}
 
               {/* Quick Emoji Bar */}
               {showQuickEmojiBar && (
-                <div className="relative z-20 px-4 py-2 border-t border-slate-200/70 dark:border-slate-800/70 bg-white/95 dark:bg-slate-900/95 flex items-center gap-1.5 overflow-x-auto no-scrollbar">
+                <div className="relative z-20 px-4 py-2.5 border-t border-slate-200/70 dark:border-slate-800/70 bg-white/95 dark:bg-slate-900/95 flex items-center gap-2 overflow-x-auto no-scrollbar">
                   {QUICK_EMOJIS.map((em) => (
                     <button
                       key={em}
                       type="button"
                       onClick={() => setDraftText((prev) => `${prev}${em}`)}
-                      className="w-9 h-9 rounded-full hover:bg-slate-100 dark:hover:bg-slate-800 text-lg flex items-center justify-center shrink-0"
+                      className="w-11 h-11 rounded-full hover:bg-slate-100 dark:hover:bg-slate-800 text-xl flex items-center justify-center shrink-0"
                     >
                       {em}
                     </button>
@@ -2251,13 +2338,13 @@ export function MessagesView() {
 
               {/* Sticker Drawer */}
               {showStickerDrawer && (
-                <div className="relative z-20 p-3 border-t border-slate-200/70 dark:border-slate-800/70 bg-white/95 dark:bg-slate-900/95 space-y-2.5">
+                <div className="relative z-20 p-3.5 border-t border-slate-200/70 dark:border-slate-800/70 bg-white/95 dark:bg-slate-900/95 space-y-3">
                   <div className="flex items-center justify-between gap-2">
                     <div className="inline-flex gap-1 p-1 rounded-xl bg-slate-200/70 dark:bg-slate-800">
                       <button
                         type="button"
                         onClick={() => setStickerTab('all')}
-                        className={`px-3 py-1 rounded-lg text-xs font-semibold ${
+                        className={`min-h-[36px] px-3.5 py-1 rounded-lg text-xs font-semibold ${
                           stickerTab === 'all'
                             ? 'bg-white dark:bg-slate-900 shadow-sm'
                             : 'text-slate-500'
@@ -2268,7 +2355,7 @@ export function MessagesView() {
                       <button
                         type="button"
                         onClick={() => setStickerTab('favorites')}
-                        className={`px-3 py-1 rounded-lg text-xs font-semibold ${
+                        className={`min-h-[36px] px-3.5 py-1 rounded-lg text-xs font-semibold ${
                           stickerTab === 'favorites'
                             ? 'bg-white dark:bg-slate-900 shadow-sm'
                             : 'text-slate-500'
@@ -2277,8 +2364,8 @@ export function MessagesView() {
                         {t.messages.savedStickers} ({favoriteStickerIds.length})
                       </button>
                     </div>
-                    <label className="min-h-[34px] px-3 rounded-xl bg-sky-600 text-white text-xs font-semibold inline-flex items-center gap-1 cursor-pointer">
-                      <Plus className="w-3.5 h-3.5" />
+                    <label className="min-h-[38px] px-3.5 rounded-xl bg-sky-600 text-white text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer">
+                      <Plus className="w-4 h-4" />
                       <span>{t.messages.createSticker}</span>
                       <input
                         type="file"
@@ -2312,10 +2399,10 @@ export function MessagesView() {
                             type="button"
                             aria-label="Favorite sticker"
                             onClick={() => toggleFavoriteSticker(stk.id)}
-                            className="absolute top-1 right-1 w-5 h-5 rounded-full bg-black/60 text-white flex items-center justify-center opacity-85"
+                            className="absolute top-1 right-1 w-6 h-6 rounded-full bg-black/60 text-white flex items-center justify-center opacity-90"
                           >
                             <Bookmark
-                              className={`w-3 h-3 ${
+                              className={`w-3.5 h-3.5 ${
                                 favoriteStickerIds.includes(stk.id)
                                   ? 'fill-amber-400 text-amber-400'
                                   : ''
@@ -2330,9 +2417,9 @@ export function MessagesView() {
               )}
 
               {/* Composer */}
-              <div className="relative z-20 p-2.5 sm:p-3.5 border-t border-slate-200/70 dark:border-slate-800/70 space-y-2 bg-white/85 dark:bg-slate-900/85 backdrop-blur-xl">
+              <div className="relative z-20 p-3 sm:p-4 border-t border-slate-200/70 dark:border-white/[0.08] space-y-2 bg-white/85 dark:bg-[#070b16]/95 backdrop-blur-2xl">
                 {replyingTo && (
-                  <div className="flex items-center justify-between text-xs text-sky-700 dark:text-sky-300 px-3 py-1.5 rounded-xl bg-sky-500/10">
+                  <div className="flex items-center justify-between text-xs text-sky-700 dark:text-sky-300 px-3.5 py-2 rounded-xl bg-sky-500/10">
                     <span className="truncate">
                       {t.messages.replyingTo}: {replyingTo.text}
                     </span>
@@ -2347,9 +2434,9 @@ export function MessagesView() {
                 )}
 
                 {editingMsg && (
-                  <div className="flex items-center justify-between text-xs text-amber-700 dark:text-amber-300 px-3 py-1.5 rounded-xl bg-amber-500/12">
+                  <div className="flex items-center justify-between text-xs text-amber-700 dark:text-amber-300 px-3.5 py-2 rounded-xl bg-amber-500/12">
                     <span className="truncate inline-flex items-center gap-1.5">
-                      <Pencil className="w-3.5 h-3.5" />
+                      <Pencil className="w-4 h-4" />
                       <span>
                         {t.messages.editMessage}: {editingMsg.text}
                       </span>
@@ -2368,9 +2455,9 @@ export function MessagesView() {
                 )}
 
                 {isRecording && (
-                  <div className="flex items-center justify-between px-3 py-1.5 rounded-xl bg-rose-500/12 text-rose-600 dark:text-rose-400 text-xs font-semibold">
+                  <div className="flex items-center justify-between px-3.5 py-2 rounded-xl bg-rose-500/12 text-rose-600 dark:text-rose-400 text-xs font-semibold">
                     <span className="inline-flex items-center gap-2">
-                      <span className="w-2 h-2 rounded-full bg-rose-600 animate-pulse" />
+                      <span className="w-2.5 h-2.5 rounded-full bg-rose-600 animate-pulse" />
                       <span>Recording voice message...</span>
                     </span>
                     <span className="font-mono-num">
@@ -2394,20 +2481,20 @@ export function MessagesView() {
                 ) : (
                   <form
                     onSubmit={handleSendText}
-                    className="flex items-center gap-0.5 sm:gap-1 p-1 sm:p-1.5 rounded-full bg-white/95 dark:bg-slate-900/95 border border-slate-200/90 dark:border-white/10 shadow-sm w-full min-w-0"
+                    className="flex items-center gap-1 sm:gap-1.5 p-1.5 sm:p-2 rounded-full bg-white/95 dark:bg-[#0e1526]/95 border border-slate-200/90 dark:border-white/[0.08] shadow-sm w-full min-w-0"
                   >
                     {mediaPermission.allowed && (
                       <button
                         type="button"
                         aria-label={isRecording ? t.messages.stopRecording : t.messages.recordVoice}
                         onClick={handleToggleVoiceRecord}
-                        className={`min-h-[36px] min-w-[36px] sm:min-h-[38px] sm:min-w-[38px] shrink-0 rounded-full flex items-center justify-center transition-colors ${
+                        className={`min-h-[44px] min-w-[44px] shrink-0 rounded-full flex items-center justify-center transition-colors ${
                           isRecording
                             ? 'bg-rose-600 text-white'
                             : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
                         }`}
                       >
-                        {isRecording ? <Square className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
+                        {isRecording ? <Square className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
                       </button>
                     )}
 
@@ -2418,13 +2505,13 @@ export function MessagesView() {
                         setShowQuickEmojiBar((s) => !s);
                         setShowStickerDrawer(false);
                       }}
-                      className={`min-h-[36px] min-w-[36px] sm:min-h-[38px] sm:min-w-[38px] shrink-0 rounded-full flex items-center justify-center ${
+                      className={`min-h-[44px] min-w-[44px] shrink-0 rounded-full flex items-center justify-center ${
                         showQuickEmojiBar
                           ? 'bg-sky-600 text-white'
                           : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
                       }`}
                     >
-                      <Smile className="w-4 h-4" />
+                      <Smile className="w-5 h-5" />
                     </button>
 
                     <input
@@ -2433,7 +2520,7 @@ export function MessagesView() {
                       onChange={(e) => handleDraftChange(e.target.value)}
                       placeholder={t.messages.typeMessage}
                       aria-label={t.messages.typeMessage}
-                      className="flex-1 min-w-0 w-full min-h-[36px] sm:min-h-[38px] px-1.5 sm:px-2 bg-transparent text-sm text-slate-900 dark:text-white focus:outline-none"
+                      className="flex-1 min-w-0 w-full min-h-[44px] px-2.5 bg-transparent text-[15px] text-slate-900 dark:text-white focus:outline-none"
                     />
 
                     {mediaPermission.allowed && (
@@ -2445,20 +2532,20 @@ export function MessagesView() {
                             setShowStickerDrawer((s) => !s);
                             setShowQuickEmojiBar(false);
                           }}
-                          className={`min-h-[36px] min-w-[36px] sm:min-h-[38px] sm:min-w-[38px] shrink-0 rounded-full flex items-center justify-center ${
+                          className={`min-h-[44px] min-w-[44px] shrink-0 rounded-full flex items-center justify-center ${
                             showStickerDrawer
                               ? 'bg-sky-600 text-white'
                               : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
                           }`}
                         >
-                          <Sparkles className="w-4 h-4" />
+                          <Sparkles className="w-5 h-5" />
                         </button>
 
                         <label
                           aria-label="Attach image, video, or file"
-                          className="min-h-[36px] min-w-[36px] sm:min-h-[38px] sm:min-w-[38px] shrink-0 rounded-full flex items-center justify-center text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
+                          className="min-h-[44px] min-w-[44px] shrink-0 rounded-full flex items-center justify-center text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
                         >
-                          <Paperclip className="w-4 h-4" />
+                          <Paperclip className="w-5 h-5" />
                           <input
                             type="file"
                             accept="image/*,video/*,*/*"
@@ -2472,9 +2559,9 @@ export function MessagesView() {
                     <button
                       type="submit"
                       aria-label={editingMsg ? 'Save edit' : 'Send message'}
-                      className="min-h-[36px] sm:min-h-[38px] px-3 sm:px-4 shrink-0 rounded-full bg-sky-600 hover:bg-sky-700 text-white flex items-center justify-center gap-1 text-xs font-semibold transition-colors"
+                      className="min-h-[44px] px-4 sm:px-5 shrink-0 rounded-full bg-sky-600 hover:bg-sky-700 text-white flex items-center justify-center gap-1.5 text-sm font-semibold transition-colors"
                     >
-                      {editingMsg ? <Check className="w-3.5 h-3.5" /> : <Send className="w-3.5 h-3.5" />}
+                      {editingMsg ? <Check className="w-4 h-4" /> : <Send className="w-4 h-4" />}
                       <span className="hidden sm:inline">{editingMsg ? 'Save' : 'Send'}</span>
                     </button>
                   </form>
@@ -2484,23 +2571,23 @@ export function MessagesView() {
 
             {/* Right Docked Details Drawer (Side pane on xl, overlay drawer on < xl) */}
             {showChatInfo && (
-              <aside className="absolute inset-0 xl:static xl:w-[360px] shrink-0 z-30 border-l border-slate-200/70 dark:border-slate-800/70 bg-white/95 dark:bg-slate-950/95 backdrop-blur-2xl flex flex-col overflow-hidden">
+              <aside className="absolute inset-0 xl:static xl:w-[360px] shrink-0 z-30 border-l border-slate-200/70 dark:border-white/[0.08] bg-white/95 dark:bg-[#070b16]/98 backdrop-blur-2xl flex flex-col overflow-hidden">
                 <div className="p-4 border-b border-slate-200/70 dark:border-slate-800/70 flex items-center justify-between">
-                  <h3 className="text-sm font-bold text-slate-900 dark:text-white">
+                  <h3 className="text-base font-bold text-slate-900 dark:text-white">
                     {t.messages.chatInfo}
                   </h3>
                   <button
                     type="button"
                     aria-label="Close chat details"
                     onClick={() => setShowChatInfo(false)}
-                    className="w-8 h-8 rounded-full flex items-center justify-center text-slate-500 hover:bg-slate-200/60 dark:hover:bg-slate-800"
+                    className="w-10 h-10 rounded-full flex items-center justify-center text-slate-500 hover:bg-slate-200/60 dark:hover:bg-slate-800"
                   >
-                    <X className="w-4 h-4" />
+                    <X className="w-5 h-5" />
                   </button>
                 </div>
 
                 {/* Drawer Tabs */}
-                <div className="px-3 pt-3 flex flex-wrap items-center gap-1 border-b border-slate-200/70 dark:border-slate-800/70 pb-2.5">
+                <div className="px-3.5 pt-3 flex flex-wrap items-center gap-1.5 border-b border-slate-200/70 dark:border-slate-800/70 pb-3">
                   {(
                     [
                       { id: 'overview', label: 'Overview' },
@@ -2519,7 +2606,7 @@ export function MessagesView() {
                       key={tab.id}
                       type="button"
                       onClick={() => setInfoTab(tab.id)}
-                      className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold whitespace-nowrap shrink-0 ${
+                      className={`min-h-[34px] px-3 rounded-xl text-xs font-semibold whitespace-nowrap shrink-0 ${
                         infoTab === tab.id
                           ? 'bg-sky-600 text-white'
                           : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
@@ -2536,8 +2623,8 @@ export function MessagesView() {
                       {/* Identity summary */}
                       <div className="p-4 rounded-2xl liquid-glass-subtle flex flex-col items-center text-center gap-2">
                         {activeChat.type === 'group' ? (
-                          <div className="w-14 h-14 rounded-full bg-sky-600/15 text-sky-600 flex items-center justify-center">
-                            <Users className="w-6 h-6" />
+                          <div className="w-16 h-16 rounded-full bg-sky-600/15 text-sky-600 flex items-center justify-center">
+                            <Users className="w-7 h-7" />
                           </div>
                         ) : (
                           <Avatar
@@ -2547,7 +2634,7 @@ export function MessagesView() {
                             online={otherUser?.onlineStatus === 'online'}
                           />
                         )}
-                        <p className="text-sm font-bold text-slate-900 dark:text-white">
+                        <p className="text-base font-bold text-slate-900 dark:text-white">
                           {activeDisplayTitle}
                         </p>
                         {otherUser && (
@@ -2557,7 +2644,7 @@ export function MessagesView() {
                           <button
                             type="button"
                             onClick={() => openUserProfile(otherParticipantId)}
-                            className="mt-1 min-h-[34px] px-4 rounded-xl bg-sky-600 text-white text-xs font-semibold"
+                            className="mt-1 min-h-[40px] px-5 rounded-xl bg-sky-600 text-white text-xs font-semibold"
                           >
                             View Profile
                           </button>
@@ -2571,15 +2658,15 @@ export function MessagesView() {
                           onClick={() =>
                             updateChatPreferences(activeChat.id, { pinned: !isPinnedChat })
                           }
-                          className="w-full min-h-[38px] px-3 rounded-xl flex items-center justify-between text-xs font-semibold text-slate-800 dark:text-slate-200 hover:bg-white/60 dark:hover:bg-slate-800"
+                          className="w-full min-h-[44px] px-3.5 rounded-xl flex items-center justify-between text-sm font-semibold text-slate-800 dark:text-slate-200 hover:bg-white/60 dark:hover:bg-slate-800"
                         >
-                          <span className="inline-flex items-center gap-2">
+                          <span className="inline-flex items-center gap-2.5">
                             <Pin className="w-4 h-4 text-sky-600" />
                             <span>
                               {isPinnedChat ? t.messages.unpinChat : t.messages.pinChat}
                             </span>
                           </span>
-                          <span className="text-[11px] text-slate-500">
+                          <span className="text-xs text-slate-500">
                             {isPinnedChat ? 'On' : 'Off'}
                           </span>
                         </button>
@@ -2589,9 +2676,9 @@ export function MessagesView() {
                           onClick={() =>
                             updateChatPreferences(activeChat.id, { muted: !isMutedChat })
                           }
-                          className="w-full min-h-[38px] px-3 rounded-xl flex items-center justify-between text-xs font-semibold text-slate-800 dark:text-slate-200 hover:bg-white/60 dark:hover:bg-slate-800"
+                          className="w-full min-h-[44px] px-3.5 rounded-xl flex items-center justify-between text-sm font-semibold text-slate-800 dark:text-slate-200 hover:bg-white/60 dark:hover:bg-slate-800"
                         >
-                          <span className="inline-flex items-center gap-2">
+                          <span className="inline-flex items-center gap-2.5">
                             {isMutedChat ? (
                               <BellOff className="w-4 h-4 text-amber-500" />
                             ) : (
@@ -2601,7 +2688,7 @@ export function MessagesView() {
                               {isMutedChat ? t.messages.unmuteChat : t.messages.muteChat}
                             </span>
                           </span>
-                          <span className="text-[11px] text-slate-500">
+                          <span className="text-xs text-slate-500">
                             {isMutedChat ? 'Muted' : 'Active'}
                           </span>
                         </button>
@@ -2611,9 +2698,9 @@ export function MessagesView() {
                           onClick={() =>
                             updateChatPreferences(activeChat.id, { archived: !isArchivedChat })
                           }
-                          className="w-full min-h-[38px] px-3 rounded-xl flex items-center justify-between text-xs font-semibold text-slate-800 dark:text-slate-200 hover:bg-white/60 dark:hover:bg-slate-800"
+                          className="w-full min-h-[44px] px-3.5 rounded-xl flex items-center justify-between text-sm font-semibold text-slate-800 dark:text-slate-200 hover:bg-white/60 dark:hover:bg-slate-800"
                         >
-                          <span className="inline-flex items-center gap-2">
+                          <span className="inline-flex items-center gap-2.5">
                             <Archive className="w-4 h-4 text-sky-600" />
                             <span>
                               {isArchivedChat ? t.messages.unarchiveChat : t.messages.archiveChat}
@@ -2647,6 +2734,22 @@ export function MessagesView() {
                           ))}
                         </div>
                       </div>
+
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          setShowChatInfo(false);
+                          await deleteChatFromInbox(activeChat.id);
+                        }}
+                        className="w-full min-h-[42px] px-3.5 rounded-xl bg-rose-500/12 hover:bg-rose-500/20 text-rose-600 dark:text-rose-400 text-xs font-semibold inline-flex items-center justify-center gap-1.5"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                        <span>
+                          {activeChat.type === 'group'
+                            ? t.messages.deleteGroup
+                            : t.messages.deleteChat}
+                        </span>
+                      </button>
 
                       {otherParticipantId && (
                         <button
@@ -3077,9 +3180,9 @@ export function MessagesView() {
                 role="dialog"
                 aria-modal="true"
                 aria-label={t.messages.groupInfo}
-                className="fixed inset-0 md:absolute z-40 bg-slate-50/96 dark:bg-slate-950/98 backdrop-blur-2xl flex flex-col overflow-hidden"
+                className="fixed inset-0 md:absolute z-40 bg-slate-50/96 dark:bg-[#050811]/98 backdrop-blur-2xl flex flex-col overflow-hidden"
               >
-                <div className="px-4 sm:px-6 py-3.5 border-b border-slate-200/70 dark:border-white/10 flex items-center justify-between gap-3 bg-white/80 dark:bg-slate-950/90 backdrop-blur-xl shrink-0">
+                <div className="px-4 sm:px-6 py-3.5 border-b border-slate-200/70 dark:border-white/[0.08] flex items-center justify-between gap-3 bg-white/85 dark:bg-[#070b16]/95 backdrop-blur-xl shrink-0">
                   <div className="flex items-center gap-2.5 min-w-0">
                     <button
                       type="button"
@@ -3594,16 +3697,29 @@ export function MessagesView() {
                       </div>
                     </section>
 
-                    <button
-                      type="button"
-                      onClick={async () => {
-                        await removeGroupMember(activeChat.id, currentUser.uid);
-                        setShowGroupPage(false);
-                      }}
-                      className="w-full min-h-[44px] rounded-2xl bg-rose-500/15 hover:bg-rose-500/25 text-rose-600 dark:text-rose-400 text-xs font-bold transition-colors"
-                    >
-                      {t.messages.leaveGroup}
-                    </button>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          updateChatPreferences(activeChat.id, { muted: !isMutedChat })
+                        }
+                        className="w-full min-h-[44px] rounded-2xl liquid-glass-btn text-slate-800 dark:text-slate-100 text-xs font-bold inline-flex items-center justify-center gap-2 transition-colors"
+                      >
+                        {isMutedChat ? <Bell className="w-4 h-4 text-sky-600" /> : <BellOff className="w-4 h-4 text-amber-500" />}
+                        <span>{isMutedChat ? t.messages.unmuteChat : t.messages.muteChat}</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          await deleteChatFromInbox(activeChat.id);
+                          setShowGroupPage(false);
+                        }}
+                        className="w-full min-h-[44px] rounded-2xl bg-rose-500/15 hover:bg-rose-500/25 text-rose-600 dark:text-rose-400 text-xs font-bold inline-flex items-center justify-center gap-2 transition-colors"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                        <span>{t.messages.deleteGroup}</span>
+                      </button>
+                    </div>
                   </div>
                 </div>
               </div>
@@ -3640,15 +3756,16 @@ export function MessagesView() {
           aria-label={t.messages.forwardMessage}
           className="fixed inset-0 z-50 bg-slate-950/60 backdrop-blur-sm flex items-center justify-center p-4"
         >
-          <div className="liquid-glass rounded-3xl p-5 max-w-sm w-full space-y-3">
+          <div className="liquid-glass rounded-3xl p-5 sm:p-6 max-w-sm w-full space-y-3.5">
             <div className="flex items-center justify-between">
-              <h3 className="text-sm font-bold text-slate-900 dark:text-white">
+              <h3 className="text-base font-bold text-slate-900 dark:text-white">
                 {t.messages.forwardMessage}
               </h3>
               <button
                 type="button"
+                aria-label="Close forward modal"
                 onClick={() => setForwardingMsg(null)}
-                className="p-1 text-slate-500"
+                className="w-9 h-9 rounded-full flex items-center justify-center text-slate-500 hover:bg-slate-200/60 dark:hover:bg-slate-800"
               >
                 <X className="w-4 h-4" />
               </button>
@@ -3658,7 +3775,7 @@ export function MessagesView() {
               value={forwardSearch}
               onChange={(e) => setForwardSearch(e.target.value)}
               placeholder={t.messages.searchChats}
-              className="w-full min-h-[38px] px-3 rounded-xl bg-white/85 dark:bg-slate-900 text-xs"
+              className="w-full min-h-[42px] px-3.5 rounded-xl bg-white/85 dark:bg-slate-900 text-sm"
             />
             <div className="max-h-60 overflow-y-auto divide-y divide-slate-200/60 dark:divide-slate-800/60">
               {chats
@@ -3673,12 +3790,12 @@ export function MessagesView() {
                       await forwardMessage(activeChat.id, forwardingMsg.id, target.id);
                       setForwardingMsg(null);
                     }}
-                    className="w-full py-2.5 px-2 flex items-center justify-between text-left hover:bg-sky-500/10 rounded-xl"
+                    className="w-full min-h-[46px] py-2.5 px-3 flex items-center justify-between text-left hover:bg-sky-500/10 rounded-xl"
                   >
-                    <span className="text-xs font-semibold text-slate-900 dark:text-white truncate">
+                    <span className="text-sm font-semibold text-slate-900 dark:text-white truncate">
                       {target.title}
                     </span>
-                    <span className="px-2.5 py-1 rounded-lg bg-sky-600 text-white text-[11px] font-semibold">
+                    <span className="min-h-[32px] px-3 py-1 rounded-xl bg-sky-600 text-white text-xs font-semibold inline-flex items-center">
                       Send
                     </span>
                   </button>
@@ -3688,66 +3805,192 @@ export function MessagesView() {
         </div>
       )}
 
-      {/* Self Note Composer Modal */}
+      {/* Upgraded Instagram-Style Self Note Composer Modal */}
       {showNoteComposer && (
         <div
           role="dialog"
           aria-modal="true"
-          aria-label="Share a note"
-          className="fixed inset-0 z-50 bg-slate-950/60 backdrop-blur-sm flex items-center justify-center p-4"
+          aria-label={t.messages.newNoteTitle}
+          className="fixed inset-0 z-50 bg-slate-950/75 backdrop-blur-md flex items-center justify-center p-4"
         >
-          <div className="liquid-glass rounded-3xl p-6 max-w-sm w-full space-y-4">
-            <div className="flex items-center justify-between">
-              <h3 className="text-base font-bold text-slate-900 dark:text-white">
-                {t.messages.yourNote}
-              </h3>
+          <form
+            onSubmit={async (e) => {
+              e.preventDefault();
+              if (!noteInput.trim()) return;
+              await publishNote(noteInput, noteAudience);
+              setShowNoteComposer(false);
+            }}
+            className="liquid-glass rounded-3xl p-5 sm:p-7 max-w-md w-full space-y-5 shadow-2xl"
+          >
+            {/* Top Bar: Close · Title · Share CTA */}
+            <div className="flex items-center justify-between gap-2">
               <button
                 type="button"
+                aria-label="Close note composer"
                 onClick={() => setShowNoteComposer(false)}
-                className="p-1 text-slate-500"
+                className="min-h-[44px] min-w-[44px] rounded-2xl liquid-glass-btn flex items-center justify-center text-slate-700 dark:text-slate-200"
               >
                 <X className="w-5 h-5" />
               </button>
+              <h3 className="text-lg font-display font-bold text-slate-900 dark:text-white">
+                {t.messages.newNoteTitle}
+              </h3>
+              <button
+                type="submit"
+                disabled={!noteInput.trim()}
+                className={`min-h-[44px] px-5 rounded-full text-white text-sm font-semibold shadow-md disabled:opacity-45 transition-all ${
+                  noteAudience === 'close_friends'
+                    ? 'bg-gradient-to-r from-emerald-500 to-green-600 hover:from-emerald-600 hover:to-green-700 shadow-emerald-600/25'
+                    : 'bg-gradient-to-r from-sky-500 to-blue-600 hover:from-sky-600 hover:to-blue-700 shadow-sky-600/25'
+                }`}
+              >
+                {t.messages.shareNote}
+              </button>
             </div>
-            <form
-              onSubmit={async (e) => {
-                e.preventDefault();
-                await publishNote(noteInput);
-                setShowNoteComposer(false);
-              }}
-              className="space-y-3"
-            >
-              <input
-                type="text"
-                required
-                maxLength={80}
-                value={noteInput}
-                onChange={(e) => setNoteInput(e.target.value)}
-                placeholder={t.messages.addNotePlaceholder}
-                className="w-full min-h-[44px] px-3.5 rounded-xl bg-white/85 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-sm"
-              />
-              <div className="flex gap-2">
-                <button
-                  type="submit"
-                  className="flex-1 min-h-[42px] rounded-xl bg-sky-600 text-white text-sm font-semibold"
+
+            {/* Live Instagram Floating Bubble + Avatar Preview */}
+            <div className="pt-2 pb-1 flex flex-col items-center">
+              <div className="relative z-10 -mb-3 w-full max-w-[300px] flex flex-col items-center">
+                <div
+                  className={`w-full rounded-3xl px-5 py-4 shadow-xl space-y-2 focus-within:ring-2 border ${
+                    noteAudience === 'close_friends'
+                      ? 'bg-emerald-50 dark:bg-emerald-950/90 border-emerald-400/70 focus-within:ring-emerald-500'
+                      : 'bg-white dark:bg-[#1a2642] border-slate-200/90 dark:border-white/25 focus-within:ring-sky-500'
+                  }`}
                 >
-                  Share Note (24h)
-                </button>
-                {myNote && (
-                  <button
-                    type="button"
-                    onClick={async () => {
-                      await deleteMyNote();
-                      setShowNoteComposer(false);
-                    }}
-                    className="min-h-[42px] px-4 rounded-xl bg-rose-500/15 text-rose-600 text-xs font-semibold"
-                  >
-                    Clear
-                  </button>
-                )}
+                  <textarea
+                    rows={2}
+                    autoFocus
+                    required
+                    maxLength={80}
+                    value={noteInput}
+                    onChange={(e) => setNoteInput(e.target.value)}
+                    placeholder={t.messages.addNotePlaceholder}
+                    aria-label={t.messages.yourNote}
+                    className="w-full bg-transparent text-center text-base font-medium text-slate-900 dark:text-white placeholder:text-slate-400 dark:placeholder:text-slate-500 resize-none focus:outline-none leading-snug"
+                  />
+                  <div className="flex items-center justify-between text-[11px] font-mono-num text-slate-400">
+                    <span>24h</span>
+                    <span className={noteInput.length >= 75 ? 'text-amber-500 font-semibold' : ''}>
+                      {noteInput.length}/80
+                    </span>
+                  </div>
+                </div>
+                <div className="flex flex-col items-start self-start ml-12 -mt-0.5 space-y-1" aria-hidden="true">
+                  <span className="w-4 h-4 rounded-full bg-white dark:bg-[#1a2642] border border-slate-200/90 dark:border-white/25 shadow-sm" />
+                  <span className="w-2.5 h-2.5 rounded-full bg-white dark:bg-[#1a2642] border border-slate-200/90 dark:border-white/25 ml-2 shadow-sm" />
+                </div>
               </div>
-            </form>
-          </div>
+
+              <Avatar src={currentUser.photoUrl} name={currentUser.displayName} size="xl" online />
+              <p className="mt-2 text-sm font-semibold text-slate-900 dark:text-white">
+                {currentUser.displayName}
+              </p>
+              <p className="text-xs text-slate-500 dark:text-slate-400 text-center mt-0.5">
+                {noteAudience === 'close_friends'
+                  ? t.messages.noteCloseFriendsHint
+                  : t.messages.noteHint24h}
+              </p>
+            </div>
+
+            {/* Audience Selector: Followers vs Close Friends */}
+            <div className="space-y-2 pt-1 border-t border-slate-200/70 dark:border-white/10">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-xs font-semibold text-slate-600 dark:text-slate-300">
+                  {t.create.visibilityLabel}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setCloseFriendsModalOpen(true)}
+                  className="text-xs font-semibold text-emerald-600 dark:text-emerald-400 hover:underline inline-flex items-center gap-1"
+                >
+                  <Star className="w-3.5 h-3.5 fill-current" />
+                  <span>
+                    {t.messages.manageCloseFriends} ({(userPrivate.closeFriendUids || []).length})
+                  </span>
+                </button>
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() => setNoteAudience('followers')}
+                  className={`min-h-[42px] px-3 rounded-2xl text-xs font-semibold inline-flex items-center justify-center gap-1.5 transition-colors ${
+                    noteAudience === 'followers'
+                      ? 'bg-sky-600 text-white shadow-sm'
+                      : 'liquid-glass-btn text-slate-700 dark:text-slate-200'
+                  }`}
+                >
+                  <Users className="w-4 h-4" />
+                  <span>{t.messages.followersAudience}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setNoteAudience('close_friends')}
+                  className={`min-h-[42px] px-3 rounded-2xl text-xs font-semibold inline-flex items-center justify-center gap-1.5 transition-colors ${
+                    noteAudience === 'close_friends'
+                      ? 'bg-emerald-600 text-white shadow-sm'
+                      : 'liquid-glass-btn text-slate-700 dark:text-slate-200'
+                  }`}
+                >
+                  <Star className={`w-4 h-4 ${noteAudience === 'close_friends' ? 'fill-current' : ''}`} />
+                  <span>{t.messages.closeFriends}</span>
+                </button>
+              </div>
+            </div>
+
+            {/* Quick Emoji & Thought Prompts */}
+            <div className="space-y-2.5 pt-1 border-t border-slate-200/70 dark:border-white/10">
+              <div className="flex items-center justify-between gap-1.5 overflow-x-auto no-scrollbar py-1">
+                {NOTE_EMOJI_BAR.map((em) => (
+                  <button
+                    key={em}
+                    type="button"
+                    onClick={() =>
+                      setNoteInput((prev) => `${prev}${prev && !prev.endsWith(' ') ? ' ' : ''}${em}`.slice(0, 80))
+                    }
+                    className="w-10 h-10 rounded-2xl liquid-glass-btn text-lg flex items-center justify-center shrink-0"
+                  >
+                    {em}
+                  </button>
+                ))}
+              </div>
+
+              <div className="space-y-1.5">
+                <p className="text-xs font-semibold text-slate-500 dark:text-slate-400">
+                  {t.messages.quickVibes}
+                </p>
+                <div className="flex flex-wrap gap-2">
+                  {NOTE_QUICK_THOUGHTS.map((prompt) => {
+                    const label = `${prompt.emoji} ${language === 'bn' ? prompt.bn : prompt.en}`;
+                    return (
+                      <button
+                        key={prompt.en}
+                        type="button"
+                        onClick={() => setNoteInput(label.slice(0, 80))}
+                        className="min-h-[38px] px-3.5 rounded-2xl liquid-glass-btn text-xs font-semibold text-slate-800 dark:text-slate-100"
+                      >
+                        {label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+
+            {myNote && (
+              <button
+                type="button"
+                onClick={async () => {
+                  await deleteMyNote();
+                  setShowNoteComposer(false);
+                }}
+                className="w-full min-h-[44px] px-4 rounded-2xl bg-rose-500/12 hover:bg-rose-500/20 text-rose-600 dark:text-rose-400 text-sm font-semibold inline-flex items-center justify-center gap-2 transition-colors"
+              >
+                <Trash2 className="w-4 h-4" />
+                <span>{t.messages.deleteNote}</span>
+              </button>
+            )}
+          </form>
         </div>
       )}
 
@@ -3757,48 +4000,65 @@ export function MessagesView() {
           role="dialog"
           aria-modal="true"
           aria-label={`Note by ${activeNote.authorDisplayName}`}
-          className="fixed inset-0 z-50 bg-slate-950/60 backdrop-blur-sm flex items-center justify-center p-4"
+          className="fixed inset-0 z-50 bg-slate-950/75 backdrop-blur-md flex items-center justify-center p-4"
         >
-          <div className="liquid-glass rounded-3xl p-6 max-w-sm w-full space-y-4">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2.5">
-                <Avatar src={activeNote.authorAvatar} name={activeNote.authorDisplayName} size="sm" />
-                <div>
-                  <p className="text-sm font-bold text-slate-900 dark:text-white">
+          <div className="liquid-glass rounded-3xl p-5 sm:p-7 max-w-md w-full space-y-5 shadow-2xl">
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex items-center gap-3 min-w-0">
+                <Avatar src={activeNote.authorAvatar} name={activeNote.authorDisplayName} size="md" online />
+                <div className="min-w-0">
+                  <p className="text-base font-bold text-slate-900 dark:text-white truncate">
                     {activeNote.authorDisplayName}
                   </p>
-                  <p className="text-[11px] text-slate-500">@{activeNote.authorUsername}</p>
+                  <p className="text-xs text-slate-500 dark:text-slate-400 truncate flex items-center gap-1.5">
+                    <span>@{activeNote.authorUsername}</span>
+                    {activeNote.audience === 'close_friends' && (
+                      <span className="inline-flex items-center gap-1 text-emerald-600 dark:text-emerald-400 font-semibold">
+                        · <Star className="w-3 h-3 fill-current" /> {t.messages.closeFriends}
+                      </span>
+                    )}
+                  </p>
                 </div>
               </div>
               <button
                 type="button"
+                aria-label="Close note"
                 onClick={() => setActiveNote(null)}
-                className="p-1 text-slate-500"
+                className="min-h-[44px] min-w-[44px] rounded-2xl liquid-glass-btn flex items-center justify-center text-slate-600 dark:text-slate-200"
               >
                 <X className="w-5 h-5" />
               </button>
             </div>
 
-            <div className="p-4 rounded-2xl liquid-glass-subtle text-center space-y-2">
-              <p className="text-base font-medium text-slate-900 dark:text-white">
-                {activeNote.text}
-              </p>
-              <button
-                type="button"
-                onClick={() => toggleLikeNote(activeNote.id)}
-                className={`px-3 py-1 rounded-full text-xs font-semibold inline-flex items-center gap-1 ${
-                  activeNote.likedByUids.includes(currentUser.uid)
-                    ? 'bg-rose-500/15 text-rose-600'
-                    : 'bg-white/70 dark:bg-slate-800 text-slate-600'
-                }`}
-              >
-                <Heart
-                  className={`w-3.5 h-3.5 ${
-                    activeNote.likedByUids.includes(currentUser.uid) ? 'fill-current' : ''
-                  }`}
-                />
-                <span>{activeNote.likedByUids.length}</span>
-              </button>
+            <div className="py-2 flex flex-col items-center">
+              <div className="relative z-10 -mb-3 w-full max-w-[300px] flex flex-col items-center">
+                <div className="w-full p-5 rounded-3xl bg-white dark:bg-[#1a2642] border border-slate-200/90 dark:border-white/25 shadow-xl text-center space-y-3">
+                  <p className="text-lg font-medium text-slate-900 dark:text-white leading-snug break-words">
+                    {activeNote.text}
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => toggleLikeNote(activeNote.id)}
+                    className={`min-h-[40px] px-4 rounded-full text-sm font-semibold inline-flex items-center gap-1.5 transition-colors ${
+                      activeNote.likedByUids.includes(currentUser.uid)
+                        ? 'bg-rose-500/15 text-rose-600 dark:text-rose-400'
+                        : 'liquid-glass-btn text-slate-700 dark:text-slate-200'
+                    }`}
+                  >
+                    <Heart
+                      className={`w-4 h-4 ${
+                        activeNote.likedByUids.includes(currentUser.uid) ? 'fill-current' : ''
+                      }`}
+                    />
+                    <span className="font-mono-num">{activeNote.likedByUids.length}</span>
+                  </button>
+                </div>
+                <div className="flex flex-col items-start self-start ml-12 -mt-0.5 space-y-1" aria-hidden="true">
+                  <span className="w-4 h-4 rounded-full bg-white dark:bg-[#1a2642] border border-slate-200/90 dark:border-white/25 shadow-sm" />
+                  <span className="w-2.5 h-2.5 rounded-full bg-white dark:bg-[#1a2642] border border-slate-200/90 dark:border-white/25 ml-2 shadow-sm" />
+                </div>
+              </div>
+              <Avatar src={activeNote.authorAvatar} name={activeNote.authorDisplayName} size="xl" online />
             </div>
 
             {activeNote.authorUid !== currentUser.uid && (
@@ -3827,11 +4087,12 @@ export function MessagesView() {
                   value={noteReplyText}
                   onChange={(e) => setNoteReplyText(e.target.value)}
                   placeholder="Reply to note..."
-                  className="flex-1 min-h-[40px] px-3 rounded-xl bg-white/85 dark:bg-slate-900 text-sm"
+                  aria-label="Reply to note"
+                  className="flex-1 min-h-[48px] px-4 rounded-2xl bg-white/85 dark:bg-slate-900 border border-slate-200 dark:border-white/10 text-[15px] text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-sky-500"
                 />
                 <button
                   type="submit"
-                  className="min-h-[40px] px-4 rounded-xl bg-sky-600 text-white text-xs font-semibold"
+                  className="min-h-[48px] px-5 rounded-2xl bg-sky-600 hover:bg-sky-700 text-white text-sm font-semibold transition-colors"
                 >
                   Send
                 </button>

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import {
   ArrowLeft,
   AtSign,
+  Calendar,
   Camera,
   CheckCircle2,
   Eye,
@@ -22,7 +23,9 @@ import { ApiError, useSocialVerse } from '../context/SocialVerseContext';
 import type { NicknameFontStyle, SavedLoginEntry } from '../types/social';
 import {
   NICKNAME_FONT_CLASSES,
+  formatCalendarDate,
   isDisposableEmail,
+  isValidDateOfBirth,
   isValidUsername,
   normalizeUsername,
   validateSignupEmail,
@@ -36,6 +39,7 @@ type AuthViewMode =
   | 'signup_email'
   | 'signup_otp'
   | 'signup_nickname'
+  | 'signup_dob'
   | 'signup_username'
   | 'signup_photo'
   | 'forgot_email'
@@ -54,8 +58,9 @@ const SIGNUP_MODE_TO_STEP: Partial<Record<AuthViewMode, number>> = {
   signup_email: 1,
   signup_otp: 2,
   signup_nickname: 3,
-  signup_username: 4,
-  signup_photo: 5,
+  signup_dob: 4,
+  signup_username: 5,
+  signup_photo: 6,
 };
 
 function SignupProgressHeader({
@@ -88,22 +93,22 @@ function SignupProgressHeader({
         )}
 
         <span className="text-[11px] font-semibold tracking-wider uppercase text-sky-600 dark:text-sky-400 font-mono-num">
-          {language === 'bn' ? `ধাপ ${step} / ৫` : `Step ${step} of 5`}
+          {language === 'bn' ? `ধাপ ${step} / ৬` : `Step ${step} of 6`}
         </span>
 
         <div className="w-[38px]" />
       </div>
 
-      {/* 5-segment progress track */}
+      {/* 6-segment progress track */}
       <div
         role="progressbar"
         aria-valuemin={1}
-        aria-valuemax={5}
+        aria-valuemax={6}
         aria-valuenow={step}
-        aria-label={`Step ${step} of 5`}
-        className="grid grid-cols-5 gap-1.5"
+        aria-label={`Step ${step} of 6`}
+        className="grid grid-cols-6 gap-1.5"
       >
-        {[1, 2, 3, 4, 5].map((idx) => {
+        {[1, 2, 3, 4, 5, 6].map((idx) => {
           const completed = idx < step;
           const active = idx === step;
           return (
@@ -257,6 +262,7 @@ export function AuthPanel({
   const [showSignupPassword, setShowSignupPassword] = useState(false);
   const [nickname, setNickname] = useState('');
   const [nicknameFont, setNicknameFont] = useState<NicknameFontStyle>('classic');
+  const [dateOfBirth, setDateOfBirth] = useState('');
   const [username, setUsername] = useState('');
   const [usernameStatus, setUsernameStatus] = useState<'idle' | 'checking' | 'available' | 'taken' | 'invalid'>('idle');
   const [photoUrl, setPhotoUrl] = useState('');
@@ -479,12 +485,42 @@ export function AuthPanel({
       setError(language === 'bn' ? 'পাসওয়ার্ড কমপক্ষে ৬ অক্ষরের হতে হবে।' : 'Password must be at least 6 characters.');
       return;
     }
+    setMode('signup_dob');
+  };
+
+  const handleDobStep = (e: React.FormEvent) => {
+    e.preventDefault();
+    setError(null);
+    const dobCheck = isValidDateOfBirth(dateOfBirth);
+    if (!dobCheck.valid) {
+      if (dobCheck.reason === 'too_young') {
+        setError(t.auth.dobTooYoung);
+      } else if (dobCheck.reason === 'future') {
+        setError(t.auth.dobFutureError);
+      } else {
+        setError(t.auth.dobInvalidFormat);
+      }
+      return;
+    }
+    setDateOfBirth(dobCheck.normalized);
     setMode('signup_username');
   };
 
   const handleCompleteSignup = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
+    const dobCheck = isValidDateOfBirth(dateOfBirth);
+    if (!dobCheck.valid) {
+      setError(
+        dobCheck.reason === 'too_young'
+          ? t.auth.dobTooYoung
+          : dobCheck.reason === 'future'
+          ? t.auth.dobFutureError
+          : t.auth.dobInvalidFormat
+      );
+      setMode('signup_dob');
+      return;
+    }
     const clean = normalizeUsername(username);
     if (!isValidUsername(clean)) {
       setUsernameStatus('invalid');
@@ -516,6 +552,7 @@ export function AuthPanel({
         displayName: nickname.trim(),
         nicknameFont,
         username: clean,
+        dateOfBirth: dobCheck.normalized,
         photoUrl: '',
         saveLogin,
       });
@@ -1223,11 +1260,84 @@ export function AuthPanel({
         </form>
       )}
 
-      {/* SIGN UP STEP 4/5: LIVE UNIQUE USERNAME CHECK */}
+      {/* SIGN UP STEP 4/6: PERMANENT DATE OF BIRTH (ONCE ONLY) */}
+      {mode === 'signup_dob' && (
+        <form onSubmit={handleDobStep} className="space-y-4">
+          <SignupProgressHeader
+            step={4}
+            language={language}
+            title={t.auth.dobStepTitle}
+            subtitle={t.auth.dobStepSubtitle}
+            onBack={() => {
+              setError(null);
+              setMode('signup_nickname');
+            }}
+          />
+
+          <div className="p-4 rounded-2xl liquid-glass-subtle space-y-3">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl bg-sky-500/12 text-sky-600 dark:text-sky-400 flex items-center justify-center shrink-0">
+                <Calendar className="w-5 h-5" />
+              </div>
+              <div>
+                <label
+                  htmlFor="signup-dob"
+                  className="block text-xs font-semibold text-slate-900 dark:text-white"
+                >
+                  {t.auth.dobLabel}
+                </label>
+                <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                  {dateOfBirth
+                    ? formatCalendarDate(dateOfBirth, language)
+                    : language === 'bn'
+                    ? 'দিন / মাস / বছর নির্বাচন করুন'
+                    : 'YYYY-MM-DD'}
+                </p>
+              </div>
+            </div>
+
+            <input
+              id="signup-dob"
+              type="date"
+              required
+              min="1900-01-01"
+              max={new Date().toISOString().slice(0, 10)}
+              value={dateOfBirth}
+              onChange={(e) => {
+                setDateOfBirth(e.target.value);
+                setError(null);
+              }}
+              aria-label={t.auth.dobLabel}
+              className="w-full min-h-[48px] px-3.5 rounded-xl bg-white/90 dark:bg-slate-900/80 border border-slate-200 dark:border-slate-700 text-sm text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-sky-500"
+            />
+          </div>
+
+          <div className="p-3.5 rounded-2xl bg-amber-500/10 border border-amber-500/30 flex items-start gap-2.5 text-xs text-amber-800 dark:text-amber-200">
+            <Lock className="w-4 h-4 shrink-0 mt-0.5 text-amber-600 dark:text-amber-400" />
+            <span className="leading-relaxed font-medium">{t.auth.dobOneTimeWarning}</span>
+          </div>
+
+          {error && (
+            <div role="alert" className="p-3 rounded-2xl bg-rose-500/10 border border-rose-500/30 text-xs font-medium text-rose-700 dark:text-rose-300">
+              {error}
+            </div>
+          )}
+
+          <button
+            type="submit"
+            disabled={!dateOfBirth}
+            className="w-full min-h-[48px] rounded-2xl bg-gradient-to-r from-sky-600 to-blue-600 hover:from-sky-700 hover:to-blue-700 text-white text-sm font-semibold shadow-md shadow-sky-600/20 transition-all disabled:opacity-50"
+          >
+            {language === 'bn' ? 'পরবর্তী ধাপে যান' : 'Continue'}
+          </button>
+        </form>
+      )}
+
+      {/* SIGN UP STEP 5/6: LIVE UNIQUE USERNAME CHECK */}
       {mode === 'signup_username' && (
         <form onSubmit={handleCompleteSignup} className="space-y-4">
           <SignupProgressHeader
-            step={4}
+            step={5}
             language={language}
             title={t.auth.usernameStepTitle}
             subtitle={
@@ -1237,17 +1347,30 @@ export function AuthPanel({
             }
             onBack={() => {
               setError(null);
-              setMode('signup_nickname');
+              setMode('signup_dob');
             }}
           />
 
-          <div className="p-3 rounded-2xl liquid-glass-subtle flex items-center justify-between gap-2">
-            <span className="text-[11px] text-slate-500 dark:text-slate-400">
-              {language === 'bn' ? 'নিকনেম' : 'Nickname'}
-            </span>
-            <span className={`text-sm text-slate-900 dark:text-white ${NICKNAME_FONT_CLASSES[nicknameFont]}`}>
-              {nickname.trim()}
-            </span>
+          <div className="p-3 rounded-2xl liquid-glass-subtle flex items-center justify-between gap-2 flex-wrap">
+            <div className="min-w-0">
+              <span className="text-[10px] uppercase tracking-wider text-slate-400 block">
+                {language === 'bn' ? 'নিকনেম' : 'Nickname'}
+              </span>
+              <span className={`text-sm text-slate-900 dark:text-white ${NICKNAME_FONT_CLASSES[nicknameFont]}`}>
+                {nickname.trim()}
+              </span>
+            </div>
+            {dateOfBirth && (
+              <div className="text-right">
+                <span className="text-[10px] uppercase tracking-wider text-slate-400 block">
+                  {t.auth.dobLabel}
+                </span>
+                <span className="text-xs font-semibold text-slate-700 dark:text-slate-200 inline-flex items-center gap-1">
+                  <Lock className="w-3 h-3 text-amber-500" />
+                  {formatCalendarDate(dateOfBirth, language)}
+                </span>
+              </div>
+            )}
           </div>
 
           <div className="space-y-2">
@@ -1397,11 +1520,11 @@ export function AuthPanel({
         </form>
       )}
 
-      {/* SIGN UP STEP 5/5: PROFILE PHOTO OR SKIP */}
+      {/* SIGN UP STEP 6/6: PROFILE PHOTO OR SKIP */}
       {mode === 'signup_photo' && (
         <div className="space-y-5">
           <SignupProgressHeader
-            step={5}
+            step={6}
             language={language}
             title={t.auth.photoStepTitle}
             subtitle={
@@ -1631,7 +1754,7 @@ export function ProfilePhotoSetupModal() {
     >
       <div className="liquid-glass rounded-3xl p-6 sm:p-7 max-w-md w-full space-y-5 shadow-2xl">
         <SignupProgressHeader
-          step={5}
+          step={6}
           language={language}
           title={t.auth.photoStepTitle}
           subtitle={

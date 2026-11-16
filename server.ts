@@ -35,6 +35,7 @@ import type {
 } from './src/types/social';
 import {
   BROADCAST_MIN_FOLLOWERS,
+  DEFAULT_NOTIFICATION_PREFS,
   MAX_BIO_LENGTH,
   MAX_GROUP_MEMBERS,
   canAddGroupMembers,
@@ -53,12 +54,15 @@ import {
   isGroupOwner,
   isValidBio,
   isValidCommentText,
+  isValidDateOfBirth,
   isValidDisplayName,
   isValidEmailFormat,
   isValidHighlightTitle,
   isValidPostCaption,
   isValidUsername,
   normalizeUsername,
+  requiresFollowApproval,
+  shouldNotifyUser,
   validateSignupEmail,
 } from './src/utils/validation';
 
@@ -470,6 +474,7 @@ function buildPublicProfileFields(userPublic: UserPublic): Record<string, unknow
     pronouns: userPublic.pronouns || '',
     website: userPublic.website || '',
     noteText: userPublic.noteText || '',
+    ...(userPublic.dateOfBirth ? { dateOfBirth: userPublic.dateOfBirth } : {}),
     photoUrl: safePhotoUrl,
     coverUrl: safeCoverUrl,
     interests: userPublic.interests || [],
@@ -877,6 +882,7 @@ function buildStateForUser(viewerUid: string | null) {
           displayName: 'SocialVerse User',
           username: 'socialverse_user',
           bio: '',
+          dateOfBirth: undefined,
           photoUrl: '',
           coverUrl: '',
           onlineStatus: 'offline' as const,
@@ -906,16 +912,31 @@ function buildStateForUser(viewerUid: string | null) {
       savedByMe: savedSet.has(p.id),
     }));
 
-  const activeStories = store.stories.filter((s) => {
-    const exp = Date.parse(s.expiresAt);
-    if (Number.isNaN(exp) || exp <= nowMs) return false;
-    const author = store.usersPublic[s.authorId];
-    if (!author || author.isDeactivated) return false;
-    if (s.authorId === viewerUid) return true;
-    if (author.isPrivate && !viewerFollowing.includes(s.authorId)) return false;
-    if (s.privacy !== 'everyone' && !viewerFollowing.includes(s.authorId)) return false;
-    return true;
-  });
+  const activeStories = store.stories
+    .filter((s) => {
+      const exp = Date.parse(s.expiresAt);
+      if (Number.isNaN(exp) || exp <= nowMs) return false;
+      const author = store.usersPublic[s.authorId];
+      if (!author || author.isDeactivated) return false;
+      if (s.authorId === viewerUid) return true;
+      if (!viewerUid) return false;
+      if (s.privacy === 'close_friends') {
+        return Boolean(store.usersPrivate[s.authorId]?.closeFriendUids?.includes(viewerUid));
+      }
+      if (author.isPrivate && !viewerFollowing.includes(s.authorId)) return false;
+      if (s.privacy !== 'everyone' && !viewerFollowing.includes(s.authorId)) return false;
+      return true;
+    })
+    .map((s) => ({
+      ...s,
+      viewerInCloseFriends:
+        s.privacy === 'close_friends' &&
+        Boolean(
+          viewerUid &&
+            (s.authorId === viewerUid ||
+              store.usersPrivate[s.authorId]?.closeFriendUids?.includes(viewerUid))
+        ),
+    }));
 
   const visibleHighlights = (store.storyHighlights || []).filter((h) => {
     const author = store.usersPublic[h.ownerUid];
@@ -925,24 +946,55 @@ function buildStateForUser(viewerUid: string | null) {
     return true;
   });
 
-  const activeNotes = store.notes.filter((n) => Date.parse(n.expiresAt) > nowMs);
+  const activeNotes = store.notes
+    .filter((n) => {
+      if (Date.parse(n.expiresAt) <= nowMs) return false;
+      const author = store.usersPublic[n.authorUid];
+      if (!author || author.isDeactivated) return false;
+      if (n.authorUid === viewerUid) return true;
+      if (!viewerUid) return false;
+      if (n.audience === 'close_friends') {
+        return Boolean(store.usersPrivate[n.authorUid]?.closeFriendUids?.includes(viewerUid));
+      }
+      if (author.isPrivate && !viewerFollowing.includes(n.authorUid)) return false;
+      return true;
+    })
+    .map((n) => ({
+      ...n,
+      viewerInCloseFriends:
+        n.audience === 'close_friends' &&
+        Boolean(
+          viewerUid &&
+            (n.authorUid === viewerUid ||
+              store.usersPrivate[n.authorUid]?.closeFriendUids?.includes(viewerUid))
+        ),
+    }));
 
   const userChats = viewerUid
-    ? store.chats.filter((c) => c.participantIds.includes(viewerUid))
+    ? store.chats.filter(
+        (c) => c.participantIds.includes(viewerUid) && !(c.deletedByUids || []).includes(viewerUid)
+      )
     : [];
 
   const messagesByChat: Record<string, ChatMessage[]> = {};
   userChats.forEach((c) => {
     const rawMsgs = store.messagesByChat[c.id] || [];
+    const clearedBeforeMs =
+      viewerUid && c.clearedBeforeByUid?.[viewerUid]
+        ? Date.parse(c.clearedBeforeByUid[viewerUid])
+        : 0;
     const maxAgeMs =
       c.disappearingMode === '24h'
         ? 24 * 3_600_000
         : c.disappearingMode === '7d'
         ? 7 * 24 * 3_600_000
         : null;
-    messagesByChat[c.id] = maxAgeMs
-      ? rawMsgs.filter((m) => nowMs - Date.parse(m.createdAt) <= maxAgeMs)
-      : rawMsgs;
+    messagesByChat[c.id] = rawMsgs.filter((m) => {
+      const createdMs = Date.parse(m.createdAt);
+      if (clearedBeforeMs && !Number.isNaN(createdMs) && createdMs <= clearedBeforeMs) return false;
+      if (maxAgeMs && !Number.isNaN(createdMs) && nowMs - createdMs > maxAgeMs) return false;
+      return true;
+    });
   });
 
   const userRequests = viewerUid
@@ -955,12 +1007,20 @@ function buildStateForUser(viewerUid: string | null) {
 
   const favoriteStickerIds = viewerUid ? store.favoriteStickersByUser[viewerUid] || [] : [];
 
+  const visiblePostIds = new Set(visiblePosts.map((p) => p.id));
+  const filteredCommentsByPost: Record<string, PostComment[]> = {};
+  for (const [postId, list] of Object.entries(store.commentsByPost)) {
+    if (visiblePostIds.has(postId)) {
+      filteredCommentsByPost[postId] = list;
+    }
+  }
+
   return {
     currentUser: viewerUid ? store.usersPublic[viewerUid] || null : null,
     userPrivate: viewerUid ? store.usersPrivate[viewerUid] || null : null,
     creators: activeCreators,
     posts: visiblePosts,
-    commentsByPost: store.commentsByPost,
+    commentsByPost: filteredCommentsByPost,
     stories: activeStories,
     storyHighlights: visibleHighlights,
     chats: userChats,
@@ -1004,6 +1064,39 @@ function broadcastGlobalSync() {
       }
     }
   }
+}
+
+function emitNotification(params: {
+  recipientUid: string;
+  actorUid: string;
+  type: AppNotification['type'];
+  summary: string;
+  targetId?: string;
+  isMutedChat?: boolean;
+}) {
+  const { recipientUid, actorUid, type, summary, targetId, isMutedChat = false } = params;
+  if (!recipientUid || recipientUid === actorUid) return;
+  const actor = store.usersPublic[actorUid];
+  if (!actor) return;
+  const recipientPriv = store.usersPrivate[recipientUid];
+  if (!shouldNotifyUser(recipientPriv?.notificationPrefs, type, isMutedChat)) return;
+  const notif: AppNotification = {
+    id: `n_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+    recipientUid,
+    actorUid,
+    actorUsername: actor.username,
+    actorAvatar: actor.photoUrl,
+    type,
+    summary,
+    targetId,
+    read: false,
+    createdAt: new Date().toISOString(),
+  };
+  store.notifications.unshift(notif);
+  if (store.notifications.length > 500) {
+    store.notifications.length = 500;
+  }
+  sendWsToUser(recipientUid, { type: 'notification:new', notification: notif });
 }
 
 async function startServer() {
@@ -1220,6 +1313,7 @@ async function startServer() {
         displayName,
         nicknameFont = 'classic',
         username,
+        dateOfBirth,
         photoUrl = '',
         language = 'en',
       } = req.body as {
@@ -1229,6 +1323,7 @@ async function startServer() {
         displayName?: string;
         nicknameFont?: NicknameFontStyle;
         username?: string;
+        dateOfBirth?: string;
         photoUrl?: string;
         language?: 'en' | 'bn';
       };
@@ -1279,6 +1374,24 @@ async function startServer() {
       const cleanUsername = normalizeUsername(username || '');
       if (!isValidUsername(cleanUsername)) {
         res.status(400).json({ error: 'Username must be 3–24 lowercase letters, numbers, or underscores.' });
+        return;
+      }
+
+      const dobCheck = isValidDateOfBirth(dateOfBirth || '');
+      if (!dobCheck.valid) {
+        const dobErrorMsg =
+          dobCheck.reason === 'too_young'
+            ? language === 'bn'
+              ? 'অ্যাকাউন্ট খুলতে আপনার বয়স কমপক্ষে ১৩ বছর হতে হবে।'
+              : 'You must be at least 13 years old to create an account.'
+            : dobCheck.reason === 'future'
+            ? language === 'bn'
+              ? 'জন্মতারিখ ভবিষ্যতের তারিখ হতে পারবে না।'
+              : 'Date of birth cannot be in the future.'
+            : language === 'bn'
+            ? 'অনুগ্রহ করে সঠিক জন্মতারিখ নির্বাচন করুন।'
+            : 'Please select a valid date of birth (YYYY-MM-DD).';
+        res.status(400).json({ error: dobErrorMsg });
         return;
       }
 
@@ -1393,6 +1506,7 @@ async function startServer() {
         pronouns: '',
         website: '',
         noteText: '',
+        dateOfBirth: dobCheck.normalized,
         photoUrl: photoUrl || '',
         coverUrl: '',
         interests: [],
@@ -1422,18 +1536,10 @@ async function startServer() {
         whoCanMessage: 'everyone',
         whoCanViewStories: 'everyone',
         whoCanFollow: 'everyone',
-        notificationPrefs: {
-          follows: true,
-          friendRequests: true,
-          likes: true,
-          comments: true,
-          stories: true,
-          messages: true,
-          mentions: true,
-          announcements: true,
-        },
+        notificationPrefs: { ...DEFAULT_NOTIFICATION_PREFS },
         blockedUserIds: [],
         mutedStoryUserIds: [],
+        closeFriendUids: [],
         updatedAt: nowIso,
       };
 
@@ -1629,6 +1735,8 @@ async function startServer() {
               pronouns: (remotePub && typeof remotePub.pronouns === 'string' && remotePub.pronouns) || '',
               website: (remotePub && typeof remotePub.website === 'string' && remotePub.website) || '',
               noteText: (remotePub && typeof remotePub.noteText === 'string' && remotePub.noteText) || '',
+              dateOfBirth:
+                remotePub && typeof remotePub.dateOfBirth === 'string' ? remotePub.dateOfBirth : undefined,
               photoUrl: (remotePub && typeof remotePub.photoUrl === 'string' && remotePub.photoUrl) || '',
               coverUrl: (remotePub && typeof remotePub.coverUrl === 'string' && remotePub.coverUrl) || '',
               interests:
@@ -1672,22 +1780,18 @@ async function startServer() {
               whoCanViewStories:
                 (remotePriv?.whoCanViewStories as UserPrivate['whoCanViewStories']) || 'everyone',
               whoCanFollow: (remotePriv?.whoCanFollow as UserPrivate['whoCanFollow']) || 'everyone',
-              notificationPrefs:
-                (remotePriv?.notificationPrefs as UserPrivate['notificationPrefs']) || {
-                  follows: true,
-                  friendRequests: true,
-                  likes: true,
-                  comments: true,
-                  stories: true,
-                  messages: true,
-                  mentions: true,
-                  announcements: true,
-                },
+              notificationPrefs: {
+                ...DEFAULT_NOTIFICATION_PREFS,
+                ...((remotePriv?.notificationPrefs as Partial<UserPrivate['notificationPrefs']>) || {}),
+              },
               blockedUserIds: Array.isArray(remotePriv?.blockedUserIds)
                 ? (remotePriv.blockedUserIds as string[])
                 : [],
               mutedStoryUserIds: Array.isArray(remotePriv?.mutedStoryUserIds)
                 ? (remotePriv.mutedStoryUserIds as string[])
+                : [],
+              closeFriendUids: Array.isArray(remotePriv?.closeFriendUids)
+                ? (remotePriv.closeFriendUids as string[])
                 : [],
               updatedAt: nowIso,
             };
@@ -2060,6 +2164,27 @@ async function startServer() {
       acct.username = nextUsername;
     }
 
+    let nextDateOfBirth = user.dateOfBirth;
+    if (updates.dateOfBirth !== undefined) {
+      const incomingDob = typeof updates.dateOfBirth === 'string' ? updates.dateOfBirth.trim() : '';
+      if (user.dateOfBirth) {
+        if (incomingDob !== user.dateOfBirth) {
+          res.status(403).json({
+            error: 'Date of birth can only be set once and cannot be changed.',
+            code: 'DOB_IMMUTABLE',
+          });
+          return;
+        }
+      } else if (incomingDob) {
+        const dobCheck = isValidDateOfBirth(incomingDob);
+        if (!dobCheck.valid) {
+          res.status(400).json({ error: 'Please provide a valid date of birth (minimum age 13).' });
+          return;
+        }
+        nextDateOfBirth = dobCheck.normalized;
+      }
+    }
+
     const updated: UserPublic = {
       ...user,
       displayName: nextDisplayName,
@@ -2068,6 +2193,7 @@ async function startServer() {
       bio: updates.bio !== undefined ? updates.bio : user.bio,
       pronouns: updates.pronouns !== undefined ? updates.pronouns.slice(0, 32) : user.pronouns,
       website: updates.website !== undefined ? updates.website.slice(0, 200) : user.website,
+      dateOfBirth: nextDateOfBirth,
       photoUrl: updates.photoUrl !== undefined ? updates.photoUrl : user.photoUrl,
       coverUrl: updates.coverUrl !== undefined ? updates.coverUrl : user.coverUrl,
       interests: updates.interests !== undefined ? updates.interests.slice(0, 15) : user.interests,
@@ -2143,15 +2269,35 @@ async function startServer() {
       res.status(404).json({ error: 'Private settings not found.' });
       return;
     }
+    const body = (req.body || {}) as Partial<UserPrivate>;
+    const mergedNotifPrefs = body.notificationPrefs
+      ? {
+          ...DEFAULT_NOTIFICATION_PREFS,
+          ...(current.notificationPrefs || {}),
+          ...body.notificationPrefs,
+        }
+      : {
+          ...DEFAULT_NOTIFICATION_PREFS,
+          ...(current.notificationPrefs || {}),
+        };
+    const nextCloseFriends = Array.isArray(body.closeFriendUids)
+      ? Array.from(new Set(body.closeFriendUids.filter((id) => typeof id === 'string' && id !== uid)))
+      : current.closeFriendUids || [];
+
     const next: UserPrivate = {
       ...current,
-      ...req.body,
+      ...body,
+      notificationPrefs: mergedNotifPrefs,
+      closeFriendUids: nextCloseFriends,
       uid,
       email: current.email,
       updatedAt: new Date().toISOString(),
     };
     store.usersPrivate[uid] = next;
     persistStore();
+    if (Array.isArray(body.closeFriendUids)) {
+      broadcastGlobalSync();
+    }
     if (acct?.firebaseRefreshToken) {
       refreshFirebaseIdToken(acct.firebaseRefreshToken)
         .then((refreshed) => {
@@ -2225,7 +2371,7 @@ async function startServer() {
       return;
     }
 
-    if (target.isPrivate) {
+    if (requiresFollowApproval(target, store.usersPrivate[targetUid])) {
       const existingReq = store.friendRequests.find(
         (r) => r.fromUid === actorUid && r.toUid === targetUid && r.status === 'pending'
       );
@@ -2252,21 +2398,17 @@ async function startServer() {
         createdAt: new Date().toISOString(),
       };
       store.friendRequests.unshift(reqItem);
-      store.notifications.unshift({
-        id: `n_${Date.now()}`,
+      emitNotification({
         recipientUid: targetUid,
         actorUid,
-        actorUsername: actor.username,
-        actorAvatar: actor.photoUrl,
         type: 'friend_request',
         summary: 'requested to follow you.',
-        read: false,
-        createdAt: new Date().toISOString(),
       });
       persistStore();
       broadcastGlobalSync();
       res.json({
         status: 'requested',
+        request: reqItem,
         followingIds: store.followingByUser[actorUid] || [],
         targetFollowersCount: target.followersCount,
       });
@@ -2278,16 +2420,11 @@ async function startServer() {
     actor.followingCount = store.followingByUser[actorUid].length;
     target.followersCount = store.followersByUser[targetUid].length;
 
-    store.notifications.unshift({
-      id: `n_${Date.now()}`,
+    emitNotification({
       recipientUid: targetUid,
       actorUid,
-      actorUsername: actor.username,
-      actorAvatar: actor.photoUrl,
       type: 'follow',
       summary: 'started following you.',
-      read: false,
-      createdAt: new Date().toISOString(),
     });
     persistStore();
     broadcastGlobalSync();
@@ -2318,6 +2455,12 @@ async function startServer() {
       }
       if (store.usersPublic[uid]) {
         store.usersPublic[uid].followersCount = store.followersByUser[uid].length;
+        emitNotification({
+          recipientUid: found.fromUid,
+          actorUid: uid,
+          type: 'follow',
+          summary: 'accepted your follow request.',
+        });
       }
     }
     persistStore();
@@ -2481,6 +2624,15 @@ async function startServer() {
     const liked = list.includes(postId);
     store.likedPostIdsByUser[uid] = liked ? list.filter((id) => id !== postId) : [...list, postId];
     post.likesCount = Math.max(0, post.likesCount + (liked ? -1 : 1));
+    if (!liked) {
+      emitNotification({
+        recipientUid: post.authorId,
+        actorUid: uid,
+        type: 'like',
+        summary: `liked your ${post.mediaType === 'reel' ? 'reel' : 'post'}.`,
+        targetId: post.id,
+      });
+    }
     persistStore();
     broadcastGlobalSync();
     res.json({ liked: !liked, likesCount: post.likesCount });
@@ -2549,6 +2701,13 @@ async function startServer() {
     };
     store.commentsByPost[postId] = [...(store.commentsByPost[postId] || []), comment];
     post.commentsCount = store.commentsByPost[postId].length;
+    emitNotification({
+      recipientUid: post.authorId,
+      actorUid: uid,
+      type: parentCommentId ? 'reply' : 'comment',
+      summary: `commented: "${finalText.slice(0, 60)}"`,
+      targetId: post.id,
+    });
     persistStore();
     broadcastGlobalSync();
     res.json({ comment });
@@ -2609,7 +2768,15 @@ async function startServer() {
         res.status(403).json({ error: 'This account is private.' });
         return;
       }
-      story.reactions.push({ username: author.username, emoji: String(req.body.emoji || '❤️') });
+      const emoji = String(req.body.emoji || '❤️');
+      story.reactions.push({ username: author.username, emoji });
+      emitNotification({
+        recipientUid: story.authorId,
+        actorUid: uid,
+        type: 'story_reaction',
+        summary: `reacted ${emoji} to your story.`,
+        targetId: story.id,
+      });
       persistStore();
       broadcastGlobalSync();
     }
@@ -2733,6 +2900,8 @@ async function startServer() {
       return;
     }
     const text = String(req.body.text || '').trim().slice(0, 80);
+    const audience: 'followers' | 'close_friends' =
+      req.body.audience === 'close_friends' ? 'close_friends' : 'followers';
     if (!text) {
       res.status(400).json({ error: 'Note cannot be empty.' });
       return;
@@ -2745,6 +2914,7 @@ async function startServer() {
       authorDisplayName: author.displayName,
       authorAvatar: author.photoUrl,
       text,
+      audience,
       likedByUids: [],
       createdAt: new Date().toISOString(),
       expiresAt: new Date(Date.now() + 24 * 3_600_000).toISOString(),
@@ -2984,8 +3154,26 @@ async function startServer() {
     chat.lastMessageAt = msg.createdAt;
     // Mark unread for other participants, clear for sender
     chat.unreadByUids = chat.participantIds.filter((id) => id !== uid);
-    // Unarchive chat automatically if receiving/sending new message
+    // Unarchive and restore deleted DM visibility for new messages while preserving clearedBeforeByUid timestamps
     chat.archivedByUids = [];
+    chat.deletedByUids = [];
+
+    const notifSummary =
+      chat.type === 'group'
+        ? `${chat.title}: ${chat.lastMessageText}`
+        : chat.lastMessageText;
+    chat.participantIds.forEach((recipientUid) => {
+      if (recipientUid === uid) return;
+      emitNotification({
+        recipientUid,
+        actorUid: uid,
+        type: chat.type === 'group' ? 'group_message' : 'message',
+        summary: notifSummary,
+        targetId: chat.id,
+        isMutedChat: Boolean(chat.mutedByUids?.includes(recipientUid)),
+      });
+    });
+
     persistStore();
     broadcastGlobalSync();
     res.json({ message: msg });
@@ -3161,6 +3349,55 @@ async function startServer() {
     persistStore();
     broadcastGlobalSync();
     res.json({ chat });
+  });
+
+  app.delete('/api/chats/:chatId', requireAuth, (req: AuthenticatedRequest, res) => {
+    const uid = req.uid!;
+    const chatId = String(req.params.chatId);
+    const chatIdx = store.chats.findIndex(
+      (c) => c.id === chatId && c.participantIds.includes(uid)
+    );
+    if (chatIdx === -1) {
+      res.status(404).json({ error: 'Chat not found.' });
+      return;
+    }
+    const chat = store.chats[chatIdx];
+
+    if (chat.type === 'direct') {
+      chat.deletedByUids = Array.from(new Set([...(chat.deletedByUids || []), uid]));
+      chat.clearedBeforeByUid = {
+        ...(chat.clearedBeforeByUid || {}),
+        [uid]: new Date().toISOString(),
+      };
+      chat.pinnedByUids = (chat.pinnedByUids || []).filter((id) => id !== uid);
+      chat.archivedByUids = (chat.archivedByUids || []).filter((id) => id !== uid);
+      chat.unreadByUids = (chat.unreadByUids || []).filter((id) => id !== uid);
+      if (chat.participantIds.every((id) => chat.deletedByUids!.includes(id))) {
+        store.chats.splice(chatIdx, 1);
+        delete store.messagesByChat[chatId];
+      }
+    } else {
+      // Group chat removal from Inbox: leave & remove group for this user, or disband if last member
+      chat.participantIds = chat.participantIds.filter((id) => id !== uid);
+      chat.adminUids = (chat.adminUids || []).filter((id) => id !== uid);
+      chat.pinnedByUids = (chat.pinnedByUids || []).filter((id) => id !== uid);
+      chat.archivedByUids = (chat.archivedByUids || []).filter((id) => id !== uid);
+      chat.unreadByUids = (chat.unreadByUids || []).filter((id) => id !== uid);
+      if (chat.participantIds.length === 0) {
+        store.chats.splice(chatIdx, 1);
+        delete store.messagesByChat[chatId];
+      } else if (chat.ownerUid === uid) {
+        const nextOwner = chat.adminUids[0] || chat.participantIds[0];
+        if (nextOwner) {
+          chat.ownerUid = nextOwner;
+          chat.adminUids = Array.from(new Set([...(chat.adminUids || []), nextOwner]));
+        }
+      }
+    }
+
+    persistStore();
+    broadcastGlobalSync();
+    res.json({ ok: true, deletedChatId: chatId });
   });
 
   app.delete('/api/chats/:chatId/messages/:msgId', requireAuth, (req: AuthenticatedRequest, res) => {

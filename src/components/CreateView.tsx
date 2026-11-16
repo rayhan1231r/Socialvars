@@ -1,11 +1,11 @@
 import { useState } from 'react';
-import { Clapperboard, ImagePlus, Sparkles, Type as TypeIcon, Upload, X } from 'lucide-react';
+import { Clapperboard, ImagePlus, Sparkles, Star, Type as TypeIcon, Upload, Users, X } from 'lucide-react';
 import { useSocialVerse } from '../context/SocialVerseContext';
 import type { MediaType, PostVisibility } from '../types/social';
 import { extractHashtags } from '../utils/validation';
 
 export function CreateView() {
-  const { createPost, createStory, setSubscreen, uploadImageDataUrl, t } = useSocialVerse();
+  const { createPost, createStory, setSubscreen, uploadImageDataUrl, userPrivate, setCloseFriendsModalOpen, t } = useSocialVerse();
 
   const [mode, setMode] = useState<'post' | 'story' | 'reel'>('post');
   const [mediaType, setMediaType] = useState<MediaType>('image');
@@ -273,22 +273,52 @@ export function CreateView() {
             </div>
           )}
 
-          <div className="flex items-center justify-between gap-4 pt-2">
+          <div className="space-y-3 pt-2">
             {mode === 'story' ? (
-              <select
-                aria-label="Story audience"
-                value={storyPrivacy}
-                onChange={(e) =>
-                  setStoryPrivacy(e.target.value as 'everyone' | 'followers' | 'close_friends')
-                }
-                className="min-h-[42px] px-3 rounded-xl bg-white/80 dark:bg-slate-900/70 border border-slate-200 dark:border-slate-700 text-xs font-medium text-slate-900 dark:text-white"
-              >
-                <option value="everyone">{t.create.publicOpt}</option>
-                <option value="followers">{t.create.followersOpt}</option>
-                <option value="close_friends">Close friends</option>
-              </select>
+              <div className="space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs font-medium text-slate-700 dark:text-slate-300">
+                    {t.create.visibilityLabel}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setCloseFriendsModalOpen(true)}
+                    className="text-xs font-semibold text-emerald-600 dark:text-emerald-400 hover:underline inline-flex items-center gap-1"
+                  >
+                    <Star className="w-3.5 h-3.5 fill-current" />
+                    <span>
+                      {t.messages.manageCloseFriends} ({(userPrivate.closeFriendUids || []).length})
+                    </span>
+                  </button>
+                </div>
+                <div className="grid grid-cols-3 gap-1.5">
+                  {(
+                    [
+                      { id: 'everyone', label: t.create.publicOpt, icon: Users },
+                      { id: 'followers', label: t.create.followersOpt, icon: Users },
+                      { id: 'close_friends', label: t.create.closeFriendsOpt, icon: Star },
+                    ] as const
+                  ).map(({ id, label, icon: Icon }) => (
+                    <button
+                      key={id}
+                      type="button"
+                      onClick={() => setStoryPrivacy(id)}
+                      className={`min-h-[40px] px-2 rounded-xl text-xs font-semibold inline-flex items-center justify-center gap-1 transition-colors ${
+                        storyPrivacy === id
+                          ? id === 'close_friends'
+                            ? 'bg-emerald-600 text-white shadow-sm'
+                            : 'bg-sky-600 text-white shadow-sm'
+                          : 'liquid-glass-btn text-slate-700 dark:text-slate-200'
+                      }`}
+                    >
+                      <Icon className={`w-3.5 h-3.5 shrink-0 ${id === 'close_friends' && storyPrivacy === id ? 'fill-current' : ''}`} />
+                      <span className="truncate">{label}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
             ) : (
-              <div className="flex items-center gap-2">
+              <div className="flex items-center justify-between gap-2">
                 <label htmlFor="post-visibility" className="text-xs font-medium text-slate-700 dark:text-slate-300">
                   {t.create.visibilityLabel}
                 </label>
@@ -308,9 +338,9 @@ export function CreateView() {
             <button
               type="submit"
               disabled={submitting || (!caption.trim() && selectedMedia.length === 0 && !customUrl.trim())}
-              className="min-h-[44px] px-6 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-sm font-semibold transition-colors disabled:opacity-50"
+              className="w-full min-h-[44px] px-6 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-sm font-semibold transition-colors disabled:opacity-50"
             >
-              {submitting ? '...' : t.create.publish}
+              {submitting ? t.create.uploadingProgress : t.create.publish}
             </button>
           </div>
         </form>

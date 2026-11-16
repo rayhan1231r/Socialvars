@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { ChevronLeft, ChevronRight, Eye, Image as ImageIcon, Plus, Send, Trash2, VolumeX, X } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Eye, Image as ImageIcon, Plus, Send, Star, Trash2, Users, VolumeX, X } from 'lucide-react';
 import { useSocialVerse } from '../context/SocialVerseContext';
 import { formatRelativeTime, isHomeStoryVisibleToUser } from '../utils/validation';
 import { Avatar } from './Avatar';
@@ -7,6 +7,7 @@ import { Avatar } from './Avatar';
 export function StoriesBar() {
   const {
     currentUser,
+    userPrivate,
     isAuthenticated,
     creators,
     followingIds,
@@ -18,6 +19,7 @@ export function StoriesBar() {
     setSubscreen,
     subscreen,
     openUserProfile,
+    setCloseFriendsModalOpen,
     reactToStory,
     replyToStory,
     deleteStory,
@@ -40,9 +42,20 @@ export function StoriesBar() {
       s,
       creators.find((c) => c.uid === s.authorId),
       isAuthenticated ? currentUser.uid : null,
-      followingIds
+      followingIds,
+      isAuthenticated && s.authorId === currentUser.uid
+        ? userPrivate.closeFriendUids
+        : undefined
     )
   );
+
+  const myStories = visibleStories.filter((s) => isAuthenticated && s.authorId === currentUser.uid);
+  const firstMyStoryIndex = visibleStories.findIndex(
+    (s) => isAuthenticated && s.authorId === currentUser.uid
+  );
+  const otherStories = visibleStories
+    .map((story, idx) => ({ story, idx }))
+    .filter(({ story }) => !isAuthenticated || story.authorId !== currentUser.uid);
 
   const activeStory =
     activeStoryIndex !== null && visibleStories[activeStoryIndex]
@@ -72,50 +85,120 @@ export function StoriesBar() {
     setStoryMediaUrl('');
   };
 
+  const myHasCloseFriendStory = myStories.some((s) => s.privacy === 'close_friends');
+
   return (
     <>
-      <section aria-label={t.feed.stories} className="liquid-glass rounded-2xl p-3.5">
-        <div className="flex items-center gap-3 overflow-x-auto no-scrollbar">
+      <section aria-label={t.feed.stories} className="liquid-glass rounded-3xl px-4 pt-3.5 pb-3 space-y-2.5">
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex items-baseline gap-2 min-w-0">
+            <h2 className="text-xs font-bold uppercase tracking-wider text-slate-700 dark:text-slate-200">
+              {t.feed.stories}
+            </h2>
+            {visibleStories.length > 0 && (
+              <span className="text-[11px] font-mono-num text-slate-500 dark:text-slate-400">
+                {visibleStories.length}
+              </span>
+            )}
+          </div>
           <button
             type="button"
             onClick={() => setSubscreen('story_creator')}
-            className="flex flex-col items-center gap-1.5 shrink-0 min-w-[68px] group"
+            className="min-h-[32px] px-2.5 rounded-xl liquid-glass-btn text-[11px] font-semibold text-sky-700 dark:text-sky-300 inline-flex items-center gap-1"
           >
-            <div className="relative p-0.5 rounded-full border border-dashed border-sky-500">
-              <Avatar
-                src={isAuthenticated ? currentUser.photoUrl : ''}
-                name={isAuthenticated ? currentUser.displayName : 'You'}
-                size="lg"
-              />
-              <span className="absolute -bottom-0.5 -right-0.5 w-6 h-6 rounded-full bg-sky-600 text-white flex items-center justify-center shadow ring-2 ring-white dark:ring-slate-900">
-                <Plus className="w-3.5 h-3.5" />
-              </span>
+            <Plus className="w-3.5 h-3.5" />
+            <span>{t.create.newStory}</span>
+          </button>
+        </div>
+
+        <div className="flex items-start gap-4 overflow-x-auto no-scrollbar py-1">
+          {/* Self Story Tile */}
+          <div className="flex flex-col items-center gap-1.5 shrink-0 w-[72px]">
+            <div className="relative">
+              <button
+                type="button"
+                aria-label={myStories.length > 0 ? t.feed.addStory : t.create.newStory}
+                onClick={() => {
+                  if (myStories.length > 0 && firstMyStoryIndex >= 0) {
+                    setShowViewers(false);
+                    setActiveStoryIndex(firstMyStoryIndex);
+                  } else {
+                    setSubscreen('story_creator');
+                  }
+                }}
+                className="group active:scale-95 transition-transform duration-150 block"
+              >
+                <div
+                  className={`p-[2.5px] rounded-full ${
+                    myStories.length > 0
+                      ? myHasCloseFriendStory
+                        ? 'bg-gradient-to-tr from-emerald-400 via-green-500 to-teal-500 shadow-sm'
+                        : 'bg-gradient-to-tr from-sky-400 via-blue-500 to-indigo-500 shadow-sm'
+                      : 'bg-slate-300/75 dark:bg-slate-700/80'
+                  }`}
+                >
+                  <div className="p-[2px] rounded-full bg-white dark:bg-slate-950">
+                    <Avatar
+                      src={isAuthenticated ? currentUser.photoUrl : ''}
+                      name={isAuthenticated ? currentUser.displayName : 'You'}
+                      size="lg"
+                    />
+                  </div>
+                </div>
+              </button>
+              <button
+                type="button"
+                aria-label={t.create.newStory}
+                onClick={() => setSubscreen('story_creator')}
+                className="absolute -bottom-0.5 -right-0.5 w-6 h-6 rounded-full bg-gradient-to-tr from-sky-600 to-blue-500 text-white flex items-center justify-center shadow-md ring-2 ring-white dark:ring-slate-950 hover:scale-105 transition-transform"
+              >
+                <Plus className="w-3.5 h-3.5 stroke-[2.75]" />
+              </button>
             </div>
-            <span className="text-xs font-medium text-slate-700 dark:text-slate-300 truncate max-w-[72px]">
+            <span className="text-[11px] font-semibold text-slate-700 dark:text-slate-200 truncate w-full text-center leading-tight">
               {t.feed.addStory}
             </span>
-          </button>
+          </div>
 
-          {visibleStories.map((story, idx) => (
-            <button
-              key={story.id}
-              type="button"
-              onClick={() => {
-                setShowViewers(false);
-                setActiveStoryIndex(idx);
-              }}
-              className="flex flex-col items-center gap-1.5 shrink-0 min-w-[68px]"
-            >
-              <div className="p-0.5 rounded-full bg-gradient-to-tr from-sky-500 to-cyan-400">
-                <div className="p-0.5 rounded-full bg-white dark:bg-slate-900">
-                  <Avatar src={story.authorAvatar} name={story.authorDisplayName} size="lg" />
+          {otherStories.map(({ story, idx }) => {
+            const isCloseFriends = story.privacy === 'close_friends';
+            return (
+              <button
+                key={story.id}
+                type="button"
+                onClick={() => {
+                  setShowViewers(false);
+                  setActiveStoryIndex(idx);
+                }}
+                className="flex flex-col items-center gap-1.5 shrink-0 w-[72px] group active:scale-95 transition-transform duration-150"
+              >
+                <div className="relative">
+                  <div
+                    className={`p-[2.5px] rounded-full shadow-sm group-hover:scale-[1.03] transition-transform duration-150 ${
+                      isCloseFriends
+                        ? 'bg-gradient-to-tr from-emerald-400 via-green-500 to-teal-500'
+                        : 'bg-gradient-to-tr from-amber-400 via-rose-500 to-fuchsia-600'
+                    }`}
+                  >
+                    <div className="p-[2px] rounded-full bg-white dark:bg-slate-950">
+                      <Avatar src={story.authorAvatar} name={story.authorDisplayName} size="lg" />
+                    </div>
+                  </div>
+                  {isCloseFriends && (
+                    <span
+                      aria-label={t.messages.closeFriends}
+                      className="absolute -bottom-0.5 -right-0.5 w-5 h-5 rounded-full bg-emerald-600 text-white flex items-center justify-center shadow ring-2 ring-white dark:ring-slate-950"
+                    >
+                      <Star className="w-2.5 h-2.5 fill-current" />
+                    </span>
+                  )}
                 </div>
-              </div>
-              <span className="text-xs font-medium text-slate-700 dark:text-slate-300 truncate max-w-[72px]">
-                {story.authorDisplayName.split(' ')[0]}
-              </span>
-            </button>
-          ))}
+                <span className="text-[11px] font-medium text-slate-800 dark:text-slate-200 truncate w-full text-center leading-tight">
+                  {story.authorDisplayName.split(' ')[0]}
+                </span>
+              </button>
+            );
+          })}
         </div>
       </section>
 
@@ -184,8 +267,17 @@ export function StoriesBar() {
                     <p className="text-sm font-semibold text-white truncate">
                       {activeStory.authorDisplayName}
                     </p>
-                    <p className="text-xs text-white/75">
-                      {formatRelativeTime(activeStory.createdAt, language)} · {activeStory.privacy}
+                    <p className="text-xs text-white/80 flex items-center gap-1.5">
+                      <span>{formatRelativeTime(activeStory.createdAt, language)}</span>
+                      <span>·</span>
+                      {activeStory.privacy === 'close_friends' ? (
+                        <span className="inline-flex items-center gap-1 text-emerald-300 font-semibold">
+                          <Star className="w-3 h-3 fill-current" />
+                          {t.messages.closeFriends}
+                        </span>
+                      ) : (
+                        <span>{activeStory.privacy}</span>
+                      )}
                     </p>
                   </div>
                 </button>
@@ -399,25 +491,47 @@ export function StoriesBar() {
                 />
               </div>
 
-              <div>
-                <label
-                  htmlFor="story-privacy"
-                  className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1"
-                >
-                  Story Privacy
-                </label>
-                <select
-                  id="story-privacy"
-                  value={storyPrivacy}
-                  onChange={(e) =>
-                    setStoryPrivacy(e.target.value as 'everyone' | 'followers' | 'close_friends')
-                  }
-                  className="w-full min-h-[44px] px-3.5 rounded-xl bg-white/80 dark:bg-slate-900/70 border border-slate-200 dark:border-slate-700 text-sm text-slate-900 dark:text-white"
-                >
-                  <option value="everyone">Everyone</option>
-                  <option value="followers">Followers only</option>
-                  <option value="close_friends">Close friends</option>
-                </select>
+              <div className="space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs font-medium text-slate-700 dark:text-slate-300">
+                    {t.create.visibilityLabel}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setCloseFriendsModalOpen(true)}
+                    className="text-xs font-semibold text-emerald-600 dark:text-emerald-400 hover:underline inline-flex items-center gap-1"
+                  >
+                    <Star className="w-3.5 h-3.5 fill-current" />
+                    <span>
+                      {t.messages.manageCloseFriends} ({(userPrivate.closeFriendUids || []).length})
+                    </span>
+                  </button>
+                </div>
+                <div className="grid grid-cols-3 gap-1.5">
+                  {(
+                    [
+                      { id: 'everyone', label: t.create.publicOpt, icon: Users },
+                      { id: 'followers', label: t.create.followersOpt, icon: Users },
+                      { id: 'close_friends', label: t.create.closeFriendsOpt, icon: Star },
+                    ] as const
+                  ).map(({ id, label, icon: Icon }) => (
+                    <button
+                      key={id}
+                      type="button"
+                      onClick={() => setStoryPrivacy(id)}
+                      className={`min-h-[40px] px-2 rounded-xl text-xs font-semibold inline-flex items-center justify-center gap-1 transition-colors ${
+                        storyPrivacy === id
+                          ? id === 'close_friends'
+                            ? 'bg-emerald-600 text-white shadow-sm'
+                            : 'bg-sky-600 text-white shadow-sm'
+                          : 'liquid-glass-btn text-slate-700 dark:text-slate-200'
+                      }`}
+                    >
+                      <Icon className={`w-3.5 h-3.5 shrink-0 ${id === 'close_friends' && storyPrivacy === id ? 'fill-current' : ''}`} />
+                      <span className="truncate">{label}</span>
+                    </button>
+                  ))}
+                </div>
               </div>
 
               <button
